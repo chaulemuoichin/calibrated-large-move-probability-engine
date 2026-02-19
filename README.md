@@ -16,9 +16,9 @@ A production-ready quantitative research framework for forecasting **two-sided l
 
 This engine estimates:
 
-$$
-P\left(\left|R_H\right| \ge \text{threshold}\right)
-$$
+```text
+P(|R_H| >= threshold)
+```
 
 for multiple horizons `H` (default `[5, 10, 20]` trading days).
 
@@ -116,19 +116,19 @@ Price Data -> Daily Returns -> GARCH/GJR-GARCH -> sigma_1d, omega, alpha, beta, 
 ### 1) Threshold Modes
 
 **Vol-scaled (legacy)**:
-$$
-\text{thr}_H = k \cdot \sigma_{1d} \cdot \sqrt{H}
-$$
+```text
+thr_H = k * sigma_1d * sqrt(H)
+```
 
 **Fixed percentage (recommended)**:
-$$
-\text{thr}_H = \text{fixed\_threshold\_pct} \quad \text{(e.g., 0.05 for 5%)}
-$$
+```text
+thr_H = fixed_threshold_pct    (e.g., 0.05 for 5%)
+```
 
 **Anchored vol**:
-$$
-\text{thr}_H = k \cdot \sigma_{\text{unconditional}} \cdot \sqrt{H}
-$$
+```text
+thr_H = k * sigma_unconditional * sqrt(H)
+```
 
 where `sigma_unconditional` is the expanding-window standard deviation of all past returns.
 
@@ -136,31 +136,31 @@ where `sigma_unconditional` is the expanding-window standard deviation of all pa
 
 For prediction date `t` and horizon `H`:
 
-$$
-y_H(t)=\mathbb{1}\left(\left|\frac{S_{t+H}}{S_t}-1\right| \ge \text{thr}_H\right)
-$$
+```text
+y_H(t) = 1 if abs(S_(t+H) / S_t - 1) >= thr_H, else 0
+```
 
 ### 3) Multi-Feature Calibration
 
-$$
-p_{cal} = \sigma(\mathbf{w}^T \mathbf{x})
-$$
+```text
+p_cal = sigmoid(w^T x)
+```
 
 where:
-$$
-\mathbf{x} = [1,\; \text{logit}(p_{raw}),\; \sigma_{1d},\; \Delta\sigma_{20d},\; \text{vol\_ratio},\; \text{vol\_of\_vol}]
-$$
+```text
+x = [1, logit(p_raw), sigma_1d, delta_sigma_20d, vol_ratio, vol_of_vol]
+```
 
 Online SGD with L2 regularization:
-$$
-\mathbf{w} \leftarrow \mathbf{w} + \eta \left[(y - p_{cal})\mathbf{x} - \lambda \mathbf{w}\right]
-$$
+```text
+w <- w + eta * ((y - p_cal) * x - lambda * w)
+```
 
 ### 4) Brier Skill Score
 
-$$
-\text{BSS} = 1 - \frac{\text{Brier}_{\text{model}}}{\text{Brier}_{\text{climatology}}}
-$$
+```text
+BSS = 1 - (Brier_model / Brier_climatology)
+```
 
 where `Brier_climatology = p_bar * (1 - p_bar)`. BSS > 0 means the model beats predicting the historical event rate.
 
