@@ -34,7 +34,10 @@ from em_sde.evaluation import (
     max_drawdown, compute_risk_report,
 )
 from em_sde.config import PipelineConfig, DataConfig, ModelConfig, CalibrationConfig, OutputConfig
-from em_sde.garch import fit_garch, GarchResult
+from em_sde.garch import fit_garch, GarchResult, project_to_stationary
+from em_sde.monte_carlo import compute_state_dependent_jumps
+from em_sde.evaluation import expected_calibration_error
+from em_sde.model_selection import apply_promotion_gates
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
 from em_sde.evaluation import compute_reliability
@@ -1727,6 +1730,282 @@ class TestPublicAPI:
         # Verify they're the real classes, not None
         assert PipelineConfig is not None
         assert OnlineCalibrator is not None
+
+
+# ============================================================
+# Test: U4 — Stationarity-Constrained GARCH Projection
+# ============================================================
+
+class TestStationarityProjection:
+    """Tests for project_to_stationary()."""
+
+    def test_projection_reduces_persistence(self):
+        omega, alpha, beta = 1e-6, 0.15, 0.90
+        o, a, b, g = project_to_stationary(omega, alpha, beta, target_persistence=0.98)
+        new_p = a + b
+        assert new_p < 1.0
+        assert abs(new_p - 0.98) < 0.001
+
+    def test_projection_preserves_alpha_beta_ratio(self):
+        omega, alpha, beta = 1e-6, 0.15, 0.90
+        ratio_before = alpha / beta
+        o, a, b, g = project_to_stationary(omega, alpha, beta, target_persistence=0.98)
+        ratio_after = a / b
+        assert abs(ratio_before - ratio_after) < 1e-10
+
+    def test_gjr_projection_preserves_gamma_alpha_ratio(self):
+        omega, alpha, beta, gamma = 1e-6, 0.10, 0.85, 0.12
+        ratio_before = gamma / alpha
+        o, a, b, gm = project_to_stationary(
+            omega, alpha, beta, gamma, model_type="gjr", target_persistence=0.98,
+        )
+        ratio_after = gm / a
+        assert abs(ratio_before - ratio_after) < 1e-10
+        # Verify GJR persistence
+        new_p = a + b + gm / 2.0
+        assert abs(new_p - 0.98) < 0.001
+
+    def test_no_projection_when_stationary(self):
+        omega, alpha, beta = 1e-6, 0.10, 0.85
+        o, a, b, g = project_to_stationary(omega, alpha, beta, target_persistence=0.98)
+        assert a == alpha
+        assert b == beta
+
+    def test_projection_preserves_omega(self):
+        omega = 1e-6
+        o, a, b, g = project_to_stationary(omega, 0.15, 0.90, target_persistence=0.98)
+        assert o == omega
+
+    def test_default_config_enables_constraint(self):
+        cfg = ModelConfig()
+        assert cfg.garch_stationarity_constraint is True
+
+
+# ============================================================
+# Test: U2 — State-Dependent Jump Model
+# ============================================================
+
+class TestStateDependentJumps:
+    """Tests for compute_state_dependent_jumps()."""
+
+    def test_interpolation_at_low_vol(self):
+        vol_hist = np.linspace(0.005, 0.030, 300)
+        sigma_low = float(np.percentile(vol_hist, 25))
+        result = compute_state_dependent_jumps(
+            sigma_low, vol_hist, (1.0, -0.01, 0.03), (4.0, -0.04, 0.06),
+        )
+        assert abs(result[0] - 1.0) < 0.05
+
+    def test_interpolation_at_high_vol(self):
+        vol_hist = np.linspace(0.005, 0.030, 300)
+        sigma_high = float(np.percentile(vol_hist, 75))
+        result = compute_state_dependent_jumps(
+            sigma_high, vol_hist, (1.0, -0.01, 0.03), (4.0, -0.04, 0.06),
+        )
+        assert abs(result[0] - 4.0) < 0.05
+
+    def test_interpolation_midpoint(self):
+        vol_hist = np.linspace(0.005, 0.030, 300)
+        sigma_mid = float(np.percentile(vol_hist, 50))
+        result = compute_state_dependent_jumps(
+            sigma_mid, vol_hist, (1.0, -0.01, 0.03), (4.0, -0.04, 0.06),
+        )
+        assert abs(result[0] - 2.5) < 0.3
+
+    def test_warmup_returns_midpoint(self):
+        vol_hist = np.array([0.01, 0.02])
+        result = compute_state_dependent_jumps(
+            0.015, vol_hist, (1.0, -0.01, 0.03), (4.0, -0.04, 0.06),
+        )
+        assert abs(result[0] - 2.5) < 0.01
+        assert abs(result[1] - (-0.025)) < 0.01
+
+    def test_disabled_by_default(self):
+        cfg = ModelConfig()
+        assert cfg.jump_state_dependent is False
+
+    def test_validation_requires_jump_enabled(self):
+        from em_sde.config import _validate
+        cfg = PipelineConfig()
+        cfg.model.jump_state_dependent = True
+        cfg.model.jump_enabled = False
+        with assert_raises(AssertionError):
+            _validate(cfg)
+
+
+# ============================================================
+# Test: U1 — Regime-Gated Threshold Routing
+# ============================================================
+
+class TestRegimeGatedThreshold:
+    """Tests for RegimeRouter."""
+
+    def test_router_warmup_uses_default(self):
+        from em_sde.backtest import RegimeRouter
+        router = RegimeRouter(
+            warmup=100, low_mode="fixed_pct",
+            mid_mode="fixed_pct", high_mode="anchored_vol",
+        )
+        for v in np.linspace(0.005, 0.03, 50):
+            router.observe(v)
+        assert router.get_threshold_mode(0.03) == "fixed_pct"  # still in warmup
+
+    def test_router_routes_by_vol_regime(self):
+        from em_sde.backtest import RegimeRouter
+        router = RegimeRouter(
+            warmup=100, low_mode="fixed_pct",
+            mid_mode="vol_scaled", high_mode="anchored_vol",
+        )
+        for v in np.linspace(0.005, 0.030, 300):
+            router.observe(v)
+        assert router.get_threshold_mode(0.006) == "fixed_pct"
+        assert router.get_threshold_mode(0.015) == "vol_scaled"
+        assert router.get_threshold_mode(0.029) == "anchored_vol"
+
+    def test_regime_gated_config_validation(self):
+        from em_sde.config import _validate
+        cfg = PipelineConfig()
+        cfg.model.threshold_mode = "regime_gated"
+        cfg.model.regime_gated_low_mode = "invalid"
+        with assert_raises(AssertionError):
+            _validate(cfg)
+
+    def test_regime_gated_backward_compatible(self):
+        cfg = ModelConfig()
+        assert cfg.threshold_mode == "vol_scaled"
+
+    def test_regime_gated_is_warmed_up_property(self):
+        from em_sde.backtest import RegimeRouter
+        router = RegimeRouter(warmup=50)
+        assert not router.is_warmed_up
+        for v in np.linspace(0.01, 0.02, 50):
+            router.observe(v)
+        assert router.is_warmed_up
+
+
+# ============================================================
+# Test: U3 — AUC/Separation Calibration Guardrail
+# ============================================================
+
+class TestDiscriminationGuardrail:
+    """Tests for discrimination gate on calibrators."""
+
+    def test_discrimination_gate_default_config(self):
+        cfg = CalibrationConfig()
+        assert cfg.gate_on_discrimination is True
+
+    def test_gate_triggers_on_inverted_auc(self):
+        # lr=0 so calibrator never adjusts — p_cal stays as inverted p_raw
+        cal = OnlineCalibrator(
+            lr=0.0, adaptive_lr=False, min_updates=0,
+            safety_gate=False,
+            gate_on_discrimination=True,
+            gate_auc_threshold=0.50,
+            gate_discrimination_window=50,
+        )
+        rng = np.random.default_rng(42)
+        for _ in range(60):
+            y = 1.0 if rng.random() < 0.3 else 0.0
+            p_raw = 0.9 if y == 0.0 else 0.1  # inverted signal
+            cal.update(p_raw, y)
+        assert cal._discrimination_gate_active, "Gate should trigger on inverted AUC"
+
+    def test_gate_stays_off_on_good_discrimination(self):
+        cal = OnlineCalibrator(
+            lr=0.01, adaptive_lr=True, min_updates=0,
+            gate_on_discrimination=True,
+            gate_auc_threshold=0.50,
+            gate_discrimination_window=50,
+        )
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            y = 1.0 if rng.random() < 0.1 else 0.0
+            p_raw = 0.15 if y == 1.0 else 0.05  # correct direction
+            cal.update(p_raw, y)
+        assert not cal._discrimination_gate_active
+
+    def test_gate_returns_raw_when_active(self):
+        cal = OnlineCalibrator(
+            lr=0.1, min_updates=0,
+            gate_on_discrimination=True,
+            gate_discrimination_window=20,
+        )
+        cal._discrimination_gate_active = True
+        result = cal.calibrate(0.07)
+        assert result == 0.07
+
+    def test_multifeature_has_discrimination_gate(self):
+        cal = MultiFeatureCalibrator(
+            min_updates=0,
+            gate_on_discrimination=True,
+            gate_discrimination_window=50,
+        )
+        assert hasattr(cal, '_discrimination_gate_active')
+        assert not cal._discrimination_gate_active
+
+
+# ============================================================
+# Test: U5 — Promotion Gates and ECE
+# ============================================================
+
+class TestExpectedCalibrationError:
+    """Tests for expected_calibration_error()."""
+
+    def test_perfect_calibration_low_ece(self):
+        rng = np.random.default_rng(42)
+        p = rng.uniform(0.0, 1.0, 10000)
+        y = (rng.random(10000) < p).astype(float)
+        ece = expected_calibration_error(p, y)
+        assert ece < 0.02, f"ECE should be near zero for perfect cal, got {ece}"
+
+    def test_constant_bias_positive_ece(self):
+        y = np.zeros(1000)
+        y[:50] = 1.0  # 5% event rate
+        p = np.full(1000, 0.20)  # predict 20% but rate is 5%
+        ece = expected_calibration_error(p, y)
+        assert ece > 0.10, f"Biased predictions should have high ECE, got {ece}"
+
+
+class TestPromotionGates:
+    """Tests for apply_promotion_gates()."""
+
+    def test_passing_model(self):
+        cv_data = pd.DataFrame([
+            {"config_name": "A", "fold": 0, "horizon": 5,
+             "bss_cal": 0.05, "auc_cal": 0.60, "ece_cal": 0.01, "sigma_mean": 0.012},
+            {"config_name": "A", "fold": 1, "horizon": 5,
+             "bss_cal": 0.03, "auc_cal": 0.58, "ece_cal": 0.015, "sigma_mean": 0.018},
+        ])
+        report = apply_promotion_gates(cv_data)
+        assert report["all_gates_passed"].all()
+
+    def test_failing_model_negative_bss(self):
+        cv_data = pd.DataFrame([
+            {"config_name": "B", "fold": 0, "horizon": 5,
+             "bss_cal": -0.02, "auc_cal": 0.60, "ece_cal": 0.01, "sigma_mean": 0.012},
+            {"config_name": "B", "fold": 1, "horizon": 5,
+             "bss_cal": -0.03, "auc_cal": 0.58, "ece_cal": 0.015, "sigma_mean": 0.025},
+        ])
+        report = apply_promotion_gates(cv_data)
+        assert not report["all_gates_passed"].all()
+
+    def test_custom_gates(self):
+        cv_data = pd.DataFrame([
+            {"config_name": "C", "fold": 0, "horizon": 5,
+             "bss_cal": 0.10, "auc_cal": 0.70, "ece_cal": 0.005, "sigma_mean": 0.015},
+        ])
+        report = apply_promotion_gates(
+            cv_data, gates={"bss_cal": 0.05, "auc_cal": 0.65, "ece_cal": 0.01},
+        )
+        assert report["all_gates_passed"].all()
+
+    def test_report_shows_margin(self):
+        cv_data = pd.DataFrame([
+            {"config_name": "D", "fold": 0, "horizon": 5,
+             "bss_cal": 0.03, "auc_cal": 0.52, "ece_cal": 0.01, "sigma_mean": 0.015},
+        ])
+        report = apply_promotion_gates(cv_data)
+        assert "margin" in report.columns
 
 
 if __name__ == "__main__":

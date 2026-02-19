@@ -17,7 +17,7 @@ from .data_layer import load_data
 from .backtest import run_walkforward, compute_backtest_analytics
 from .evaluation import compute_metrics, compute_reliability, compute_risk_report
 from .output import write_outputs
-from .model_selection import expanding_window_cv, compare_models
+from .model_selection import expanding_window_cv, compare_models, apply_promotion_gates
 
 
 def _date_str(value: object) -> str:
@@ -235,6 +235,35 @@ def _run_compare(args):
             f"Brier={row['brier_cal_mean']:.6f}  "
             f"[n={int(row['total_n'])}, folds={int(row['n_folds'])}]"
         )
+
+    # Apply promotion gates if enabled
+    if configs[0].calibration.promotion_gates_enabled:
+        gates = {
+            "bss_cal": configs[0].calibration.promotion_bss_min,
+            "auc_cal": configs[0].calibration.promotion_auc_min,
+            "ece_cal": configs[0].calibration.promotion_ece_max,
+        }
+        gate_report = apply_promotion_gates(cv_results, gates=gates)
+
+        print()
+        print("-" * 60)
+        print("PROMOTION GATES (per regime bucket)")
+        print("-" * 60)
+        for row in gate_report.to_dict(orient="records"):
+            status = "PASS" if row["passed"] else "FAIL"
+            print(
+                f"  [{status}] {row['config_name']:20s} H={int(row['horizon']):2d} "
+                f"regime={row['regime']:10s} {row['metric']}={row['value']:.4f} "
+                f"(threshold={row['threshold']:.4f}, margin={row['margin']:+.4f})"
+            )
+
+        # Summary
+        if "all_gates_passed" in gate_report.columns:
+            print()
+            for (name, h), grp in gate_report.groupby(["config_name", "horizon"]):
+                all_pass = grp["all_gates_passed"].iloc[0]
+                verdict = "PROMOTED" if all_pass else "BLOCKED"
+                print(f"  {name:20s} H={int(h):2d}: {verdict}")
 
     print()
     print("=" * 60)

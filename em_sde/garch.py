@@ -224,3 +224,72 @@ def garch_diagnostics(
         )
 
     return result
+
+
+def project_to_stationary(
+    omega: float,
+    alpha: float,
+    beta: float,
+    gamma: Optional[float] = None,
+    model_type: str = "garch",
+    target_persistence: float = 0.98,
+) -> tuple:
+    """
+    Project GARCH parameters to the stationary region when persistence >= 1.0.
+
+    Scales alpha, beta (and gamma for GJR) proportionally so that
+    persistence = target_persistence, preserving relative parameter ratios.
+    Omega is unchanged to maintain the unconditional vol scale.
+
+    For GJR-GARCH: persistence = alpha + beta + gamma/2.
+
+    Parameters
+    ----------
+    omega : float
+        GARCH intercept.
+    alpha : float
+        ARCH coefficient.
+    beta : float
+        GARCH persistence coefficient.
+    gamma : float or None
+        GJR asymmetry coefficient.
+    model_type : str
+        "garch" or "gjr".
+    target_persistence : float
+        Target persistence after projection (default 0.98).
+
+    Returns
+    -------
+    omega_new, alpha_new, beta_new, gamma_new : tuple
+        Projected parameters. gamma_new is None if gamma input is None.
+    """
+    if gamma is not None and model_type == "gjr":
+        current_persistence = alpha + beta + gamma / 2.0
+    else:
+        current_persistence = alpha + beta
+
+    if current_persistence < 1.0:
+        return omega, alpha, beta, gamma
+
+    if current_persistence <= 0.0:
+        logger.warning("GARCH persistence <= 0 (%.4f), skipping projection", current_persistence)
+        return omega, alpha, beta, gamma
+
+    scale = target_persistence / current_persistence
+
+    alpha_new = alpha * scale
+    beta_new = beta * scale
+
+    if gamma is not None and model_type == "gjr":
+        gamma_new = gamma * scale
+    else:
+        gamma_new = gamma
+
+    logger.info(
+        "GARCH projection: persistence %.4f -> %.4f (scale=%.4f), "
+        "alpha %.4f -> %.4f, beta %.4f -> %.4f",
+        current_persistence, target_persistence, scale,
+        alpha, alpha_new, beta, beta_new,
+    )
+
+    return omega, alpha_new, beta_new, gamma_new

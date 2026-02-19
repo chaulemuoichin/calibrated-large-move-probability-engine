@@ -55,7 +55,11 @@ class OnlineCalibrator:
 
     def __init__(self, lr: float = 0.05, adaptive_lr: bool = True,
                  min_updates: int = 50, safety_gate: bool = False,
-                 gate_window: int = 200):
+                 gate_window: int = 200,
+                 gate_on_discrimination: bool = False,
+                 gate_auc_threshold: float = 0.50,
+                 gate_separation_threshold: float = 0.0,
+                 gate_discrimination_window: int = 200):
         self.a: float = 0.0
         self.b: float = 1.0
         self.lr: float = lr
@@ -70,14 +74,22 @@ class OnlineCalibrator:
         self._gate_cal_brier: deque = deque(maxlen=gate_window)
         self._gate_active: bool = False  # True when gate decides to use raw
 
+        # Discrimination guardrail: gate on rolling AUC and separation
+        self.gate_on_discrimination: bool = gate_on_discrimination
+        self.gate_auc_threshold: float = gate_auc_threshold
+        self.gate_separation_threshold: float = gate_separation_threshold
+        self._gate_discrimination_window: int = gate_discrimination_window
+        self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
+        self._discrimination_gate_active: bool = False
+
         # Convergence tracking
         self._param_history_a: deque = deque(maxlen=100)
         self._param_history_b: deque = deque(maxlen=100)
 
     @property
     def gated(self) -> bool:
-        """Whether the safety gate is currently blocking calibration."""
-        return self._gate_active
+        """Whether any safety gate is currently blocking calibration."""
+        return self._gate_active or self._discrimination_gate_active
 
     def _compute_cal(self, p_raw: float) -> float:
         """Apply the logistic mapping (internal, ignoring gate)."""
@@ -90,6 +102,8 @@ class OnlineCalibrator:
         """Apply calibration mapping. Falls back to raw if safety gate triggers."""
         p_cal = self._compute_cal(p_raw)
         if self.safety_gate and self._gate_active:
+            return p_raw
+        if self.gate_on_discrimination and self._discrimination_gate_active:
             return p_raw
         return p_cal
 
@@ -130,6 +144,30 @@ class OnlineCalibrator:
                 mean_raw = sum(self._gate_raw_brier) / len(self._gate_raw_brier)
                 mean_cal = sum(self._gate_cal_brier) / len(self._gate_cal_brier)
                 self._gate_active = bool(mean_cal > mean_raw)
+
+        # Update discrimination gate
+        if self.gate_on_discrimination:
+            self._update_discrimination_gate(p_raw, p_cal, y)
+
+    def _update_discrimination_gate(self, p_raw: float, p_cal: float, y: float) -> None:
+        """Update rolling AUC and separation tracking for discrimination gate."""
+        self._gate_pry_triples.append((p_raw, p_cal, y))
+
+        if len(self._gate_pry_triples) < self._gate_discrimination_window:
+            return
+
+        from .evaluation import auc_roc, separation as sep_fn
+        triples = list(self._gate_pry_triples)
+        p_cal_arr = np.array([t[1] for t in triples])
+        y_arr = np.array([t[2] for t in triples])
+
+        rolling_auc = auc_roc(p_cal_arr, y_arr)
+        rolling_sep = sep_fn(p_cal_arr, y_arr)
+
+        auc_bad = (np.isfinite(rolling_auc) and rolling_auc < self.gate_auc_threshold)
+        sep_bad = (np.isfinite(rolling_sep) and rolling_sep < self.gate_separation_threshold)
+
+        self._discrimination_gate_active = bool(auc_bad or sep_bad)
 
     def convergence_diagnostics(self) -> dict:
         """
@@ -184,12 +222,20 @@ class RegimeCalibrator:
 
     def __init__(self, n_bins: int = 3, lr: float = 0.05,
                  adaptive_lr: bool = True, min_updates: int = 50,
-                 safety_gate: bool = False, gate_window: int = 200):
+                 safety_gate: bool = False, gate_window: int = 200,
+                 gate_on_discrimination: bool = False,
+                 gate_auc_threshold: float = 0.50,
+                 gate_separation_threshold: float = 0.0,
+                 gate_discrimination_window: int = 200):
         self.n_bins = n_bins
         self.calibrators = [
             OnlineCalibrator(lr=lr, adaptive_lr=adaptive_lr,
                              min_updates=min_updates, safety_gate=safety_gate,
-                             gate_window=gate_window)
+                             gate_window=gate_window,
+                             gate_on_discrimination=gate_on_discrimination,
+                             gate_auc_threshold=gate_auc_threshold,
+                             gate_separation_threshold=gate_separation_threshold,
+                             gate_discrimination_window=gate_discrimination_window)
             for _ in range(n_bins)
         ]
         self._vol_history: deque = deque(maxlen=252)
@@ -255,7 +301,11 @@ class MultiFeatureCalibrator:
 
     def __init__(self, lr: float = 0.01, l2_reg: float = 1e-4,
                  min_updates: int = 100, safety_gate: bool = True,
-                 gate_window: int = 200):
+                 gate_window: int = 200,
+                 gate_on_discrimination: bool = False,
+                 gate_auc_threshold: float = 0.50,
+                 gate_separation_threshold: float = 0.0,
+                 gate_discrimination_window: int = 200):
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -269,6 +319,14 @@ class MultiFeatureCalibrator:
         self._gate_raw_brier: deque = deque(maxlen=gate_window)
         self._gate_cal_brier: deque = deque(maxlen=gate_window)
         self._gate_active: bool = False
+
+        # Discrimination guardrail
+        self.gate_on_discrimination: bool = gate_on_discrimination
+        self.gate_auc_threshold: float = gate_auc_threshold
+        self.gate_separation_threshold: float = gate_separation_threshold
+        self._gate_discrimination_window: int = gate_discrimination_window
+        self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
+        self._discrimination_gate_active: bool = False
 
         # Convergence tracking
         self._weight_history: deque = deque(maxlen=100)
@@ -302,6 +360,8 @@ class MultiFeatureCalibrator:
         p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
         if self.safety_gate and self._gate_active:
             return p_raw
+        if self.gate_on_discrimination and self._discrimination_gate_active:
+            return p_raw
         return p_cal
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
@@ -334,6 +394,30 @@ class MultiFeatureCalibrator:
                 mean_raw = sum(self._gate_raw_brier) / len(self._gate_raw_brier)
                 mean_cal = sum(self._gate_cal_brier) / len(self._gate_cal_brier)
                 self._gate_active = bool(mean_cal > mean_raw)
+
+        # Discrimination guardrail
+        if self.gate_on_discrimination:
+            self._update_discrimination_gate(p_raw, p_cal, y)
+
+    def _update_discrimination_gate(self, p_raw: float, p_cal: float, y: float) -> None:
+        """Update rolling AUC and separation tracking for discrimination gate."""
+        self._gate_pry_triples.append((p_raw, p_cal, y))
+
+        if len(self._gate_pry_triples) < self._gate_discrimination_window:
+            return
+
+        from .evaluation import auc_roc, separation as sep_fn
+        triples = list(self._gate_pry_triples)
+        p_cal_arr = np.array([t[1] for t in triples])
+        y_arr = np.array([t[2] for t in triples])
+
+        rolling_auc = auc_roc(p_cal_arr, y_arr)
+        rolling_sep = sep_fn(p_cal_arr, y_arr)
+
+        auc_bad = (np.isfinite(rolling_auc) and rolling_auc < self.gate_auc_threshold)
+        sep_bad = (np.isfinite(rolling_sep) and rolling_sep < self.gate_separation_threshold)
+
+        self._discrimination_gate_active = bool(auc_bad or sep_bad)
 
     def convergence_diagnostics(self) -> dict:
         """

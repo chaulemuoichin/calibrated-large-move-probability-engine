@@ -211,6 +211,56 @@ def simulate_garch_terminal(
     return np.exp(log_price)
 
 
+def compute_state_dependent_jumps(
+    sigma_1d: float,
+    vol_history: np.ndarray,
+    low_params: tuple,
+    high_params: tuple,
+    pctile_low: float = 0.25,
+    pctile_high: float = 0.75,
+) -> tuple:
+    """
+    Compute state-dependent jump parameters via linear interpolation
+    between low-vol and high-vol regime parameter sets.
+
+    Parameters
+    ----------
+    sigma_1d : float
+        Current daily volatility forecast.
+    vol_history : np.ndarray
+        Historical daily volatility values (backward-looking only).
+    low_params : tuple
+        (intensity, mean, vol) for low-vol regime.
+    high_params : tuple
+        (intensity, mean, vol) for high-vol regime.
+    pctile_low : float
+        Percentile threshold for low vol regime (default 25th).
+    pctile_high : float
+        Percentile threshold for high vol regime (default 75th).
+
+    Returns
+    -------
+    intensity, mean, vol : tuple of float
+        Interpolated jump parameters.
+    """
+    if len(vol_history) < 50:
+        return tuple(
+            (lo + hi) / 2.0 for lo, hi in zip(low_params, high_params)
+        )
+
+    sigma_lo = float(np.percentile(vol_history, pctile_low * 100))
+    sigma_hi = float(np.percentile(vol_history, pctile_high * 100))
+
+    if sigma_hi <= sigma_lo:
+        return low_params
+
+    t = float(np.clip((sigma_1d - sigma_lo) / (sigma_hi - sigma_lo), 0.0, 1.0))
+
+    return tuple(
+        lo + t * (hi - lo) for lo, hi in zip(low_params, high_params)
+    )
+
+
 def compute_move_probability(
     terminal_prices: np.ndarray,
     S0: float,

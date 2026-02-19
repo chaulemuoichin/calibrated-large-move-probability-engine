@@ -35,14 +35,32 @@ class ModelConfig:
     # GARCH-in-simulation: evolve vol dynamics within MC paths
     garch_in_sim: bool = False         # Enable GARCH vol dynamics within MC paths
     garch_model_type: str = "garch"    # "garch" or "gjr" (GJR-GARCH for leverage effect)
+    # Stationarity constraint: project non-stationary GARCH params before simulation
+    garch_stationarity_constraint: bool = True
+    garch_target_persistence: float = 0.98
+    garch_fallback_to_ewma: bool = False  # if True, use EWMA instead of projection
     # Jump-diffusion (Merton model)
     jump_enabled: bool = False         # Enable Merton jump-diffusion
     jump_intensity: float = 2.0        # lambda: expected jumps per year
     jump_mean: float = -0.02           # mu_J: mean jump size (log-space, negative = crash bias)
     jump_vol: float = 0.04             # sigma_J: jump size volatility
+    # State-dependent jump parameters (conditional on realized-vol regime)
+    jump_state_dependent: bool = False
+    jump_low_intensity: float = 1.0
+    jump_low_mean: float = -0.01
+    jump_low_vol: float = 0.03
+    jump_high_intensity: float = 4.0
+    jump_high_mean: float = -0.04
+    jump_high_vol: float = 0.06
     # Threshold mode: controls how the large-move threshold is defined
-    threshold_mode: str = "vol_scaled"  # "vol_scaled" | "fixed_pct" | "anchored_vol"
+    threshold_mode: str = "vol_scaled"  # "vol_scaled" | "fixed_pct" | "anchored_vol" | "regime_gated"
     fixed_threshold_pct: float = 0.05  # absolute return threshold (used when threshold_mode="fixed_pct")
+    # Regime-gated threshold routing (routes between modes based on vol regime)
+    regime_gated_low_mode: str = "fixed_pct"
+    regime_gated_mid_mode: str = "fixed_pct"
+    regime_gated_high_mode: str = "anchored_vol"
+    regime_gated_warmup: int = 252
+    regime_gated_vol_window: int = 252
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 
@@ -53,6 +71,11 @@ class CalibrationConfig:
     min_updates: int = 50      # warm-up: don't calibrate until this many labels resolve
     safety_gate: bool = False  # auto-fallback to raw when cal Brier > raw Brier
     gate_window: int = 200     # rolling window for safety gate comparison
+    # Discrimination guardrail: gate on rolling AUC and separation
+    gate_on_discrimination: bool = True
+    gate_auc_threshold: float = 0.50
+    gate_separation_threshold: float = 0.0
+    gate_discrimination_window: int = 200
     regime_conditional: bool = False  # enable per-vol-regime calibration
     regime_n_bins: int = 3            # number of vol-regime bins
     multi_feature: bool = False       # enable multi-feature online logistic calibration
@@ -61,6 +84,11 @@ class CalibrationConfig:
     multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
     ensemble_enabled: bool = True
     ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
+    # Promotion gates for model selection
+    promotion_gates_enabled: bool = False
+    promotion_bss_min: float = 0.0
+    promotion_auc_min: float = 0.55
+    promotion_ece_max: float = 0.02
 
 
 @dataclass
@@ -128,16 +156,31 @@ def _validate(cfg: PipelineConfig):
     if cfg.calibration.regime_conditional:
         assert cfg.calibration.regime_n_bins >= 2, "regime_n_bins must be >= 2"
 
-    assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol"), \
-        f"threshold_mode must be 'vol_scaled', 'fixed_pct', or 'anchored_vol', got {cfg.model.threshold_mode}"
+    assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol", "regime_gated"), \
+        f"threshold_mode must be 'vol_scaled', 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"
     if cfg.model.threshold_mode == "fixed_pct":
         assert cfg.model.fixed_threshold_pct > 0, "fixed_threshold_pct must be positive"
+    if cfg.model.threshold_mode == "regime_gated":
+        _valid_sub = ("vol_scaled", "fixed_pct", "anchored_vol")
+        assert cfg.model.regime_gated_low_mode in _valid_sub, \
+            f"regime_gated_low_mode must be one of {_valid_sub}"
+        assert cfg.model.regime_gated_mid_mode in _valid_sub, \
+            f"regime_gated_mid_mode must be one of {_valid_sub}"
+        assert cfg.model.regime_gated_high_mode in _valid_sub, \
+            f"regime_gated_high_mode must be one of {_valid_sub}"
+        assert cfg.model.regime_gated_warmup >= 50, "regime_gated_warmup must be >= 50"
 
     assert cfg.model.garch_model_type in ("garch", "gjr"), \
         f"garch_model_type must be 'garch' or 'gjr', got {cfg.model.garch_model_type}"
     if cfg.model.jump_enabled:
         assert cfg.model.jump_intensity >= 0, "jump_intensity must be non-negative"
         assert cfg.model.jump_vol >= 0, "jump_vol must be non-negative"
+    if cfg.model.jump_state_dependent:
+        assert cfg.model.jump_enabled, "jump_state_dependent requires jump_enabled=True"
+        assert cfg.model.jump_low_intensity >= 0, "jump_low_intensity must be non-negative"
+        assert cfg.model.jump_high_intensity >= 0, "jump_high_intensity must be non-negative"
+        assert cfg.model.jump_low_vol >= 0, "jump_low_vol must be non-negative"
+        assert cfg.model.jump_high_vol >= 0, "jump_high_vol must be non-negative"
 
     if cfg.data.source == "csv":
         assert cfg.data.csv_path is not None, "csv_path required when source=csv"

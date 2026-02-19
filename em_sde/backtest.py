@@ -26,8 +26,11 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator
-from .garch import fit_garch, GarchResult
-from .monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag
+from .monte_carlo import (
+    simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
+    compute_state_dependent_jumps, QUANTILE_LEVELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,40 @@ class MetaPrediction:
     row_idx: int
     price_idx: int
     risk_combo: float
+
+
+class RegimeRouter:
+    """Walk-forward safe vol regime classifier for threshold routing."""
+
+    def __init__(self, warmup: int = 252, vol_window: int = 252,
+                 low_mode: str = "fixed_pct", mid_mode: str = "fixed_pct",
+                 high_mode: str = "anchored_vol"):
+        self._vol_history: Deque[float] = deque(maxlen=vol_window)
+        self._warmup = warmup
+        self._low_mode = low_mode
+        self._mid_mode = mid_mode
+        self._high_mode = high_mode
+
+    def observe(self, sigma_1d: float) -> None:
+        """Record vol observation for percentile computation."""
+        self._vol_history.append(sigma_1d)
+
+    def get_threshold_mode(self, sigma_1d: float) -> str:
+        """Return threshold mode for current vol level. Falls back to mid during warmup."""
+        if len(self._vol_history) < self._warmup:
+            return self._mid_mode
+        arr = np.sort(np.array(self._vol_history))
+        pctile = np.searchsorted(arr, sigma_1d) / len(arr)
+        if pctile < 0.25:
+            return self._low_mode
+        elif pctile > 0.75:
+            return self._high_mode
+        else:
+            return self._mid_mode
+
+    @property
+    def is_warmed_up(self) -> bool:
+        return len(self._vol_history) >= self._warmup
 
 
 def run_walkforward(
@@ -95,11 +132,18 @@ def run_walkforward(
     jump_intensity = cfg.model.jump_intensity if jump_enabled else 0.0
     jump_mean = cfg.model.jump_mean if jump_enabled else 0.0
     jump_vol = cfg.model.jump_vol if jump_enabled else 0.0
+    jump_state_dependent = cfg.model.jump_state_dependent if jump_enabled else False
+    jump_low_params = (cfg.model.jump_low_intensity, cfg.model.jump_low_mean, cfg.model.jump_low_vol)
+    jump_high_params = (cfg.model.jump_high_intensity, cfg.model.jump_high_mean, cfg.model.jump_high_vol)
     lr = cfg.calibration.lr
     adaptive_lr = cfg.calibration.adaptive_lr
     min_updates = cfg.calibration.min_updates
     safety_gate = cfg.calibration.safety_gate
     gate_window = cfg.calibration.gate_window
+    gate_on_disc = cfg.calibration.gate_on_discrimination
+    gate_auc_thr = cfg.calibration.gate_auc_threshold
+    gate_sep_thr = cfg.calibration.gate_separation_threshold
+    gate_disc_win = cfg.calibration.gate_discrimination_window
     ensemble_enabled = cfg.calibration.ensemble_enabled
     ensemble_weights = cfg.calibration.ensemble_weights
     regime_conditional = cfg.calibration.regime_conditional
@@ -111,6 +155,20 @@ def run_walkforward(
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
+    garch_stationarity = cfg.model.garch_stationarity_constraint
+    garch_target_persistence = cfg.model.garch_target_persistence
+    garch_fallback_ewma = cfg.model.garch_fallback_to_ewma
+
+    # Regime-gated threshold router
+    regime_router: Optional[RegimeRouter] = None
+    if threshold_mode == "regime_gated":
+        regime_router = RegimeRouter(
+            warmup=cfg.model.regime_gated_warmup,
+            vol_window=cfg.model.regime_gated_vol_window,
+            low_mode=cfg.model.regime_gated_low_mode,
+            mid_mode=cfg.model.regime_gated_mid_mode,
+            high_mode=cfg.model.regime_gated_high_mode,
+        )
 
     # Seed sequence for reproducible parallel MC
     ss = SeedSequence(base_seed)
@@ -127,6 +185,10 @@ def run_walkforward(
                 min_updates=multi_feature_min_updates,
                 safety_gate=safety_gate,
                 gate_window=gate_window,
+                gate_on_discrimination=gate_on_disc,
+                gate_auc_threshold=gate_auc_thr,
+                gate_separation_threshold=gate_sep_thr,
+                gate_discrimination_window=gate_disc_win,
             )
             for H in horizons
         }
@@ -139,6 +201,10 @@ def run_walkforward(
                 min_updates=min_updates,
                 safety_gate=safety_gate,
                 gate_window=gate_window,
+                gate_on_discrimination=gate_on_disc,
+                gate_auc_threshold=gate_auc_thr,
+                gate_separation_threshold=gate_sep_thr,
+                gate_discrimination_window=gate_disc_win,
             )
             for H in horizons
         }
@@ -150,6 +216,10 @@ def run_walkforward(
                 min_updates=min_updates,
                 safety_gate=safety_gate,
                 gate_window=gate_window,
+                gate_on_discrimination=gate_on_disc,
+                gate_auc_threshold=gate_auc_thr,
+                gate_separation_threshold=gate_sep_thr,
+                gate_discrimination_window=gate_disc_win,
             )
             for H in horizons
         }
@@ -217,12 +287,40 @@ def run_walkforward(
             available_returns, window=garch_window, min_window=garch_min,
             model_type=garch_model_type if garch_in_sim else "garch",
         )
+        # Apply stationarity projection if needed
+        projected = False
+        if (garch_stationarity and garch_in_sim
+                and garch_result.diagnostics is not None
+                and not garch_result.diagnostics.get("is_stationary", True)):
+            if garch_fallback_ewma:
+                garch_result = GarchResult(
+                    sigma_1d=garch_result.sigma_1d,
+                    source="ewma_fallback_nonstationary",
+                )
+                projected = True
+            elif garch_result.omega is not None:
+                omega_p, alpha_p, beta_p, gamma_p = project_to_stationary(
+                    garch_result.omega, garch_result.alpha, garch_result.beta,
+                    garch_result.gamma, garch_model_type,
+                    target_persistence=garch_target_persistence,
+                )
+                garch_result = GarchResult(
+                    sigma_1d=garch_result.sigma_1d,
+                    source=garch_result.source + "_projected",
+                    omega=omega_p, alpha=alpha_p, beta=beta_p, gamma=gamma_p,
+                    diagnostics=_garch_diag(omega_p, alpha_p, beta_p, gamma_p, garch_model_type),
+                )
+                projected = True
+
         sigma_1d = garch_result.sigma_1d
         row["sigma_garch_1d"] = sigma_1d
         row["sigma_source"] = garch_result.source
+        row["garch_projected"] = projected
 
         # Compute auxiliary features for multi-feature calibration (walk-forward safe)
         sigma_history.append(sigma_1d)
+        if regime_router is not None:
+            regime_router.observe(sigma_1d)
         delta_sigma = (sigma_1d - sigma_history[-21]) if len(sigma_history) > 20 else 0.0
         if idx >= 20:
             realized_vol = float(np.std(all_returns[idx - 20:idx]))
@@ -245,10 +343,15 @@ def run_walkforward(
 
         # === Step 3: Compute thresholds ===
         thresholds = {}
+        if regime_router is not None:
+            effective_mode = regime_router.get_threshold_mode(sigma_1d)
+            row["threshold_regime"] = effective_mode
+        else:
+            effective_mode = threshold_mode
         for H in horizons:
-            if threshold_mode == "fixed_pct":
+            if effective_mode == "fixed_pct":
                 thr = fixed_threshold_pct
-            elif threshold_mode == "anchored_vol":
+            elif effective_mode == "anchored_vol":
                 # Use expanding-window unconditional vol (changes slowly)
                 sigma_uncond = float(np.std(all_returns[:idx])) if idx > garch_min else sigma_1d
                 thr = k * sigma_uncond * np.sqrt(H)
@@ -270,6 +373,20 @@ def run_walkforward(
         S0 = prices[idx]
         child_seeds = ss.spawn(len(horizons))
 
+        # Compute per-step jump parameters (state-dependent or static)
+        if jump_state_dependent and len(sigma_history) >= 50:
+            vol_hist_arr = np.array(list(sigma_history))
+            step_jump_intensity, step_jump_mean, step_jump_vol = compute_state_dependent_jumps(
+                sigma_1d, vol_hist_arr, jump_low_params, jump_high_params,
+            )
+            row["jump_intensity_step"] = step_jump_intensity
+            row["jump_mean_step"] = step_jump_mean
+            row["jump_vol_step"] = step_jump_vol
+        else:
+            step_jump_intensity = jump_intensity
+            step_jump_mean = jump_mean
+            step_jump_vol = jump_vol
+
         mc_results = {}
         with ThreadPoolExecutor(max_workers=len(horizons)) as executor:
             futures = {}
@@ -286,9 +403,9 @@ def run_walkforward(
                     alpha=garch_result.alpha,
                     beta=garch_result.beta,
                     gamma=garch_result.gamma if garch_result.gamma is not None else 0.0,
-                    jump_intensity=jump_intensity,
-                    jump_mean=jump_mean,
-                    jump_vol=jump_vol,
+                    jump_intensity=step_jump_intensity,
+                    jump_mean=step_jump_mean,
+                    jump_vol=step_jump_vol,
                     return_quantiles=store_quantiles,
                 )
             for H in horizons:

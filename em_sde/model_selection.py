@@ -17,6 +17,7 @@ from .config import PipelineConfig
 from .backtest import run_walkforward
 from .evaluation import (
     brier_score, brier_skill_score, log_loss, auc_roc, separation,
+    expected_calibration_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,13 @@ def expanding_window_cv(
                 p_raw_m = p_raw[mask]
                 p_cal_m = p_cal[mask]
 
+                # Sigma mean for regime bucketing
+                sigma_mean = np.nan
+                if "sigma_garch_1d" in test_res.columns:
+                    sigma_mean = float(np.nanmean(
+                        _as_float_array(test_res["sigma_garch_1d"])
+                    ))
+
                 rows.append({
                     "config_name": name,
                     "fold": fold_i,
@@ -121,8 +129,10 @@ def expanding_window_cv(
                     "auc_cal": auc_roc(p_cal_m, y_m),
                     "logloss_cal": log_loss(p_cal_m, y_m),
                     "separation_cal": separation(p_cal_m, y_m),
+                    "ece_cal": expected_calibration_error(p_cal_m, y_m),
                     "event_rate": float(np.nanmean(y_m)),
                     "n": int(mask.sum()),
+                    "sigma_mean": sigma_mean,
                 })
 
     return pd.DataFrame(rows)
@@ -183,3 +193,92 @@ def calibration_bic(p_cal: np.ndarray, y: np.ndarray, n_params: int) -> float:
         return np.nan
     ll = -log_loss(p_cal[mask], y[mask]) * n
     return float(n_params * np.log(n) - 2 * ll)
+
+
+def apply_promotion_gates(
+    cv_results: pd.DataFrame,
+    gates: dict = None,
+) -> pd.DataFrame:
+    """
+    Apply hard promotion gates per regime bucket.
+
+    Splits CV results by vol regime (sigma_mean terciles across folds),
+    then checks that every gate passes in every regime bucket.
+    A model fails if ANY gate fails in ANY bucket.
+
+    Parameters
+    ----------
+    cv_results : pd.DataFrame
+        Output of expanding_window_cv (must include ece_cal and sigma_mean).
+    gates : dict, optional
+        Gate thresholds. Default: {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
+
+    Returns
+    -------
+    gate_report : pd.DataFrame
+        Columns: config_name, horizon, regime, metric, value, threshold,
+                 passed, margin, all_gates_passed
+    """
+    if gates is None:
+        gates = {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
+
+    if len(cv_results) == 0:
+        return pd.DataFrame()
+
+    rows = []
+
+    for (config_name, horizon), group in cv_results.groupby(["config_name", "horizon"]):
+        # Bucket folds by vol regime using sigma_mean terciles
+        if "sigma_mean" in group.columns and group["sigma_mean"].notna().any():
+            sigma_vals = group["sigma_mean"].values
+            p33 = float(np.nanpercentile(sigma_vals, 33))
+            p66 = float(np.nanpercentile(sigma_vals, 66))
+
+            regimes = []
+            for s in sigma_vals:
+                if np.isnan(s):
+                    regimes.append("all")
+                elif s < p33:
+                    regimes.append("low_vol")
+                elif s > p66:
+                    regimes.append("high_vol")
+                else:
+                    regimes.append("mid_vol")
+            group = group.copy()
+            group["regime"] = regimes
+        else:
+            group = group.copy()
+            group["regime"] = "all"
+
+        for regime, regime_group in group.groupby("regime"):
+            for metric, threshold in gates.items():
+                if metric not in regime_group.columns:
+                    continue
+                value = float(regime_group[metric].mean())
+
+                if metric == "ece_cal":
+                    passed = value <= threshold
+                    margin = round(threshold - value, 6)
+                else:
+                    passed = value >= threshold
+                    margin = round(value - threshold, 6)
+
+                rows.append({
+                    "config_name": config_name,
+                    "horizon": horizon,
+                    "regime": regime,
+                    "metric": metric,
+                    "value": round(value, 6),
+                    "threshold": threshold,
+                    "passed": bool(passed),
+                    "margin": margin,
+                })
+
+    report = pd.DataFrame(rows)
+
+    if len(report) > 0:
+        summary = report.groupby(["config_name", "horizon"])["passed"].all().reset_index()
+        summary.rename(columns={"passed": "all_gates_passed"}, inplace=True)
+        report = report.merge(summary, on=["config_name", "horizon"])
+
+    return report

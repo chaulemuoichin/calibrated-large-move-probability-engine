@@ -93,6 +93,54 @@ def brier_skill_score(p: np.ndarray, y: np.ndarray) -> float:
     return 1.0 - brier_model / brier_clim
 
 
+def expected_calibration_error(
+    p: np.ndarray,
+    y: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Expected Calibration Error (ECE).
+
+    Bins predicted probabilities, computes the absolute difference between
+    mean predicted and mean observed in each bin, weighted by bin count.
+
+    Parameters
+    ----------
+    p : np.ndarray
+        Predicted probabilities.
+    y : np.ndarray
+        Binary outcomes (0 or 1).
+    n_bins : int
+        Number of calibration bins.
+
+    Returns
+    -------
+    ece : float
+        Expected calibration error. Lower is better. 0 = perfectly calibrated.
+    """
+    mask = ~np.isnan(y) & ~np.isnan(p)
+    if mask.sum() == 0:
+        return np.nan
+    p_m, y_m = p[mask], y[mask]
+    n = len(p_m)
+
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        if i < n_bins - 1:
+            in_bin = (p_m >= lo) & (p_m < hi)
+        else:
+            in_bin = (p_m >= lo) & (p_m <= hi)
+        n_bin = in_bin.sum()
+        if n_bin > 0:
+            mean_pred = float(np.mean(p_m[in_bin]))
+            mean_obs = float(np.mean(y_m[in_bin]))
+            ece += (n_bin / n) * abs(mean_pred - mean_obs)
+
+    return float(ece)
+
+
 def effective_sample_size(y: np.ndarray, H: int) -> float:
     """
     Estimate effective sample size accounting for H-step overlap autocorrelation.

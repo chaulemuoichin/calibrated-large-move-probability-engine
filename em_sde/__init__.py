@@ -24,10 +24,12 @@ __all__ = [
     "fit_garch",
     "GarchResult",
     "garch_diagnostics",
+    "project_to_stationary",
     # Monte Carlo
     "simulate_gbm_terminal",
     "simulate_garch_terminal",
     "compute_move_probability",
+    "compute_state_dependent_jumps",
     # Calibration
     "OnlineCalibrator",
     "RegimeCalibrator",
@@ -38,6 +40,7 @@ __all__ = [
     # Evaluation
     "brier_score",
     "brier_skill_score",
+    "expected_calibration_error",
     "log_loss",
     "auc_roc",
     "separation",
@@ -52,6 +55,7 @@ __all__ = [
     # Model Selection
     "expanding_window_cv",
     "compare_models",
+    "apply_promotion_gates",
     "calibration_aic",
     "calibration_bic",
     # Output
@@ -67,13 +71,14 @@ from .config import (
     load_config,
 )
 from .data_layer import load_data, run_data_quality_checks
-from .garch import fit_garch, GarchResult, garch_diagnostics
-from .monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability
+from .garch import fit_garch, GarchResult, garch_diagnostics, project_to_stationary
+from .monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, compute_state_dependent_jumps
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator
 from .backtest import run_walkforward, compute_backtest_analytics
 from .evaluation import (
     brier_score,
     brier_skill_score,
+    expected_calibration_error,
     log_loss,
     auc_roc,
     separation,
@@ -86,5 +91,5 @@ from .evaluation import (
     conditional_var,
     max_drawdown,
 )
-from .model_selection import expanding_window_cv, compare_models, calibration_aic, calibration_bic
+from .model_selection import expanding_window_cv, compare_models, apply_promotion_gates, calibration_aic, calibration_bic
 from .output import write_outputs
