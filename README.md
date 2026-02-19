@@ -12,7 +12,7 @@ A production-ready quantitative research framework for forecasting **two-sided l
 ![Tests](https://img.shields.io/badge/tests-133%20passing-brightgreen)
 ![Model](https://img.shields.io/badge/model-GARCH%20%2B%20GJR%20%2B%20Jumps%20%2B%20MC%20%2B%20Calibration-informational)
 
-## Why This Exists (Human Version)
+## Why This Exists ?!!
 
 You are an investor. You think a stock is undervalued. You want to buy.
 The painful question is simple: **is today already a good entry?**
@@ -20,19 +20,18 @@ The painful question is simple: **is today already a good entry?**
 ```text
 if price goes up after you buy
 -> good for you
--> you feel like a genius
+  -> you will feel like a genius
 
 if price goes down hard right after you buy
 -> you may doubt yourself
-   -> exit
-      -> realized loss
-         -> [A] loss of confidence
-            -> rushed next decision
-               -> another loss
-                  -> "market is rigged" post on Reddit
-                     -> stop investing (or revenge trade)
-                        -> same loop again
-                           -> back to [A]
+  -> exit
+     -> realized loss  <--------------------------------------------------------|
+        -> loss of confidence                                                   |
+           -> rushed next decision                                              |
+              -> another loss                                                   | 
+                 -> "market is rigged" posted on Reddit                         |
+                    -> stop investing (or revenge trade)  ----------------------|
+                      
 ```
 
 This project is built to break that loop by turning entry fear into a measurable probability forecast.
