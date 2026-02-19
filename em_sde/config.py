@@ -1,0 +1,143 @@
+"""Configuration loading and validation."""
+
+import yaml
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class DataConfig:
+    source: str = "yfinance"
+    ticker: str = "SPY"
+    start: str = "2015-01-01"
+    end: str = "2024-12-31"
+    fallback_to_synthetic: bool = True
+    min_rows: int = 756
+    max_retry: int = 5
+    cache_max_age_days: int = 7
+    csv_path: Optional[str] = None
+    synthetic_days: int = 2520
+    synthetic_seed: int = 12345
+
+
+@dataclass
+class ModelConfig:
+    k: float = 2.0
+    mu_year: float = 0.0
+    horizons: List[int] = field(default_factory=lambda: [5, 10, 20])
+    garch_window: int = 756
+    garch_min_window: int = 252
+    mc_base_paths: int = 100_000
+    mc_boost_paths: int = 200_000
+    mc_boost_threshold: float = 0.02
+    seed: int = 42
+    t_df: float = 5.0  # Student-t degrees of freedom for fat tails (0 or inf = Gaussian)
+    # GARCH-in-simulation: evolve vol dynamics within MC paths
+    garch_in_sim: bool = False         # Enable GARCH vol dynamics within MC paths
+    garch_model_type: str = "garch"    # "garch" or "gjr" (GJR-GARCH for leverage effect)
+    # Jump-diffusion (Merton model)
+    jump_enabled: bool = False         # Enable Merton jump-diffusion
+    jump_intensity: float = 2.0        # lambda: expected jumps per year
+    jump_mean: float = -0.02           # mu_J: mean jump size (log-space, negative = crash bias)
+    jump_vol: float = 0.04             # sigma_J: jump size volatility
+    # Threshold mode: controls how the large-move threshold is defined
+    threshold_mode: str = "vol_scaled"  # "vol_scaled" | "fixed_pct" | "anchored_vol"
+    fixed_threshold_pct: float = 0.05  # absolute return threshold (used when threshold_mode="fixed_pct")
+    store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
+
+
+@dataclass
+class CalibrationConfig:
+    lr: float = 0.05
+    adaptive_lr: bool = True   # scale lr by 1/sqrt(1 + n_updates)
+    min_updates: int = 50      # warm-up: don't calibrate until this many labels resolve
+    safety_gate: bool = False  # auto-fallback to raw when cal Brier > raw Brier
+    gate_window: int = 200     # rolling window for safety gate comparison
+    regime_conditional: bool = False  # enable per-vol-regime calibration
+    regime_n_bins: int = 3            # number of vol-regime bins
+    multi_feature: bool = False       # enable multi-feature online logistic calibration
+    multi_feature_lr: float = 0.01   # learning rate for multi-feature calibrator
+    multi_feature_l2: float = 1e-4   # L2 regularization strength
+    multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
+    ensemble_enabled: bool = True
+    ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
+
+
+@dataclass
+class OutputConfig:
+    base_dir: str = "outputs"
+    charts: bool = True
+
+
+@dataclass
+class PipelineConfig:
+    data: DataConfig = field(default_factory=DataConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+
+
+def load_config(path: str) -> PipelineConfig:
+    """Load and validate configuration from a YAML file."""
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    cfg = PipelineConfig()
+
+    if "data" in raw:
+        for k, v in raw["data"].items():
+            if v is not None and hasattr(cfg.data, k):
+                setattr(cfg.data, k, v)
+
+    if "model" in raw:
+        for k, v in raw["model"].items():
+            if v is not None and hasattr(cfg.model, k):
+                setattr(cfg.model, k, v)
+
+    if "calibration" in raw:
+        for k, v in raw["calibration"].items():
+            if v is not None and hasattr(cfg.calibration, k):
+                setattr(cfg.calibration, k, v)
+
+    if "output" in raw:
+        for k, v in raw["output"].items():
+            if v is not None and hasattr(cfg.output, k):
+                setattr(cfg.output, k, v)
+
+    _validate(cfg)
+    return cfg
+
+
+def _validate(cfg: PipelineConfig):
+    """Validate configuration constraints."""
+    assert cfg.data.source in ("yfinance", "csv", "synthetic"), \
+        f"Invalid source: {cfg.data.source}"
+    assert cfg.data.min_rows >= 252, "min_rows must be >= 252"
+    assert cfg.model.k > 0, "k must be positive"
+    assert cfg.model.garch_min_window >= 252, "garch_min_window must be >= 252"
+    assert cfg.model.mc_base_paths >= 1000, "mc_base_paths must be >= 1000"
+    assert all(h > 0 for h in cfg.model.horizons), "horizons must be positive"
+    assert 0 < cfg.calibration.lr < 1, "lr must be in (0, 1)"
+
+    if cfg.calibration.ensemble_enabled:
+        assert len(cfg.calibration.ensemble_weights) == len(cfg.model.horizons), \
+            "ensemble_weights length must match horizons"
+        assert abs(sum(cfg.calibration.ensemble_weights) - 1.0) < 1e-6, \
+            "ensemble_weights must sum to 1.0"
+
+    if cfg.calibration.regime_conditional:
+        assert cfg.calibration.regime_n_bins >= 2, "regime_n_bins must be >= 2"
+
+    assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol"), \
+        f"threshold_mode must be 'vol_scaled', 'fixed_pct', or 'anchored_vol', got {cfg.model.threshold_mode}"
+    if cfg.model.threshold_mode == "fixed_pct":
+        assert cfg.model.fixed_threshold_pct > 0, "fixed_threshold_pct must be positive"
+
+    assert cfg.model.garch_model_type in ("garch", "gjr"), \
+        f"garch_model_type must be 'garch' or 'gjr', got {cfg.model.garch_model_type}"
+    if cfg.model.jump_enabled:
+        assert cfg.model.jump_intensity >= 0, "jump_intensity must be non-negative"
+        assert cfg.model.jump_vol >= 0, "jump_vol must be non-negative"
+
+    if cfg.data.source == "csv":
+        assert cfg.data.csv_path is not None, "csv_path required when source=csv"

@@ -1,0 +1,35 @@
+# Synthetic data example - no internet needed, runs in ~30 seconds
+# Usage: python -m em_sde.run --config configs/synthetic_example.yaml
+
+data:
+  source: "synthetic"
+  ticker: "SYNTH"
+  start: "2015-01-01"
+  end: "2024-12-31"
+  fallback_to_synthetic: true
+  min_rows: 756
+  synthetic_days: 2520
+  synthetic_seed: 12345
+
+model:
+  k: 2.0
+  mu_year: 0.0
+  horizons: [5, 10, 20]
+  garch_window: 756
+  garch_min_window: 252
+  mc_base_paths: 10000    # fewer paths for speed
+  mc_boost_paths: 20000
+  mc_boost_threshold: 0.02
+  seed: 42
+  t_df: 5.0
+
+calibration:
+  lr: 0.05
+  adaptive_lr: true
+  min_updates: 50
+  ensemble_enabled: true
+  ensemble_weights: [0.5, 0.3, 0.2]
+
+output:
+  base_dir: "outputs"
+  charts: true

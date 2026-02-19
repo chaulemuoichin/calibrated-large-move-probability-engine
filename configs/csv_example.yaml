@@ -1,0 +1,44 @@
+# CSV data example - load prices from a local CSV file
+# Usage: python -m em_sde.run --config configs/csv_example.yaml
+#
+# CSV file must have:
+#   - A date column as the index (first column)
+#   - A price column named: Close, Price, price, Adj Close, or adj_close
+#
+# Example CSV format:
+#   date,Close
+#   2020-01-02,323.54
+#   2020-01-03,322.41
+#   ...
+
+data:
+  source: "csv"
+  ticker: "CSV"
+  csv_path: "data/sample_prices.csv"
+  start: "2015-01-01"
+  end: "2026-12-31"
+  fallback_to_synthetic: false
+  min_rows: 756
+
+model:
+  k: 2.0
+  mu_year: 0.0
+  horizons: [5, 10, 20]
+  garch_window: 756
+  garch_min_window: 252
+  mc_base_paths: 100000
+  mc_boost_paths: 200000
+  mc_boost_threshold: 0.02
+  seed: 42
+  t_df: 5.0
+
+calibration:
+  lr: 0.05
+  adaptive_lr: true
+  min_updates: 50
+  ensemble_enabled: true
+  ensemble_weights: [0.5, 0.3, 0.2]
+
+output:
+  base_dir: "outputs"
+  charts: true

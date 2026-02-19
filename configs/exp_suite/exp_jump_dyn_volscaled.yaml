@@ -1,0 +1,47 @@
+data:
+  source: "csv"
+  ticker: "JUMP"
+  csv_path: "data/pattern_jump_crash.csv"
+  start: "2012-01-02"
+  end: "2025-12-31"
+  fallback_to_synthetic: false
+  min_rows: 756
+
+model:
+  k: 2.0
+  mu_year: 0.0
+  horizons: [5, 10, 20]
+  garch_window: 756
+  garch_min_window: 252
+  mc_base_paths: 30000
+  mc_boost_paths: 60000
+  mc_boost_threshold: 0.02
+  seed: 42
+  t_df: 5.0
+  garch_in_sim: true
+  garch_model_type: "gjr"
+  jump_enabled: true
+  jump_intensity: 2.0
+  jump_mean: -0.02
+  jump_vol: 0.04
+  threshold_mode: "vol_scaled"
+  fixed_threshold_pct: 0.05
+  store_quantiles: true
+
+calibration:
+  lr: 0.05
+  adaptive_lr: true
+  min_updates: 50
+  safety_gate: true
+  gate_window: 200
+  regime_conditional: false
+  multi_feature: false
+  multi_feature_lr: 0.01
+  multi_feature_l2: 0.0001
+  multi_feature_min_updates: 100
+  ensemble_enabled: true
+  ensemble_weights: [0.5, 0.3, 0.2]
+
+output:
+  base_dir: "outputs"
+  charts: false

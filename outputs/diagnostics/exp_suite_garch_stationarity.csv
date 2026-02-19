@@ -1,0 +1,4 @@
+pattern,sampled_windows,non_stationary_windows,non_stationary_rate,ewma_fallback_windows,ewma_fallback_rate
+trend,148,1,0.006756756756756757,0,0.0
+cluster,148,0,0.0,0,0.0
+jump,148,6,0.04054054054054054,0,0.0

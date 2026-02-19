@@ -1,0 +1,40 @@
+# Test: TSLA with GARCH-in-simulation + GJR leverage + jumps
+data:
+  source: "yfinance"
+  ticker: "TSLA"
+  start: "2010-07-01"
+  end: "2026-02-18"
+  fallback_to_synthetic: true
+  min_rows: 756
+  max_retry: 5
+  cache_max_age_days: 7
+
+model:
+  k: 2.0
+  mu_year: 0.0
+  horizons: [5, 10, 20]
+  garch_window: 756
+  garch_min_window: 252
+  mc_base_paths: 100000
+  mc_boost_paths: 200000
+  mc_boost_threshold: 0.02
+  seed: 42
+  t_df: 5.0
+  garch_in_sim: true
+  garch_model_type: "gjr"
+  jump_enabled: true
+  jump_intensity: 2.0
+  jump_mean: -0.02
+  jump_vol: 0.04
+
+calibration:
+  lr: 0.05
+  adaptive_lr: true
+  min_updates: 50
+  safety_gate: true
+  ensemble_enabled: true
+  ensemble_weights: [0.5, 0.3, 0.2]
+
+output:
+  base_dir: "outputs"
+  charts: true
