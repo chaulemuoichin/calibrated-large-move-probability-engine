@@ -161,11 +161,11 @@ def main():
         new = ticker_df[ticker_df["config"].str.contains("regime_gated")].iloc[0]
 
         print(f"\n  {ticker} pattern:")
-        for metric, fmt, higher_better in [
-            ("brier_cal", ".4f", False),
-            ("bss_cal", "+.4f", True),
-            ("auc_cal", ".4f", True),
-            ("separation_cal", ".4f", True),
+        for metric, higher_better in [
+            ("brier_cal", False),
+            ("bss_cal", True),
+            ("auc_cal", True),
+            ("separation_cal", True),
         ]:
             b_val = baseline[metric]
             n_val = new[metric]
@@ -175,8 +175,8 @@ def main():
             else:
                 marker = "+" if delta < -0.001 else ("-" if delta > 0.001 else "=")
             print(
-                f"    {metric:<18s}  baseline={b_val:{fmt}}  regime_gated={n_val:{fmt}}  "
-                f"delta={delta:+{fmt}}  [{marker}]"
+                f"    {metric:<18s}  baseline={b_val:.4f}  regime_gated={n_val:.4f}  "
+                f"delta={delta:+.4f}  [{marker}]"
             )
 
     # ── Regime-Gated Diagnostics ────────────────────────────────

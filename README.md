@@ -14,13 +14,27 @@ A production-ready quantitative research framework for forecasting **two-sided l
 
 ## Why This Exists (Human Version)
 
-You think a stock is undervalued and want to invest. The hardest part is usually not the thesis, it is the entry timing.
+You are an investor. You think a stock is undervalued. You want to buy.
+The painful question is simple: **is today already a good entry?**
 
-- If price goes up right after you buy, great.
-- If price drops hard right after entry, confidence can break fast.
-- That often leads to early exit, realized loss, hesitation on the next setup, and a repeat loop of poor decisions.
+```text
+if price goes up after you buy
+-> good for you
+-> you feel like a genius
 
-This project is built to reduce that loop by turning "Is this entry too risky right now?" into a measurable probability question, so decisions are driven by evidence instead of panic.
+if price goes down hard right after you buy
+-> you may doubt yourself
+   -> exit
+      -> realized loss
+         -> loss of confidence
+            -> rushed next decision
+               -> another loss
+                  -> "market is rigged" post on Reddit
+                     -> stop investing (or revenge trade)
+                        -> same loop again
+```
+
+This project is built to break that loop by turning entry fear into a measurable probability forecast.
 
 ## Practical Use Case
 
