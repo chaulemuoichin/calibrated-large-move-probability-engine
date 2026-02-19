@@ -24,13 +24,11 @@ if price goes up after you buy
 
 if price goes down hard right after you buy
 -> you may doubt yourself
-  -> exit
-     -> realized loss  <--------------------------------------------------------|
-        -> loss of confidence                                                   |
-           -> rushed next decision                                              |
-              -> another loss                                                   | 
-                 -> "market is rigged" posted on Reddit                         |
-                    -> stop investing (or revenge trade)  ----------------------| 
+  -> bad exit & realized loss
+    -> loss of confidence                                                          
+      -> rushed next decision
+        -> another loss   
+          -> either posting "market is rigged" on Reddit and quit or repeating the loop 
 ```
 
 This project is built to break that loop by turning entry fear into a measurable probability forecast.
@@ -79,6 +77,15 @@ The system is designed for reproducible research:
 - **U5: Promotion Gates per Regime Bucket** (`promotion_gates_enabled: true`, default OFF).
 
 Backward compatibility is preserved: U3/U4 are safety no-ops unless triggered, while U1/U2/U5 are opt-in behavior changes.
+
+## How It Works (Plain English)
+
+The system reads recent price behavior to understand whether the market has been calm or jumpy.  
+It then creates many possible future price stories instead of relying on one guess.  
+From those stories, it measures how often a move large enough to matter to you actually happens.  
+As real outcomes arrive, it checks whether earlier percentages were too optimistic or too conservative.  
+It keeps correcting itself over time so the next set of percentages is more trustworthy.  
+The result is a clear probability output you can use to decide buy now, wait, or scale in gradually.
 
 ## Core Features
 
