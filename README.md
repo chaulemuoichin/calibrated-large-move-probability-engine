@@ -30,8 +30,7 @@ if price goes down hard right after you buy
            -> rushed next decision                                              |
               -> another loss                                                   | 
                  -> "market is rigged" posted on Reddit                         |
-                    -> stop investing (or revenge trade)  ----------------------|
-                      
+                    -> stop investing (or revenge trade)  ----------------------| 
 ```
 
 This project is built to break that loop by turning entry fear into a measurable probability forecast.
