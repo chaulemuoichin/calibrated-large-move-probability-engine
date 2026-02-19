@@ -28,7 +28,7 @@ if price goes down hard right after you buy
     -> loss of confidence                                                          
       -> rushed next decision
         -> another loss   
-          -> either posting "market is rigged" on Reddit and quit or repeating the loop 
+          -> either posting "market is rigged" on Reddit & quit or repeating the loop 
 ```
 
 This project is built to break that loop by turning entry fear into a measurable probability forecast.
