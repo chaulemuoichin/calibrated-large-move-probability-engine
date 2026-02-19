@@ -16,15 +16,15 @@ A production-ready quantitative research framework for forecasting **two-sided l
 
 This engine estimates:
 
-*P*(|*R*<sub>H</sub>| >= threshold)
+*P*(|*R*<sub>H</sub>| &ge; threshold)
 
 for multiple horizons `H` (default `[5, 10, 20]` trading days).
 
 **Three threshold modes** control what "large move" means:
 
-- `vol_scaled` (legacy): threshold = `k * sigma_1d * sqrt(H)` — scales with current vol
-- `fixed_pct` (recommended): threshold = fixed absolute return (e.g., 5%) — genuine discrimination
-- `anchored_vol`: threshold uses long-run unconditional vol — quasi-fixed goalpost
+- `vol_scaled` (legacy): threshold = `k * sigma_1d * sqrt(H)` -- scales with current vol
+- `fixed_pct` (recommended): threshold = fixed absolute return (e.g., 5%) -- genuine discrimination
+- `anchored_vol`: threshold uses long-run unconditional vol -- quasi-fixed goalpost
 
 The system is designed for reproducible research:
 
@@ -73,9 +73,9 @@ The system is designed for reproducible research:
 ### Risk Analytics
 
 - **Value-at-Risk (VaR)** at 95% and 99% confidence from realized returns.
-- **Conditional VaR / Expected Shortfall (CVaR)** — average tail loss beyond VaR.
-- **Return skewness and excess kurtosis** — distribution shape diagnostics.
-- **Maximum drawdown** — peak-to-trough loss measurement.
+- **Conditional VaR / Expected Shortfall (CVaR)** -- average tail loss beyond VaR.
+- **Return skewness and excess kurtosis** -- distribution shape diagnostics.
+- **Maximum drawdown** -- peak-to-trough loss measurement.
 - Per-horizon risk report in structured output.
 
 ### Data Quality
@@ -114,13 +114,13 @@ Price Data -> Daily Returns -> GARCH/GJR-GARCH -> sigma_1d, omega, alpha, beta, 
 ### 1) Threshold Modes
 
 **Vol-scaled (legacy)**:
-*thr*<sub>H</sub> = *k* · *sigma*<sub>1d</sub> · sqrt(*H*)
+*thr*<sub>H</sub> = *k* &middot; &sigma;<sub>1d</sub> &middot; &radic;*H*
 
 **Fixed percentage (recommended)**:
 *thr*<sub>H</sub> = *fixed_threshold_pct* (e.g., 0.05 for 5%)
 
 **Anchored vol**:
-*thr*<sub>H</sub> = *k* · *sigma*<sub>unconditional</sub> · sqrt(*H*)
+*thr*<sub>H</sub> = *k* &middot; &sigma;<sub>unconditional</sub> &middot; &radic;*H*
 
 where `sigma_unconditional` is the expanding-window standard deviation of all past returns.
 
@@ -128,17 +128,17 @@ where `sigma_unconditional` is the expanding-window standard deviation of all pa
 
 For prediction date `t` and horizon `H`:
 
-*y*<sub>H</sub>(t) = I(|*S*<sub>t+H</sub> / *S*<sub>t</sub> - 1| >= *thr*<sub>H</sub>)
+*y*<sub>H</sub>(t) = I(|*S*<sub>t+H</sub> / *S*<sub>t</sub> - 1| &ge; *thr*<sub>H</sub>)
 
 ### 3) Multi-Feature Calibration
 
-*p*<sub>cal</sub> = sigma(**w**<sup>T</sup> **x**)
+*p*<sub>cal</sub> = &sigma;(**w**<sup>T</sup> **x**)
 
 where:
-**x** = [1, logit(*p*<sub>raw</sub>), *sigma*<sub>1d</sub>, *delta_sigma*<sub>20d</sub>, *vol_ratio*, *vol_of_vol*]
+**x** = [1, logit(*p*<sub>raw</sub>), &sigma;<sub>1d</sub>, &Delta;&sigma;<sub>20d</sub>, *vol_ratio*, *vol_of_vol*]
 
 Online SGD with L2 regularization:
-**w** <- **w** + *eta* [(*y* - *p*<sub>cal</sub>)**x** - *lambda***w**]
+**w** &larr; **w** + &eta; [(*y* - *p*<sub>cal</sub>)**x** - &lambda;**w**]
 
 ### 4) Brier Skill Score
 
@@ -354,7 +354,7 @@ README.md
 
 ## Practical Notes
 
-- **Start with `fixed_pct` threshold mode** — it eliminates the self-referencing bias that makes vol-scaled AUC ~0.50.
+- **Start with `fixed_pct` threshold mode** -- it eliminates the self-referencing bias that makes vol-scaled AUC ~0.50.
 - Enable `garch_in_sim: true` and `garch_model_type: "gjr"` for all assets.
 - Use `multi_feature: true` to leverage vol trend and forecast error signals.
 - Use jump-diffusion mainly for crash-prone names (`jump_enabled: true`).
