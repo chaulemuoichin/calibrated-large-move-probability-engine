@@ -16,9 +16,7 @@ A production-ready quantitative research framework for forecasting **two-sided l
 
 This engine estimates:
 
-```text
-P(|R_H| >= threshold)
-```
+*P*(|*R*<sub>H</sub>| >= threshold)
 
 for multiple horizons `H` (default `[5, 10, 20]` trading days).
 
@@ -116,19 +114,13 @@ Price Data -> Daily Returns -> GARCH/GJR-GARCH -> sigma_1d, omega, alpha, beta, 
 ### 1) Threshold Modes
 
 **Vol-scaled (legacy)**:
-```text
-thr_H = k * sigma_1d * sqrt(H)
-```
+*thr*<sub>H</sub> = *k* · *sigma*<sub>1d</sub> · sqrt(*H*)
 
 **Fixed percentage (recommended)**:
-```text
-thr_H = fixed_threshold_pct    (e.g., 0.05 for 5%)
-```
+*thr*<sub>H</sub> = *fixed_threshold_pct* (e.g., 0.05 for 5%)
 
 **Anchored vol**:
-```text
-thr_H = k * sigma_unconditional * sqrt(H)
-```
+*thr*<sub>H</sub> = *k* · *sigma*<sub>unconditional</sub> · sqrt(*H*)
 
 where `sigma_unconditional` is the expanding-window standard deviation of all past returns.
 
@@ -136,31 +128,21 @@ where `sigma_unconditional` is the expanding-window standard deviation of all pa
 
 For prediction date `t` and horizon `H`:
 
-```text
-y_H(t) = 1 if abs(S_(t+H) / S_t - 1) >= thr_H, else 0
-```
+*y*<sub>H</sub>(t) = I(|*S*<sub>t+H</sub> / *S*<sub>t</sub> - 1| >= *thr*<sub>H</sub>)
 
 ### 3) Multi-Feature Calibration
 
-```text
-p_cal = sigmoid(w^T x)
-```
+*p*<sub>cal</sub> = sigma(**w**<sup>T</sup> **x**)
 
 where:
-```text
-x = [1, logit(p_raw), sigma_1d, delta_sigma_20d, vol_ratio, vol_of_vol]
-```
+**x** = [1, logit(*p*<sub>raw</sub>), *sigma*<sub>1d</sub>, *delta_sigma*<sub>20d</sub>, *vol_ratio*, *vol_of_vol*]
 
 Online SGD with L2 regularization:
-```text
-w <- w + eta * ((y - p_cal) * x - lambda * w)
-```
+**w** <- **w** + *eta* [(*y* - *p*<sub>cal</sub>)**x** - *lambda***w**]
 
 ### 4) Brier Skill Score
 
-```text
-BSS = 1 - (Brier_model / Brier_climatology)
-```
+*BSS* = 1 - (*Brier*<sub>model</sub> / *Brier*<sub>climatology</sub>)
 
 where `Brier_climatology = p_bar * (1 - p_bar)`. BSS > 0 means the model beats predicting the historical event rate.
 
