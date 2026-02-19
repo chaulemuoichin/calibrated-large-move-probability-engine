@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import sys
 import time
 import uuid
@@ -24,6 +25,65 @@ def _date_str(value: object) -> str:
     """Format index values as YYYY-MM-DD strings for logs and console output."""
     text = str(value)
     return text[:10] if len(text) >= 10 else text
+
+
+def _is_finite_number(value: object) -> bool:
+    """Return True if value can be interpreted as a finite float."""
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _horizon_phrase(H: int) -> str:
+    """Convert trading-day horizon to a reader-friendly phrase."""
+    if H == 1:
+        return "next trading day"
+    if H == 5:
+        return "next ~1 week"
+    if H == 10:
+        return "next ~2 weeks"
+    if H % 5 == 0 and H >= 5:
+        weeks = H // 5
+        return f"next ~{weeks} weeks"
+    return f"next {H} trading days"
+
+
+def _print_readable_risk_summary(results, horizons) -> None:
+    """Print plain-English event risk summary for the latest prediction row."""
+    if len(results) == 0:
+        return
+
+    latest = results.iloc[-1]
+    as_of = _date_str(latest.get("date", "latest"))
+
+    print()
+    print("READABLE RISK SUMMARY (latest forecast)")
+    print("-" * 60)
+
+    for H in horizons:
+        p_key = f"p_cal_{H}"
+        thr_key = f"thr_{H}"
+        p_val = latest.get(p_key)
+        thr_val = latest.get(thr_key)
+
+        if not _is_finite_number(p_val):
+            continue
+
+        p_pct = float(p_val) * 100.0
+        horizon_text = _horizon_phrase(H)
+
+        if _is_finite_number(thr_val):
+            thr_pct = float(thr_val) * 100.0
+            print(
+                f"  As of {as_of}, estimated chance of a move >= {thr_pct:.2f}% "
+                f"in the {horizon_text}: {p_pct:.1f}%"
+            )
+        else:
+            print(
+                f"  As of {as_of}, estimated event chance in the {horizon_text}: "
+                f"{p_pct:.1f}%"
+            )
 
 
 def main():
@@ -173,6 +233,8 @@ def main():
                 f"skew={rr.get('skewness', 0):+.3f}  "
                 f"kurt={rr.get('kurtosis', 0):.2f}"
             )
+
+    _print_readable_risk_summary(results, cfg.model.horizons)
 
     # Write outputs
     logger.info("Writing outputs...")
