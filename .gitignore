@@ -1,0 +1,25 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Outputs (runtime artifacts — reproducible, not tracked)
+outputs/**
+
+# Re-include diagnostics memo folder and Markdown memos only
+!outputs/diagnostics/
+!outputs/diagnostics/*.md
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

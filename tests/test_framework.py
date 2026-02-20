@@ -1726,10 +1726,12 @@ class TestPublicAPI:
         from em_sde import (
             PipelineConfig, OnlineCalibrator, MultiFeatureCalibrator,
             GarchResult, run_walkforward, brier_score, value_at_risk,
+            ewma_volatility,
         )
-        # Verify they're the real classes, not None
+        # Verify they're the real classes/functions, not None
         assert PipelineConfig is not None
         assert OnlineCalibrator is not None
+        assert callable(ewma_volatility)
 
 
 # ============================================================
