@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -293,8 +293,9 @@ def run_walkforward(
                 and garch_result.diagnostics is not None
                 and not garch_result.diagnostics.get("is_stationary", True)):
             if garch_fallback_ewma:
+                sigma_ewma = ewma_volatility(available_returns, span=252)
                 garch_result = GarchResult(
-                    sigma_1d=garch_result.sigma_1d,
+                    sigma_1d=sigma_ewma,
                     source="ewma_fallback_nonstationary",
                 )
                 projected = True
@@ -303,6 +304,7 @@ def run_walkforward(
                     garch_result.omega, garch_result.alpha, garch_result.beta,
                     garch_result.gamma, garch_model_type,
                     target_persistence=garch_target_persistence,
+                    variance_anchor=garch_result.sigma_1d ** 2,
                 )
                 garch_result = GarchResult(
                     sigma_1d=garch_result.sigma_1d,

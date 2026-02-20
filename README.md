@@ -9,7 +9,7 @@ A production-ready quantitative research framework for forecasting **two-sided l
 - **regime-gated threshold routing** to switch threshold policy by vol percentile.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-133%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-137%20passing-brightgreen)
 ![Model](https://img.shields.io/badge/model-GARCH%20%2B%20GJR%20%2B%20Jumps%20%2B%20MC%20%2B%20Calibration-informational)
 
 ## Why This Exists ?!!
@@ -73,7 +73,7 @@ The system is designed for reproducible research:
 - **U1: Regime-Gated Threshold Routing** (`threshold_mode: "regime_gated"`, default OFF).
 - **U2: State-Dependent Jump Model** (`jump_state_dependent: true`, default OFF).
 - **U3: AUC/Separation Calibration Guardrail** (`gate_on_discrimination: true`, default ON).
-- **U4: Stationarity-Constrained GARCH Projection** (`garch_stationarity_constraint: true`, default ON).
+- **U4: Stationarity-Constrained GARCH Projection** (`garch_stationarity_constraint: true`, default ON; now variance-targets `omega` to anchor projected long-run variance).
 - **U5: Promotion Gates per Regime Bucket** (`promotion_gates_enabled: true`, default OFF).
 
 Backward compatibility is preserved: U3/U4 are safety no-ops unless triggered, while U1/U2/U5 are opt-in behavior changes.
@@ -205,7 +205,8 @@ If `p >= 1`, project coefficients with scale `s = target_persistence / p`:
 - `alpha' = s * alpha`
 - `beta' = s * beta`
 - `gamma' = s * gamma` (GJR only)
-- `omega` unchanged
+- if variance anchor is provided: `omega' = variance_anchor * (1 - target_persistence)`
+- otherwise (legacy/backward-compatible path): `omega` unchanged
 
 ### 4) State-Dependent Jumps (U2)
 
@@ -408,7 +409,7 @@ outputs/<run_id>/
 
 ## Testing
 
-This project includes **133 unit tests** in `tests/test_framework.py`, covering:
+This project includes **137 unit tests** in `tests/test_framework.py`, covering:
 
 - Brownian increment statistics and GBM moment consistency,
 - Student-t fat-tail behavior,
@@ -433,6 +434,8 @@ This project includes **133 unit tests** in `tests/test_framework.py`, covering:
 - **backtest analytics**: hit rate, signal turnover, precision/recall,
 - **GARCH diagnostics**: stationarity, persistence, half-life, unconditional vol,
 - **stationarity projection (U4)**: non-stationary parameter projection and target persistence behavior,
+- **variance-targeted projection**: projected `omega` anchors long-run variance when anchor is provided,
+- **EWMA non-stationary fallback**: fallback computes actual EWMA sigma in walk-forward loop,
 - **state-dependent jumps (U2)**: interpolation behavior across vol regimes,
 - **regime-gated threshold routing (U1)**: low/mid/high mode assignment and warmup handling,
 - **discrimination guardrails (U3)**: calibration gating on rolling AUC/separation,
@@ -477,7 +480,7 @@ configs/
 outputs/
   <run_id>/...
 tests/
-  test_framework.py      # 133 unit tests
+  test_framework.py      # 137 unit tests
 calibrated_large_move_probability_engine.py
 requirements.txt
 README.md

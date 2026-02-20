@@ -139,11 +139,11 @@ def fit_garch(
 
     except Exception as e:
         logger.debug("GARCH fit failed (%s), using EWMA fallback", e)
-        sigma_1d = _ewma_volatility(data)
+        sigma_1d = ewma_volatility(data)
         return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback")
 
 
-def _ewma_volatility(returns: NDArray[np.float64], span: int = 252) -> float:
+def ewma_volatility(returns: NDArray[np.float64], span: int = 252) -> float:
     """
     EWMA volatility estimate as fallback.
 
@@ -233,13 +233,18 @@ def project_to_stationary(
     gamma: Optional[float] = None,
     model_type: str = "garch",
     target_persistence: float = 0.98,
+    variance_anchor: Optional[float] = None,
 ) -> tuple:
     """
     Project GARCH parameters to the stationary region when persistence >= 1.0.
 
     Scales alpha, beta (and gamma for GJR) proportionally so that
     persistence = target_persistence, preserving relative parameter ratios.
-    Omega is unchanged to maintain the unconditional vol scale.
+
+    When variance_anchor is provided, omega is recomputed so that the
+    stationary variance V_inf = omega / (1 - persistence) equals the anchor:
+        omega_new = variance_anchor * (1 - target_persistence)
+    Without variance_anchor, omega is returned unchanged (legacy behavior).
 
     For GJR-GARCH: persistence = alpha + beta + gamma/2.
 
@@ -257,6 +262,9 @@ def project_to_stationary(
         "garch" or "gjr".
     target_persistence : float
         Target persistence after projection (default 0.98).
+    variance_anchor : float or None
+        Target stationary variance (typically sigma_1d**2). When provided,
+        omega is recomputed to anchor V_inf to this value.
 
     Returns
     -------
@@ -285,11 +293,21 @@ def project_to_stationary(
     else:
         gamma_new = gamma
 
+    # Variance-targeted omega: ensure V_inf = variance_anchor
+    if variance_anchor is not None and variance_anchor > 0:
+        omega_new = variance_anchor * (1.0 - target_persistence)
+        logger.info(
+            "GARCH variance-targeted omega: %.4e -> %.4e (anchor=%.6f)",
+            omega, omega_new, variance_anchor,
+        )
+    else:
+        omega_new = omega
+
     logger.info(
         "GARCH projection: persistence %.4f -> %.4f (scale=%.4f), "
-        "alpha %.4f -> %.4f, beta %.4f -> %.4f",
+        "omega %.4e -> %.4e, alpha %.4f -> %.4f, beta %.4f -> %.4f",
         current_persistence, target_persistence, scale,
-        alpha, alpha_new, beta, beta_new,
+        omega, omega_new, alpha, alpha_new, beta, beta_new,
     )
 
-    return omega, alpha_new, beta_new, gamma_new
+    return omega_new, alpha_new, beta_new, gamma_new

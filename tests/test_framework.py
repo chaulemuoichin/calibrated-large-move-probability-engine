@@ -1771,10 +1771,111 @@ class TestStationarityProjection:
         assert a == alpha
         assert b == beta
 
-    def test_projection_preserves_omega(self):
+    def test_projection_preserves_omega_when_no_anchor(self):
+        """Backward compat: omega unchanged when variance_anchor is not provided."""
         omega = 1e-6
         o, a, b, g = project_to_stationary(omega, 0.15, 0.90, target_persistence=0.98)
         assert o == omega
+
+    def test_projection_recomputes_omega_with_variance_anchor(self):
+        """When variance_anchor is provided, omega is recomputed for variance targeting."""
+        omega = 1e-6
+        alpha, beta = 0.15, 0.90
+        sigma_1d = 0.02  # 2% daily vol
+        variance_anchor = sigma_1d ** 2
+        target_p = 0.98
+
+        o, a, b, g = project_to_stationary(
+            omega, alpha, beta,
+            target_persistence=target_p,
+            variance_anchor=variance_anchor,
+        )
+
+        # omega_new = variance_anchor * (1 - target_persistence)
+        expected_omega = variance_anchor * (1.0 - target_p)
+        assert abs(o - expected_omega) < 1e-12, f"omega {o} != expected {expected_omega}"
+
+        # V_inf = omega_new / (1 - new_persistence) should equal variance_anchor
+        new_persistence = a + b
+        v_inf = o / (1.0 - new_persistence)
+        assert abs(v_inf - variance_anchor) < 1e-10, \
+            f"V_inf {v_inf} != variance_anchor {variance_anchor}"
+
+    def test_gjr_projection_recomputes_omega_with_variance_anchor(self):
+        """GJR projection with variance_anchor also recomputes omega correctly."""
+        omega, alpha, beta, gamma = 1e-6, 0.10, 0.85, 0.12
+        sigma_1d = 0.025
+        variance_anchor = sigma_1d ** 2
+        target_p = 0.98
+
+        o, a, b, gm = project_to_stationary(
+            omega, alpha, beta, gamma,
+            model_type="gjr",
+            target_persistence=target_p,
+            variance_anchor=variance_anchor,
+        )
+
+        expected_omega = variance_anchor * (1.0 - target_p)
+        assert abs(o - expected_omega) < 1e-12
+
+        # GJR persistence: a + b + gm/2
+        new_persistence = a + b + gm / 2.0
+        assert abs(new_persistence - target_p) < 0.001
+        v_inf = o / (1.0 - new_persistence)
+        assert abs(v_inf - variance_anchor) < 1e-10
+
+    def test_ewma_fallback_computes_actual_ewma(self):
+        """ewma_volatility is public and returns a reasonable value."""
+        from em_sde.garch import ewma_volatility
+
+        rng = np.random.default_rng(42)
+        returns = rng.normal(0, 0.01, size=500)
+
+        sigma_ewma = ewma_volatility(returns, span=252)
+
+        assert sigma_ewma > 0
+        assert sigma_ewma < 1.0
+        # Should be near true vol of 0.01
+        assert abs(sigma_ewma - 0.01) < 0.003
+
+    def test_projected_garch_simulation_mean_reverts_to_anchor(self):
+        """After projection with variance_anchor, simulation mean-reverts to anchor."""
+        from em_sde.monte_carlo import simulate_garch_terminal
+
+        sigma_1d = 0.02
+        variance_anchor = sigma_1d ** 2
+        # Non-stationary params
+        omega_orig = 1e-6
+        alpha_orig = 0.15
+        beta_orig = 0.90
+
+        # Project with variance anchor
+        omega_p, alpha_p, beta_p, _ = project_to_stationary(
+            omega_orig, alpha_orig, beta_orig,
+            target_persistence=0.98,
+            variance_anchor=variance_anchor,
+        )
+
+        # Simulate long GARCH paths
+        terminal = simulate_garch_terminal(
+            S0=100.0,
+            sigma_1d=sigma_1d,
+            H=100,
+            n_paths=50_000,
+            omega=omega_p,
+            alpha=alpha_p,
+            beta=beta_p,
+            gamma=0.0,
+            mu_year=0.0,
+            seed=42,
+        )
+
+        # Realized vol over many paths should be in neighborhood of sigma_1d
+        sim_returns = terminal / 100.0 - 1.0
+        realized_vol_daily = np.std(sim_returns) / np.sqrt(100)
+        ratio = realized_vol_daily / sigma_1d
+        assert 0.5 < ratio < 2.0, \
+            f"Realized daily vol {realized_vol_daily:.6f} too far from anchor {sigma_1d:.6f} (ratio={ratio:.2f})"
 
     def test_default_config_enables_constraint(self):
         cfg = ModelConfig()
