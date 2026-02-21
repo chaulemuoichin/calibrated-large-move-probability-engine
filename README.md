@@ -5,7 +5,7 @@ A system that estimates the probability of large price moves over the next 1-4 w
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-150%20passing-brightgreen)
 
-## Why This Exists
+## Why This Exists 
 
 You are an investor. You think a stock is undervalued. You want to buy.
 The painful question is simple: **is today already a good entry?**
@@ -28,7 +28,7 @@ This project breaks that loop. Instead of guessing, it gives you a number:
 
 If that number is trustworthy (and the system works hard to make it trustworthy), you can make a calmer decision — buy now, wait, or scale in gradually.
 
-## How It Works (Plain English)
+## How It Works (for full version visit [Methodology](https://github.com/chaulemuoichin/calibrated-large-move-probability-engine/blob/main/METHODOLOGY.md)) 
 
 1. **Read the recent past.** The system looks at recent price behavior to understand how calm or jumpy the market has been.
 
