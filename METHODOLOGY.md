@@ -401,12 +401,30 @@ if rolling_AUC < 0.50 or rolling_separation < 0.0:
 
 This prevents the calibrator from actively inverting the signal during regime changes.
 
+### Histogram Post-Calibration (P0-2)
+
+After the Platt/logistic mapping, an optional second pass corrects residual bin-level bias:
+
+```
+For each of 20 equal-width bins over [0, 1]:
+    Track running mean(p_cal) and mean(y) for samples in that bin.
+
+At prediction time:
+    correction = mean_pred_in_bin - mean_obs_in_bin
+    p_final = p_cal - correction    (clipped to [0, 1])
+```
+
+This directly targets calibration error (ECE) rather than squared error (Brier). A minimum of 30 samples per bin is required before correction activates. Enabled by default via `histogram_post_calibration: true` in the calibration config.
+
+**File:** `em_sde/calibration.py` (`HistogramCalibrator`)
+
 ### Where to look for problems
 
 - **Cold start**: The first 50-100 predictions are uncalibrated. If the evaluation window is short, this dominates the metrics.
 - **Learning rate**: Too high causes oscillation. Too low causes the calibrator to never catch up with regime changes. The adaptive decay helps but doesn't solve structural shifts.
 - **Multi-feature overfitting**: With 6 features and online learning, the calibrator can chase noise. L2 regularization mitigates this, but the default `1e-4` may be too weak for very noisy data.
 - **Gate hysteresis**: Once the safety gate or discrimination gate activates, there's no explicit re-entry logic — it re-evaluates every step. This can cause rapid on/off switching.
+- **Histogram calibrator + Platt interaction**: The histogram post-pass learns from the Platt-scaled output at update time (not prediction time). If Platt parameters shift significantly between prediction and resolution, the histogram correction may lag. This is mitigated by adaptive lr decay on the Platt stage.
 
 ---
 
@@ -480,7 +498,7 @@ After the backtest, we measure how good the predictions were.
 | **Brier Score** | mean((p - y)^2) | Average squared error. Lower = better. Range [0, 1]. |
 | **Brier Skill Score** | 1 - Brier / Brier_climatology | How much better than always predicting the event rate. BSS > 0 = useful. |
 | **Log Loss** | -mean(y*log(p) + (1-y)*log(1-p)) | Penalizes confident wrong predictions heavily. Lower = better. |
-| **ECE** | Weighted average of |predicted - observed| per probability bin | Measures systematic over/under-confidence. Lower = better. |
+| **ECE** | Weighted average of \|predicted - observed\| per adaptive (quantile) bin | Measures systematic over/under-confidence. Lower = better. |
 
 ### Secondary: Discrimination Quality
 
@@ -510,7 +528,7 @@ After the backtest, we measure how good the predictions were.
 
 - **BSS near zero**: The model isn't beating the base rate. Check if the threshold mode is creating near-constant event rates (vol_scaled does this).
 - **AUC near 0.5**: No discrimination. The model assigns similar probabilities to events and non-events. Check threshold mode and calibration warmup.
-- **ECE > 0.02**: Systematic miscalibration. Check if the calibrator has enough data to learn, or if regime shifts are too fast.
+- **ECE > 0.02**: Systematic miscalibration. ECE uses adaptive (quantile-based) bins by default, which avoids pathological inflation when predictions cluster in a narrow range. If ECE is still high with adaptive bins, the calibrator genuinely needs more data or the signal is too noisy. Equal-width bins are available via `adaptive=False` for backward compatibility.
 - **N_eff much smaller than N**: Heavy overlap autocorrelation. Non-overlapping metrics may tell a different story.
 
 ---
@@ -606,11 +624,14 @@ p_cal = 1 / (1 + exp(-(a + b * log(p_raw / (1 - p_raw)))))
 BSS = 1 - mean((p - y)^2) / (event_rate * (1 - event_rate))
 ```
 
-### Expected Calibration Error
+### Expected Calibration Error (Adaptive Binning)
 
 ```
+bin_edges = quantiles of predictions at [0%, 10%, 20%, ..., 100%]  (adaptive)
 ECE = sum over bins: (bin_count / total) * |mean_predicted_in_bin - mean_observed_in_bin|
 ```
+
+Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are available via `adaptive=False`.
 
 ---
 
@@ -641,11 +662,11 @@ ECE = sum over bins: (bin_count / total) * |mean_predicted_in_bin - mean_observe
 | `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
 | `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
-| `em_sde/calibration.py` | Online/multi-feature/regime calibrators, safety gates |
+| `em_sde/calibration.py` | Online/multi-feature/regime calibrators, histogram post-calibration, safety gates |
 | `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing |
 | `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 137 unit tests |
+| `tests/test_framework.py` | 147 unit tests |

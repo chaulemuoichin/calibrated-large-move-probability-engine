@@ -82,6 +82,7 @@ class CalibrationConfig:
     multi_feature_lr: float = 0.01   # learning rate for multi-feature calibrator
     multi_feature_l2: float = 1e-4   # L2 regularization strength
     multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
+    histogram_post_calibration: bool = True  # bin-level bias correction after Platt/logistic
     ensemble_enabled: bool = True
     ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
     # Promotion gates for model selection

@@ -37,6 +37,7 @@ from em_sde.config import PipelineConfig, DataConfig, ModelConfig, CalibrationCo
 from em_sde.garch import fit_garch, GarchResult, project_to_stationary
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
+from em_sde.calibration import HistogramCalibrator
 from em_sde.model_selection import apply_promotion_gates
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
@@ -2068,6 +2069,51 @@ class TestExpectedCalibrationError:
         ece = expected_calibration_error(p, y)
         assert ece > 0.10, f"Biased predictions should have high ECE, got {ece}"
 
+    def test_adaptive_is_default(self):
+        """Adaptive binning is the default (adaptive=True)."""
+        rng = np.random.default_rng(99)
+        p = rng.uniform(0.0, 1.0, 500)
+        y = (rng.random(500) < p).astype(float)
+        ece_default = expected_calibration_error(p, y)
+        ece_adaptive = expected_calibration_error(p, y, adaptive=True)
+        assert ece_default == ece_adaptive
+
+    def test_equal_width_backward_compat(self):
+        """adaptive=False reproduces original equal-width behavior."""
+        rng = np.random.default_rng(42)
+        p = rng.uniform(0.0, 1.0, 10000)
+        y = (rng.random(10000) < p).astype(float)
+        ece_ew = expected_calibration_error(p, y, adaptive=False)
+        assert ece_ew < 0.02, f"Equal-width ECE should be low for perfect cal, got {ece_ew}"
+
+    def test_adaptive_detects_bias_in_skewed_predictions(self):
+        """Adaptive ECE correctly detects calibration errors in skewed distributions.
+
+        When predictions cluster in a narrow range, equal-width ECE may mask
+        genuine calibration errors by putting everything in one bin.  Adaptive
+        ECE spreads weight across bins and can expose finer-grained bias.
+        """
+        rng = np.random.default_rng(77)
+        n = 5000
+        # All predictions near 0.15, but true event rate is 0.03
+        p = np.clip(rng.normal(0.15, 0.02, n), 0.01, 0.30)
+        y = (rng.random(n) < 0.03).astype(float)
+
+        ece_adaptive = expected_calibration_error(p, y, adaptive=True)
+        # Should detect the ~12pp bias
+        assert ece_adaptive > 0.05, (
+            f"Adaptive ECE should detect systematic bias, got {ece_adaptive:.4f}"
+        )
+
+    def test_adaptive_identical_predictions(self):
+        """Adaptive ECE handles all-identical predictions gracefully."""
+        p = np.full(100, 0.10)
+        y = np.zeros(100)
+        y[:10] = 1.0  # exactly 10% event rate
+        ece = expected_calibration_error(p, y, adaptive=True)
+        # |0.10 - 0.10| = 0.0
+        assert ece < 0.01, f"Identical predictions matching event rate: ECE={ece}"
+
 
 class TestPromotionGates:
     """Tests for apply_promotion_gates()."""
@@ -2109,6 +2155,69 @@ class TestPromotionGates:
         ])
         report = apply_promotion_gates(cv_data)
         assert "margin" in report.columns
+
+
+class TestHistogramCalibrator:
+    """Tests for HistogramCalibrator (bin-level bias correction)."""
+
+    def test_no_correction_before_min_samples(self):
+        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=30)
+        # Feed 10 samples (below threshold)
+        for _ in range(10):
+            hc.update(0.10, 0.0)
+        # Should return input unchanged
+        assert hc.calibrate(0.10) == 0.10
+
+    def test_correction_reduces_bias(self):
+        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=10)
+        # Systematically predict 0.20 but true rate is 0.05
+        for _ in range(50):
+            hc.update(0.20, 0.0)
+        for _ in range(3):
+            hc.update(0.20, 1.0)  # ~5.7% event rate
+        corrected = hc.calibrate(0.20)
+        # Correction should pull prediction down toward observed rate
+        assert corrected < 0.20, f"Expected correction below 0.20, got {corrected}"
+        assert corrected > 0.0, f"Corrected probability should be positive, got {corrected}"
+
+    def test_well_calibrated_no_correction(self):
+        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=30)
+        rng = np.random.default_rng(42)
+        # Feed well-calibrated data: predict 0.50, event rate 50%
+        for _ in range(100):
+            y = float(rng.random() < 0.50)
+            hc.update(0.50, y)
+        corrected = hc.calibrate(0.50)
+        # Should be close to 0.50 (minimal correction)
+        assert abs(corrected - 0.50) < 0.05, (
+            f"Well-calibrated input should have minimal correction, got {corrected}"
+        )
+
+    def test_output_clipped_to_01(self):
+        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=5)
+        # Extreme case: predict 0.02 but all events
+        for _ in range(10):
+            hc.update(0.02, 1.0)
+        corrected = hc.calibrate(0.02)
+        assert 0.0 <= corrected <= 1.0, f"Output must be in [0, 1], got {corrected}"
+
+    def test_online_calibrator_with_histogram_post_cal(self):
+        """OnlineCalibrator with histogram_post_cal=True produces valid output."""
+        from em_sde.calibration import OnlineCalibrator
+        cal = OnlineCalibrator(lr=0.05, min_updates=5, histogram_post_cal=True)
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            p_raw = float(rng.uniform(0.01, 0.50))
+            y = float(rng.random() < 0.10)
+            p_cal = cal.calibrate(p_raw)
+            assert 0.0 <= p_cal <= 1.0, f"p_cal out of range: {p_cal}"
+            cal.update(p_raw, y)
+
+    def test_histogram_calibrator_import(self):
+        """HistogramCalibrator is importable from public API."""
+        from em_sde import HistogramCalibrator as HC
+        hc = HC()
+        assert hc.n_bins == 20
 
 
 if __name__ == "__main__":

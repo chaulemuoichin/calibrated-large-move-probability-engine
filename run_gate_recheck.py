@@ -1,0 +1,90 @@
+"""
+Re-run CV gates for the two best configs after P0 fixes:
+  - ECE gate now uses equal-width binning (threshold 0.02 was calibrated for it)
+  - Histogram post-calibration is active
+  - Adaptive ECE reported as diagnostic column
+
+Usage:
+    python -u run_gate_recheck.py [jump|cluster]
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+import warnings
+import logging
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+logging.disable(logging.WARNING)
+
+from em_sde.config import load_config
+from em_sde.data_layer import load_data
+from em_sde.model_selection import expanding_window_cv, compare_models, apply_promotion_gates
+
+OUT_DIR = Path("outputs/diagnostics")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def run_single_config(name: str, config_path: str) -> None:
+    t0 = time.perf_counter()
+    print(f"\n=== CV {name} (equal-width ECE for gates, histogram post-cal ON) ===")
+
+    cfg = load_config(config_path)
+    cfg_name = Path(config_path).stem
+    df, _ = load_data(cfg)
+
+    cv_results = expanding_window_cv(df, [cfg], [cfg_name], n_folds=5)
+    summary = compare_models(cv_results)
+    gates = apply_promotion_gates(
+        cv_results,
+        gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+    )
+
+    # Save results
+    cv_results.to_csv(OUT_DIR / f"cv_{name}_folds_recheck.csv", index=False)
+    summary.to_csv(OUT_DIR / f"cv_{name}_summary_recheck.csv", index=False)
+    gates.to_csv(OUT_DIR / f"cv_{name}_gates_recheck.csv", index=False)
+
+    elapsed = (time.perf_counter() - t0) / 60.0
+
+    # Print gate report
+    print(f"\nElapsed: {elapsed:.1f} min\n")
+    for (cfg_n, H), grp in gates.groupby(["config_name", "horizon"]):
+        all_pass = grp["all_gates_passed"].all()
+        status = "PASS" if all_pass else "FAIL"
+        print(f"{cfg_n} H={H}: {status}")
+        for _, row in grp.iterrows():
+            metric = row["metric"]
+            value = row["value"]
+            threshold = row["threshold"]
+            passed = row["passed"]
+            margin = row["margin"]
+            tag = "[OK]" if passed else "[FAIL]"
+            print(f"  {row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}) {tag}")
+
+    n_pass = gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
+    n_total = gates.groupby(["config_name", "horizon"]).ngroups
+    print(f"\nGate pass: {n_pass}/{n_total} config-horizon combos")
+
+
+def main() -> int:
+    target = sys.argv[1] if len(sys.argv) > 1 else "both"
+
+    configs = {}
+    if target in ("jump", "both"):
+        configs["jump"] = "configs/exp_suite/exp_jump_regime_gated.yaml"
+    if target in ("cluster", "both"):
+        configs["cluster"] = "configs/exp_suite/exp_cluster_regime_gated.yaml"
+
+    t_all = time.perf_counter()
+    for name, path in configs.items():
+        run_single_config(name, path)
+
+    print(f"\n=== DONE ({(time.perf_counter() - t_all) / 60.0:.1f} min total) ===")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

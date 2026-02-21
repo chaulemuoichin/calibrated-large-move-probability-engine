@@ -16,7 +16,7 @@ If calibration is degrading performance, automatically falls back to raw.
 
 import numpy as np
 from collections import deque
-from typing import Dict
+from typing import Dict, Optional
 
 # Clipping bounds to avoid log(0) and overflow
 _CLIP_LO = 1e-7
@@ -36,6 +36,59 @@ def logit(p: float) -> float:
     """Logit (inverse sigmoid) with clipping."""
     p = np.clip(p, _CLIP_LO, _CLIP_HI)
     return float(np.log(p / (1.0 - p)))
+
+
+class HistogramCalibrator:
+    """
+    Online histogram binning recalibrator.
+
+    Tracks running per-bin statistics (mean predicted vs mean observed)
+    and applies additive bias correction to reduce calibration error.
+
+    Designed as a post-pass on top of Platt/logistic calibration:
+        p_corrected = p_cal - (mean_pred_in_bin - mean_obs_in_bin)
+
+    Uses equal-width bins with fine granularity (default 20) so the
+    correction can operate at the resolution where predictions cluster.
+
+    Parameters
+    ----------
+    n_bins : int
+        Number of equal-width bins over [0, 1].
+    min_samples_per_bin : int
+        Minimum samples in a bin before correction is applied.
+    """
+
+    def __init__(self, n_bins: int = 20, min_samples_per_bin: int = 30):
+        self.n_bins = n_bins
+        self.min_samples_per_bin = min_samples_per_bin
+        self.bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        self._sum_pred = np.zeros(n_bins)
+        self._sum_obs = np.zeros(n_bins)
+        self._count = np.zeros(n_bins, dtype=int)
+
+    def _get_bin(self, p: float) -> int:
+        """Get bin index for a prediction."""
+        p = np.clip(p, 0.0, 1.0)
+        idx = int(np.searchsorted(self.bin_edges[1:], p, side='right'))
+        return min(idx, self.n_bins - 1)
+
+    def calibrate(self, p_cal: float) -> float:
+        """Apply histogram bias correction."""
+        idx = self._get_bin(p_cal)
+        if self._count[idx] < self.min_samples_per_bin:
+            return p_cal
+        mean_pred = self._sum_pred[idx] / self._count[idx]
+        mean_obs = self._sum_obs[idx] / self._count[idx]
+        correction = mean_pred - mean_obs
+        return float(np.clip(p_cal - correction, 0.0, 1.0))
+
+    def update(self, p_cal: float, y: float):
+        """Update bin statistics with a resolved outcome."""
+        idx = self._get_bin(p_cal)
+        self._sum_pred[idx] += p_cal
+        self._sum_obs[idx] += y
+        self._count[idx] += 1
 
 
 class OnlineCalibrator:
@@ -59,7 +112,8 @@ class OnlineCalibrator:
                  gate_on_discrimination: bool = False,
                  gate_auc_threshold: float = 0.50,
                  gate_separation_threshold: float = 0.0,
-                 gate_discrimination_window: int = 200):
+                 gate_discrimination_window: int = 200,
+                 histogram_post_cal: bool = False):
         self.a: float = 0.0
         self.b: float = 1.0
         self.lr: float = lr
@@ -81,6 +135,11 @@ class OnlineCalibrator:
         self._gate_discrimination_window: int = gate_discrimination_window
         self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
         self._discrimination_gate_active: bool = False
+
+        # Histogram post-calibration: bin-level bias correction after Platt scaling
+        self._histogram_cal: Optional[HistogramCalibrator] = (
+            HistogramCalibrator() if histogram_post_cal else None
+        )
 
         # Convergence tracking
         self._param_history_a: deque = deque(maxlen=100)
@@ -105,6 +164,8 @@ class OnlineCalibrator:
             return p_raw
         if self.gate_on_discrimination and self._discrimination_gate_active:
             return p_raw
+        if self._histogram_cal is not None:
+            p_cal = self._histogram_cal.calibrate(p_cal)
         return p_cal
 
     def update(self, p_raw: float, y: float):
@@ -129,6 +190,10 @@ class OnlineCalibrator:
         self.a += effective_lr * error
         self.b += effective_lr * error * lp
         self.n_updates += 1
+
+        # Update histogram post-calibrator with Platt-scaled output
+        if self._histogram_cal is not None:
+            self._histogram_cal.update(p_cal, y)
 
         # Track parameter history for convergence diagnostics
         self._param_history_a.append(self.a)
@@ -226,7 +291,8 @@ class RegimeCalibrator:
                  gate_on_discrimination: bool = False,
                  gate_auc_threshold: float = 0.50,
                  gate_separation_threshold: float = 0.0,
-                 gate_discrimination_window: int = 200):
+                 gate_discrimination_window: int = 200,
+                 histogram_post_cal: bool = False):
         self.n_bins = n_bins
         self.calibrators = [
             OnlineCalibrator(lr=lr, adaptive_lr=adaptive_lr,
@@ -235,7 +301,8 @@ class RegimeCalibrator:
                              gate_on_discrimination=gate_on_discrimination,
                              gate_auc_threshold=gate_auc_threshold,
                              gate_separation_threshold=gate_separation_threshold,
-                             gate_discrimination_window=gate_discrimination_window)
+                             gate_discrimination_window=gate_discrimination_window,
+                             histogram_post_cal=histogram_post_cal)
             for _ in range(n_bins)
         ]
         self._vol_history: deque = deque(maxlen=252)
@@ -305,7 +372,8 @@ class MultiFeatureCalibrator:
                  gate_on_discrimination: bool = False,
                  gate_auc_threshold: float = 0.50,
                  gate_separation_threshold: float = 0.0,
-                 gate_discrimination_window: int = 200):
+                 gate_discrimination_window: int = 200,
+                 histogram_post_cal: bool = False):
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -327,6 +395,11 @@ class MultiFeatureCalibrator:
         self._gate_discrimination_window: int = gate_discrimination_window
         self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
         self._discrimination_gate_active: bool = False
+
+        # Histogram post-calibration: bin-level bias correction
+        self._histogram_cal: Optional[HistogramCalibrator] = (
+            HistogramCalibrator() if histogram_post_cal else None
+        )
 
         # Convergence tracking
         self._weight_history: deque = deque(maxlen=100)
@@ -362,6 +435,8 @@ class MultiFeatureCalibrator:
             return p_raw
         if self.gate_on_discrimination and self._discrimination_gate_active:
             return p_raw
+        if self._histogram_cal is not None:
+            p_cal = self._histogram_cal.calibrate(p_cal)
         return p_cal
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
@@ -382,6 +457,10 @@ class MultiFeatureCalibrator:
             grad = grad * (10.0 / grad_norm)
         self.w += effective_lr * grad
         self.n_updates += 1
+
+        # Update histogram post-calibrator with logistic output
+        if self._histogram_cal is not None:
+            self._histogram_cal.update(p_cal, y)
 
         # Track weight history for convergence
         self._weight_history.append(self.w.copy())

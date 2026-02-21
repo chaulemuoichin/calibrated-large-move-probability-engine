@@ -97,6 +97,7 @@ def expected_calibration_error(
     p: np.ndarray,
     y: np.ndarray,
     n_bins: int = 10,
+    adaptive: bool = True,
 ) -> float:
     """
     Expected Calibration Error (ECE).
@@ -112,6 +113,11 @@ def expected_calibration_error(
         Binary outcomes (0 or 1).
     n_bins : int
         Number of calibration bins.
+    adaptive : bool
+        If True (default), use quantile-based (equal-mass) bins derived from
+        the prediction distribution.  This prevents a single overloaded bin
+        from dominating the score when predictions cluster in a narrow range
+        (common for rare events).  If False, use equal-width bins over [0, 1].
 
     Returns
     -------
@@ -124,11 +130,20 @@ def expected_calibration_error(
     p_m, y_m = p[mask], y[mask]
     n = len(p_m)
 
-    bin_edges = np.linspace(0, 1, n_bins + 1)
+    if adaptive:
+        bin_edges = np.unique(np.quantile(p_m, np.linspace(0, 1, n_bins + 1)))
+        if len(bin_edges) < 2:
+            # All predictions identical — ECE is simply |mean_pred - mean_obs|
+            return float(abs(np.mean(p_m) - np.mean(y_m)))
+        n_actual_bins = len(bin_edges) - 1
+    else:
+        bin_edges = np.linspace(0, 1, n_bins + 1)
+        n_actual_bins = n_bins
+
     ece = 0.0
-    for i in range(n_bins):
+    for i in range(n_actual_bins):
         lo, hi = bin_edges[i], bin_edges[i + 1]
-        if i < n_bins - 1:
+        if i < n_actual_bins - 1:
             in_bin = (p_m >= lo) & (p_m < hi)
         else:
             in_bin = (p_m >= lo) & (p_m <= hi)
