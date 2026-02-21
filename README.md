@@ -3,7 +3,7 @@
 A system that estimates the probability of large price moves over the next 1-4 weeks, and keeps correcting itself as real outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-147%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-150%20passing-brightgreen)
 
 ## Why This Exists
 
@@ -119,7 +119,7 @@ All settings live in YAML files under `configs/`. Key choices:
 python -m pytest tests/ -v
 ```
 
-147 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
+150 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
 
 **Project layout:**
 
@@ -136,7 +136,7 @@ em_sde/              Core library
   output.py            Results output and charts
   run.py               CLI entry point
 configs/             YAML configuration presets
-tests/               147 unit tests
+tests/               150 unit tests
 METHODOLOGY.md       Full technical methodology (start here for review)
 ```
 

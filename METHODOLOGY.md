@@ -406,15 +406,19 @@ This prevents the calibrator from actively inverting the signal during regime ch
 After the Platt/logistic mapping, an optional second pass corrects residual bin-level bias:
 
 ```
-For each of 20 equal-width bins over [0, 1]:
+For each of 10 equal-width bins over [0, 1]:
     Track running mean(p_cal) and mean(y) for samples in that bin.
 
 At prediction time:
-    correction = mean_pred_in_bin - mean_obs_in_bin
+    raw_correction = mean_pred_in_bin - mean_obs_in_bin
+    shrinkage = count / (count + prior_strength)    (default prior_strength = 50)
+    correction = raw_correction * shrinkage
     p_final = p_cal - correction    (clipped to [0, 1])
 ```
 
-This directly targets calibration error (ECE) rather than squared error (Brier). A minimum of 30 samples per bin is required before correction activates. Enabled by default via `histogram_post_calibration: true` in the calibration config.
+This directly targets calibration error (ECE) rather than squared error (Brier). The 10-bin grid is aligned with the ECE evaluation bins. A minimum of 15 samples per bin is required before correction activates.
+
+Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 samples (activation threshold), shrinkage ≈ 0.23 — very conservative. At 190 samples (typical), shrinkage ≈ 0.79. At 500 samples, shrinkage ≈ 0.91. This prevents noisy overcorrection in sparse bins without requiring decay (which reduces effective sample size and amplifies noise). Enabled by default via `histogram_post_calibration: true` in the calibration config.
 
 **File:** `em_sde/calibration.py` (`HistogramCalibrator`)
 
@@ -669,4 +673,4 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 147 unit tests |
+| `tests/test_framework.py` | 150 unit tests |

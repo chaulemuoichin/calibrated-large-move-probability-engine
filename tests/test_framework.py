@@ -2201,32 +2201,42 @@ class TestHistogramCalibrator:
         corrected = hc.calibrate(0.02)
         assert 0.0 <= corrected <= 1.0, f"Output must be in [0, 1], got {corrected}"
 
-    def test_decay_weights_recent_observations(self):
-        """Decay causes recent observations to dominate over old ones."""
-        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5, decay=0.99)
-        rng = np.random.default_rng(99)
-        # Phase 1: 100 observations with strong bias (pred=0.20, obs=0.05)
-        phase1_y = [1.0] * 5 + [0.0] * 95
-        rng.shuffle(phase1_y)
-        for y in phase1_y:
-            hc.update(0.20, y)
-        biased_correction = hc.calibrate(0.20)
-        assert biased_correction < 0.20, "Should correct downward for biased data"
+    def test_shrinkage_limits_correction(self):
+        """Shrinkage dampens correction when bin count is low relative to prior_strength."""
+        # With prior_strength=50 and ~25 samples, shrinkage = 25/75 ≈ 0.33
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5, prior_strength=50.0)
+        for _ in range(25):
+            hc.update(0.20, 0.0)  # 25 samples, all non-events
+        corrected = hc.calibrate(0.20)
+        # Without shrinkage, correction would be full (0.20 - 0.0 = 0.20)
+        # With shrinkage ~0.33, correction ≈ 0.20 * 0.33 = 0.066
+        # So corrected ≈ 0.20 - 0.066 = 0.134
+        assert corrected < 0.20, "Should still correct downward"
+        assert corrected > 0.10, (
+            f"Shrinkage should limit correction (expected >0.10, got {corrected:.4f})"
+        )
 
-        # Phase 2: 200 well-calibrated observations (pred=0.20, obs=0.20)
-        phase2_y = [1.0] * 40 + [0.0] * 160
-        rng.shuffle(phase2_y)
-        for y in phase2_y:
-            hc.update(0.20, y)
-        adapted_correction = hc.calibrate(0.20)
-        # After decay, correction should be smaller (closer to 0.20)
-        assert abs(adapted_correction - 0.20) < abs(biased_correction - 0.20), (
-            f"Decay should adapt: biased={biased_correction:.4f}, "
-            f"adapted={adapted_correction:.4f}"
+    def test_shrinkage_allows_full_correction_with_many_samples(self):
+        """With many samples, shrinkage approaches 1.0 and full correction applies."""
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5, prior_strength=50.0)
+        # 500 samples → shrinkage = 500/550 ≈ 0.91
+        for _ in range(450):
+            hc.update(0.20, 0.0)
+        for _ in range(50):
+            hc.update(0.20, 1.0)  # 10% event rate
+        corrected = hc.calibrate(0.20)
+        # Full correction would map 0.20 → 0.10
+        # With shrinkage 0.91, correction ≈ 0.10 * 0.91 = 0.091
+        # corrected ≈ 0.20 - 0.091 = 0.109
+        assert corrected < 0.15, (
+            f"With many samples, correction should be substantial (got {corrected:.4f})"
+        )
+        assert corrected > 0.05, (
+            f"Correction should not overshoot (got {corrected:.4f})"
         )
 
     def test_decay_count_is_float(self):
-        """Verify _count array is float dtype for decay arithmetic."""
+        """Verify _count array is float dtype for compatibility."""
         hc = HistogramCalibrator()
         assert hc._count.dtype == np.float64
         hc.update(0.50, 1.0)
@@ -2250,7 +2260,8 @@ class TestHistogramCalibrator:
         hc = HC()
         assert hc.n_bins == 10
         assert hc.min_samples_per_bin == 15
-        assert hc.decay == 0.996
+        assert hc.decay == 1.0
+        assert hc.prior_strength == 50.0
 
 
 if __name__ == "__main__":

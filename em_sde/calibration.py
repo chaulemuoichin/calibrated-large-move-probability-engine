@@ -40,34 +40,41 @@ def logit(p: float) -> float:
 
 class HistogramCalibrator:
     """
-    Online histogram binning recalibrator with exponential decay.
+    Online histogram binning recalibrator with Bayesian shrinkage.
 
     Tracks running per-bin statistics (mean predicted vs mean observed)
-    and applies additive bias correction to reduce calibration error.
+    and applies shrinkage-damped additive bias correction to reduce
+    calibration error without noisy overcorrection.
 
     Designed as a post-pass on top of Platt/logistic calibration:
-        p_corrected = p_cal - (mean_pred_in_bin - mean_obs_in_bin)
+        raw_correction = mean_pred_in_bin - mean_obs_in_bin
+        shrinkage = count / (count + prior_strength)
+        p_corrected = p_cal - raw_correction * shrinkage
 
     Uses equal-width bins aligned with the ECE evaluation (default 10).
-    Exponential decay ensures corrections track the current Platt
-    parameters rather than stale all-time averages.
+    Optional exponential decay (off by default) can track Platt drift.
 
     Parameters
     ----------
     n_bins : int
         Number of equal-width bins over [0, 1].
     min_samples_per_bin : int
-        Minimum (effective) samples in a bin before correction is applied.
+        Minimum samples in a bin before correction is applied.
     decay : float
-        Per-update multiplicative decay applied to all bin statistics.
-        Default 0.996 gives ~250-step half-life, adapting to Platt drift.
+        Per-update multiplicative decay for bin statistics.
+        Default 1.0 (no decay). Set < 1.0 to down-weight old observations.
+    prior_strength : float
+        Bayesian shrinkage strength. Correction is scaled by
+        count / (count + prior_strength). Higher values = more conservative.
+        At count=prior_strength, correction is halved.
     """
 
     def __init__(self, n_bins: int = 10, min_samples_per_bin: int = 15,
-                 decay: float = 0.996):
+                 decay: float = 1.0, prior_strength: float = 50.0):
         self.n_bins = n_bins
         self.min_samples_per_bin = min_samples_per_bin
         self.decay = decay
+        self.prior_strength = prior_strength
         self.bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
         self._sum_pred = np.zeros(n_bins)
         self._sum_obs = np.zeros(n_bins)
@@ -80,23 +87,24 @@ class HistogramCalibrator:
         return min(idx, self.n_bins - 1)
 
     def calibrate(self, p_cal: float) -> float:
-        """Apply histogram bias correction."""
+        """Apply shrinkage-damped histogram bias correction."""
         idx = self._get_bin(p_cal)
         if self._count[idx] < self.min_samples_per_bin:
             return p_cal
         mean_pred = self._sum_pred[idx] / self._count[idx]
         mean_obs = self._sum_obs[idx] / self._count[idx]
-        correction = mean_pred - mean_obs
+        raw_correction = mean_pred - mean_obs
+        shrinkage = self._count[idx] / (self._count[idx] + self.prior_strength)
+        correction = raw_correction * shrinkage
         return float(np.clip(p_cal - correction, 0.0, 1.0))
 
     def update(self, p_cal: float, y: float):
-        """Update bin statistics with a resolved outcome (with decay)."""
+        """Update bin statistics with a resolved outcome."""
         idx = self._get_bin(p_cal)
-        # Decay all bins so recent observations dominate
-        self._sum_pred *= self.decay
-        self._sum_obs *= self.decay
-        self._count *= self.decay
-        # Add new observation
+        if self.decay < 1.0:
+            self._sum_pred *= self.decay
+            self._sum_obs *= self.decay
+            self._count *= self.decay
         self._sum_pred[idx] += p_cal
         self._sum_obs[idx] += y
         self._count[idx] += 1.0
@@ -126,7 +134,8 @@ class OnlineCalibrator:
                  gate_discrimination_window: int = 200,
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
-                 histogram_min_samples: int = 15):
+                 histogram_min_samples: int = 15,
+                 histogram_prior_strength: float = 50.0):
         self.a: float = 0.0
         self.b: float = 1.0
         self.lr: float = lr
@@ -152,7 +161,8 @@ class OnlineCalibrator:
         # Histogram post-calibration: bin-level bias correction after Platt scaling
         self._histogram_cal: Optional[HistogramCalibrator] = (
             HistogramCalibrator(n_bins=histogram_n_bins,
-                                min_samples_per_bin=histogram_min_samples)
+                                min_samples_per_bin=histogram_min_samples,
+                                prior_strength=histogram_prior_strength)
             if histogram_post_cal else None
         )
 
@@ -309,7 +319,8 @@ class RegimeCalibrator:
                  gate_discrimination_window: int = 200,
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
-                 histogram_min_samples: int = 15):
+                 histogram_min_samples: int = 15,
+                 histogram_prior_strength: float = 50.0):
         self.n_bins = n_bins
         self.calibrators = [
             OnlineCalibrator(lr=lr, adaptive_lr=adaptive_lr,
@@ -321,7 +332,8 @@ class RegimeCalibrator:
                              gate_discrimination_window=gate_discrimination_window,
                              histogram_post_cal=histogram_post_cal,
                              histogram_n_bins=histogram_n_bins,
-                             histogram_min_samples=histogram_min_samples)
+                             histogram_min_samples=histogram_min_samples,
+                             histogram_prior_strength=histogram_prior_strength)
             for _ in range(n_bins)
         ]
         self._vol_history: deque = deque(maxlen=252)
@@ -394,7 +406,8 @@ class MultiFeatureCalibrator:
                  gate_discrimination_window: int = 200,
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
-                 histogram_min_samples: int = 15):
+                 histogram_min_samples: int = 15,
+                 histogram_prior_strength: float = 50.0):
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -420,7 +433,8 @@ class MultiFeatureCalibrator:
         # Histogram post-calibration: bin-level bias correction
         self._histogram_cal: Optional[HistogramCalibrator] = (
             HistogramCalibrator(n_bins=histogram_n_bins,
-                                min_samples_per_bin=histogram_min_samples)
+                                min_samples_per_bin=histogram_min_samples,
+                                prior_strength=histogram_prior_strength)
             if histogram_post_cal else None
         )
 

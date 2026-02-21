@@ -155,6 +155,7 @@ def run_walkforward(
     histogram_post_cal = cfg.calibration.histogram_post_calibration
     histogram_n_bins = cfg.calibration.histogram_n_bins
     histogram_min_samples = cfg.calibration.histogram_min_samples
+    histogram_prior_strength = cfg.calibration.histogram_prior_strength
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
@@ -195,6 +196,7 @@ def run_walkforward(
                 histogram_post_cal=histogram_post_cal,
                 histogram_n_bins=histogram_n_bins,
                 histogram_min_samples=histogram_min_samples,
+                histogram_prior_strength=histogram_prior_strength,
             )
             for H in horizons
         }
@@ -214,6 +216,7 @@ def run_walkforward(
                 histogram_post_cal=histogram_post_cal,
                 histogram_n_bins=histogram_n_bins,
                 histogram_min_samples=histogram_min_samples,
+                histogram_prior_strength=histogram_prior_strength,
             )
             for H in horizons
         }
@@ -232,6 +235,7 @@ def run_walkforward(
                 histogram_post_cal=histogram_post_cal,
                 histogram_n_bins=histogram_n_bins,
                 histogram_min_samples=histogram_min_samples,
+                histogram_prior_strength=histogram_prior_strength,
             )
             for H in horizons
         }

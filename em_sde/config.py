@@ -85,6 +85,7 @@ class CalibrationConfig:
     histogram_post_calibration: bool = True  # bin-level bias correction after Platt/logistic
     histogram_n_bins: int = 10               # number of equal-width histogram bins (aligned with ECE eval)
     histogram_min_samples: int = 15          # min effective samples per bin before correction activates
+    histogram_prior_strength: float = 50.0   # Bayesian shrinkage: correction *= count/(count + prior_strength)
     ensemble_enabled: bool = True
     ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
     # Promotion gates for model selection
