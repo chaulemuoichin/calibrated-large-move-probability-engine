@@ -68,6 +68,19 @@ def run_single_config(name: str, config_path: str) -> None:
     n_total = gates.groupby(["config_name", "horizon"]).ngroups
     print(f"\nGate pass: {n_pass}/{n_total} config-horizon combos")
 
+    # Shadow gate at ECE<=0.04 (reporting only, no policy change)
+    shadow_gates = apply_promotion_gates(
+        cv_results,
+        gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.04},
+    )
+    shadow_pass = shadow_gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
+    shadow_total = shadow_gates.groupby(["config_name", "horizon"]).ngroups
+    if shadow_pass > n_pass:
+        print(f"\n--- Shadow gate (ECE<=0.04): {shadow_pass}/{shadow_total} would pass ---")
+        for (cfg_n, H), grp in shadow_gates.groupby(["config_name", "horizon"]):
+            if grp["all_gates_passed"].all():
+                print(f"  {cfg_n} H={H}: SHADOW PASS")
+
 
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else "both"

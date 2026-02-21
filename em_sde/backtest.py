@@ -153,6 +153,8 @@ def run_walkforward(
     multi_feature_l2 = cfg.calibration.multi_feature_l2
     multi_feature_min_updates = cfg.calibration.multi_feature_min_updates
     histogram_post_cal = cfg.calibration.histogram_post_calibration
+    histogram_n_bins = cfg.calibration.histogram_n_bins
+    histogram_min_samples = cfg.calibration.histogram_min_samples
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
@@ -191,6 +193,8 @@ def run_walkforward(
                 gate_separation_threshold=gate_sep_thr,
                 gate_discrimination_window=gate_disc_win,
                 histogram_post_cal=histogram_post_cal,
+                histogram_n_bins=histogram_n_bins,
+                histogram_min_samples=histogram_min_samples,
             )
             for H in horizons
         }
@@ -208,6 +212,8 @@ def run_walkforward(
                 gate_separation_threshold=gate_sep_thr,
                 gate_discrimination_window=gate_disc_win,
                 histogram_post_cal=histogram_post_cal,
+                histogram_n_bins=histogram_n_bins,
+                histogram_min_samples=histogram_min_samples,
             )
             for H in horizons
         }
@@ -224,6 +230,8 @@ def run_walkforward(
                 gate_separation_threshold=gate_sep_thr,
                 gate_discrimination_window=gate_disc_win,
                 histogram_post_cal=histogram_post_cal,
+                histogram_n_bins=histogram_n_bins,
+                histogram_min_samples=histogram_min_samples,
             )
             for H in horizons
         }

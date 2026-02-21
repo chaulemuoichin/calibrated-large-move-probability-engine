@@ -2161,15 +2161,15 @@ class TestHistogramCalibrator:
     """Tests for HistogramCalibrator (bin-level bias correction)."""
 
     def test_no_correction_before_min_samples(self):
-        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=30)
-        # Feed 10 samples (below threshold)
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=15)
+        # Feed 10 samples (below threshold of 15)
         for _ in range(10):
             hc.update(0.10, 0.0)
         # Should return input unchanged
         assert hc.calibrate(0.10) == 0.10
 
     def test_correction_reduces_bias(self):
-        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=10)
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=10)
         # Systematically predict 0.20 but true rate is 0.05
         for _ in range(50):
             hc.update(0.20, 0.0)
@@ -2181,7 +2181,7 @@ class TestHistogramCalibrator:
         assert corrected > 0.0, f"Corrected probability should be positive, got {corrected}"
 
     def test_well_calibrated_no_correction(self):
-        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=30)
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=15)
         rng = np.random.default_rng(42)
         # Feed well-calibrated data: predict 0.50, event rate 50%
         for _ in range(100):
@@ -2194,12 +2194,43 @@ class TestHistogramCalibrator:
         )
 
     def test_output_clipped_to_01(self):
-        hc = HistogramCalibrator(n_bins=20, min_samples_per_bin=5)
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5)
         # Extreme case: predict 0.02 but all events
         for _ in range(10):
             hc.update(0.02, 1.0)
         corrected = hc.calibrate(0.02)
         assert 0.0 <= corrected <= 1.0, f"Output must be in [0, 1], got {corrected}"
+
+    def test_decay_weights_recent_observations(self):
+        """Decay causes recent observations to dominate over old ones."""
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5, decay=0.99)
+        rng = np.random.default_rng(99)
+        # Phase 1: 100 observations with strong bias (pred=0.20, obs=0.05)
+        phase1_y = [1.0] * 5 + [0.0] * 95
+        rng.shuffle(phase1_y)
+        for y in phase1_y:
+            hc.update(0.20, y)
+        biased_correction = hc.calibrate(0.20)
+        assert biased_correction < 0.20, "Should correct downward for biased data"
+
+        # Phase 2: 200 well-calibrated observations (pred=0.20, obs=0.20)
+        phase2_y = [1.0] * 40 + [0.0] * 160
+        rng.shuffle(phase2_y)
+        for y in phase2_y:
+            hc.update(0.20, y)
+        adapted_correction = hc.calibrate(0.20)
+        # After decay, correction should be smaller (closer to 0.20)
+        assert abs(adapted_correction - 0.20) < abs(biased_correction - 0.20), (
+            f"Decay should adapt: biased={biased_correction:.4f}, "
+            f"adapted={adapted_correction:.4f}"
+        )
+
+    def test_decay_count_is_float(self):
+        """Verify _count array is float dtype for decay arithmetic."""
+        hc = HistogramCalibrator()
+        assert hc._count.dtype == np.float64
+        hc.update(0.50, 1.0)
+        assert isinstance(hc._count[0], (float, np.floating))
 
     def test_online_calibrator_with_histogram_post_cal(self):
         """OnlineCalibrator with histogram_post_cal=True produces valid output."""
@@ -2214,10 +2245,12 @@ class TestHistogramCalibrator:
             cal.update(p_raw, y)
 
     def test_histogram_calibrator_import(self):
-        """HistogramCalibrator is importable from public API."""
+        """HistogramCalibrator is importable from public API with new defaults."""
         from em_sde import HistogramCalibrator as HC
         hc = HC()
-        assert hc.n_bins == 20
+        assert hc.n_bins == 10
+        assert hc.min_samples_per_bin == 15
+        assert hc.decay == 0.996
 
 
 if __name__ == "__main__":
