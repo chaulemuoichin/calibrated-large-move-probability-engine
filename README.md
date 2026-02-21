@@ -28,7 +28,7 @@ This project breaks that loop. Instead of guessing, it gives you a number:
 
 If that number is trustworthy (and the system works hard to make it trustworthy), you can make a calmer decision — buy now, wait, or scale in gradually.
 
-## How It Works (for full version visit [Methodology](https://github.com/chaulemuoichin/calibrated-large-move-probability-engine/blob/main/METHODOLOGY.md)) 
+## How It Works (for full version visit [METHODOLOGY.md](https://github.com/chaulemuoichin/calibrated-large-move-probability-engine/blob/main/METHODOLOGY.md)) 
 
 1. **Read the recent past.** The system looks at recent price behavior to understand how calm or jumpy the market has been.
 
