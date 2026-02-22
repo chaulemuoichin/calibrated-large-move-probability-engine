@@ -79,8 +79,10 @@ def run_single_config(name: str, config_path: str) -> None:
             n_s = row.get("n_samples", "?")
             n_e = row.get("n_events", "?")
             if row.get("status") == "insufficient_data":
-                tag = "[SKIP: insufficient data]"
-                print(f"  {row['regime']:>8s}/{metric} = n/a  (n={n_s}, events={n_e}) {tag}")
+                reason = row.get("insufficient_reason", "?")
+                n_ne = row.get("n_nonevents", "?")
+                tag = f"[SKIP: {reason}]"
+                print(f"  {row['regime']:>8s}/{metric} = n/a  (n={n_s}, events={n_e}, nonevents={n_ne}) {tag}")
             else:
                 tag = "[OK]" if passed else "[FAIL]"
                 ci_str = ""

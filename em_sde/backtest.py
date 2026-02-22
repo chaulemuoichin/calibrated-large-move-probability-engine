@@ -25,7 +25,7 @@ import numpy.typing as npt
 import pandas as pd
 from numpy.random import SeedSequence
 
-from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator
+from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
 from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
@@ -157,12 +157,14 @@ def run_walkforward(
     histogram_min_samples = cfg.calibration.histogram_min_samples
     histogram_prior_strength = cfg.calibration.histogram_prior_strength
     histogram_monotonic = cfg.calibration.histogram_monotonic
+    multi_feature_regime_conditional = cfg.calibration.multi_feature_regime_conditional
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
     garch_stationarity = cfg.model.garch_stationarity_constraint
     garch_target_persistence = cfg.model.garch_target_persistence
     garch_fallback_ewma = cfg.model.garch_fallback_to_ewma
+    fixed_pct_by_horizon = cfg.model.regime_gated_fixed_pct_by_horizon or {}
 
     # Regime-gated threshold router
     regime_router: Optional[RegimeRouter] = None
@@ -182,24 +184,33 @@ def run_walkforward(
     calibrators_online: Optional[Dict[int, OnlineCalibrator]] = None
     calibrators_regime: Optional[Dict[int, RegimeCalibrator]] = None
     calibrators_mf: Optional[Dict[int, MultiFeatureCalibrator]] = None
-    if multi_feature:
+    _mf_kwargs = dict(
+        lr=multi_feature_lr,
+        l2_reg=multi_feature_l2,
+        min_updates=multi_feature_min_updates,
+        safety_gate=safety_gate,
+        gate_window=gate_window,
+        gate_on_discrimination=gate_on_disc,
+        gate_auc_threshold=gate_auc_thr,
+        gate_separation_threshold=gate_sep_thr,
+        gate_discrimination_window=gate_disc_win,
+        histogram_post_cal=histogram_post_cal,
+        histogram_n_bins=histogram_n_bins,
+        histogram_min_samples=histogram_min_samples,
+        histogram_prior_strength=histogram_prior_strength,
+        histogram_monotonic=histogram_monotonic,
+    )
+    if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
-            H: MultiFeatureCalibrator(
-                lr=multi_feature_lr,
-                l2_reg=multi_feature_l2,
-                min_updates=multi_feature_min_updates,
-                safety_gate=safety_gate,
-                gate_window=gate_window,
-                gate_on_discrimination=gate_on_disc,
-                gate_auc_threshold=gate_auc_thr,
-                gate_separation_threshold=gate_sep_thr,
-                gate_discrimination_window=gate_disc_win,
-                histogram_post_cal=histogram_post_cal,
-                histogram_n_bins=histogram_n_bins,
-                histogram_min_samples=histogram_min_samples,
-                histogram_prior_strength=histogram_prior_strength,
-                histogram_monotonic=histogram_monotonic,
+            H: RegimeMultiFeatureCalibrator(
+                n_bins=regime_n_bins,
+                **_mf_kwargs,
             )
+            for H in horizons
+        }
+    elif multi_feature:
+        calibrators_mf = {
+            H: MultiFeatureCalibrator(**_mf_kwargs)
             for H in horizons
         }
     elif regime_conditional:
@@ -358,10 +369,15 @@ def run_walkforward(
         row["vol_ratio"] = vol_ratio
         row["vol_of_vol"] = vol_of_vol
 
-        # Feed vol to regime calibrators
+        # Feed vol to regime calibrators (standard and regime-MF)
         if calibrators_regime is not None:
             for H in horizons:
                 calibrators_regime[H].observe_vol(sigma_1d)
+        if calibrators_mf is not None:
+            for H in horizons:
+                cal = calibrators_mf[H]
+                if hasattr(cal, 'observe_vol'):
+                    cal.observe_vol(sigma_1d)
 
         # === Step 3: Compute thresholds ===
         thresholds = {}
@@ -371,8 +387,10 @@ def run_walkforward(
         else:
             effective_mode = threshold_mode
         for H in horizons:
+            # Per-horizon fixed_pct override (for regime_gated configs)
+            h_fixed_pct = fixed_pct_by_horizon.get(H, fixed_threshold_pct) if fixed_pct_by_horizon else fixed_threshold_pct
             if effective_mode == "fixed_pct":
-                thr = fixed_threshold_pct
+                thr = h_fixed_pct
             elif effective_mode == "anchored_vol":
                 # Use expanding-window unconditional vol (changes slowly)
                 sigma_uncond = float(np.std(all_returns[:idx])) if idx > garch_min else sigma_1d

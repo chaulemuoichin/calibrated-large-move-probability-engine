@@ -196,6 +196,7 @@ This is **two-sided**: both large up-moves and large down-moves count.
 - `vol_scaled` makes the threshold track current vol, so high-vol periods automatically get higher thresholds. This is circular — the model is essentially asking "will vol stay high?" rather than "will a large move happen?"
 - `fixed_pct` can produce very different event rates across regimes. A 5% threshold might fire 30% of the time during a crash but 1% during calm markets. The calibrator has to handle this imbalance.
 - `regime_gated` has a 252-day warmup. During warmup it uses the mid-vol mode, which might not be optimal.
+- `regime_gated_fixed_pct_by_horizon` allows per-horizon threshold overrides (e.g., lower threshold at H=5 to ensure evaluable event counts in low-vol regimes). Default: uses the global `fixed_threshold_pct` for all horizons.
 
 ---
 
@@ -343,6 +344,10 @@ Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
 Updated via SGD with L2 regularization (prevents overfitting) and gradient clipping (prevents explosions). Requires 100 outcomes before activating.
+
+### Regime-Conditional Multi-Feature Calibration
+
+When `multi_feature_regime_conditional=true`, the system maintains one `MultiFeatureCalibrator` per volatility regime bin (low/mid/high vol). Regime assignment uses the same rolling sigma_1d percentile approach as `RegimeCalibrator` (walk-forward safe). Each regime-specific calibrator learns its own weight vector independently, so calibration adapts to the distinct probability-outcome relationship within each vol environment. Enabled via config flag; default off for backward compatibility.
 
 ### Safety Gate (Brier-based)
 
@@ -538,7 +543,11 @@ In EACH regime bucket, the model must pass ALL of:
   AUC  >= 0.55    (must have some discrimination)
   ECE  <= 0.02    (must be reasonably calibrated)
 
-Minimum sample guards: 30 rows and 5 events per regime required.
+Minimum sample guards per regime:
+  n_samples >= 30
+  n_events  >= 5   (positive labels)
+  n_nonevents >= 5 (negative labels)
+Insufficiency reason is tracked: too_few_samples, too_few_events, too_few_nonevents.
 
 Tri-state promotion decision:
   PASS       — all regimes evaluated, all gates pass
@@ -637,11 +646,11 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 | `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
 | `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
-| `em_sde/calibration.py` | Online/multi-feature/regime calibrators, histogram post-calibration, safety gates |
+| `em_sde/calibration.py` | Online/multi-feature/regime/regime-MF calibrators, histogram post-calibration, safety gates |
 | `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing |
 | `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 157 unit tests |
+| `tests/test_framework.py` | 164 unit tests |

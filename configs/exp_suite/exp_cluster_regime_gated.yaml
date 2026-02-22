@@ -40,6 +40,10 @@ model:
   regime_gated_high_mode: "anchored_vol"
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
+  regime_gated_fixed_pct_by_horizon:
+    5: 0.025
+    10: 0.035
+    20: 0.04
   store_quantiles: true
 
 calibration:
@@ -57,6 +61,7 @@ calibration:
   multi_feature_lr: 0.01
   multi_feature_l2: 0.0001
   multi_feature_min_updates: 100
+  multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights: [0.5, 0.3, 0.2]
 

@@ -61,6 +61,7 @@ class ModelConfig:
     regime_gated_high_mode: str = "anchored_vol"
     regime_gated_warmup: int = 252
     regime_gated_vol_window: int = 252
+    regime_gated_fixed_pct_by_horizon: Optional[dict] = None  # per-horizon override: {5: 0.03, 10: 0.04}
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 
@@ -82,6 +83,7 @@ class CalibrationConfig:
     multi_feature_lr: float = 0.01   # learning rate for multi-feature calibrator
     multi_feature_l2: float = 1e-4   # L2 regularization strength
     multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
+    multi_feature_regime_conditional: bool = False  # per-regime MF calibrators (requires multi_feature=true)
     histogram_post_calibration: bool = True  # bin-level bias correction after Platt/logistic
     histogram_n_bins: int = 10               # number of equal-width histogram bins (aligned with ECE eval)
     histogram_min_samples: int = 15          # min effective samples per bin before correction activates
@@ -160,6 +162,10 @@ def _validate(cfg: PipelineConfig):
 
     if cfg.calibration.regime_conditional:
         assert cfg.calibration.regime_n_bins >= 2, "regime_n_bins must be >= 2"
+
+    if cfg.calibration.multi_feature_regime_conditional:
+        assert cfg.calibration.multi_feature, \
+            "multi_feature_regime_conditional requires multi_feature=true"
 
     assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol", "regime_gated"), \
         f"threshold_mode must be 'vol_scaled', 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"

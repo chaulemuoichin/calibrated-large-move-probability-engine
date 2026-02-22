@@ -419,6 +419,81 @@ class RegimeCalibrator:
         }
 
 
+class RegimeMultiFeatureCalibrator:
+    """
+    Regime-conditional multi-feature calibration.
+
+    Maintains separate MultiFeatureCalibrator instances for each vol regime
+    (low/mid/high). Regime assignment uses rolling sigma_1d history
+    (walk-forward safe, identical to RegimeCalibrator).
+
+    When multi_feature_regime_conditional=true in config, this is used
+    instead of a single global MultiFeatureCalibrator.
+    """
+
+    def __init__(self, n_bins: int = 3, **mf_kwargs):
+        self.n_bins = n_bins
+        self.calibrators: list = []  # populated after class def
+        self._mf_kwargs = mf_kwargs
+        self._vol_history: deque = deque(maxlen=252)
+        self._warmup: int = 50
+
+    def _init_calibrators(self):
+        """Lazy init after MultiFeatureCalibrator class is defined."""
+        if not self.calibrators:
+            self.calibrators = [
+                MultiFeatureCalibrator(**self._mf_kwargs)
+                for _ in range(self.n_bins)
+            ]
+
+    def _get_regime(self, sigma_1d: float) -> int:
+        """Assign regime bin based on rolling vol percentile."""
+        if len(self._vol_history) < self._warmup:
+            return 0
+        arr = np.sort(np.array(self._vol_history))
+        pctile = np.searchsorted(arr, sigma_1d) / len(arr)
+        return min(int(pctile * self.n_bins), self.n_bins - 1)
+
+    def observe_vol(self, sigma_1d: float):
+        """Record vol observation for percentile computation."""
+        self._vol_history.append(sigma_1d)
+
+    def calibrate(self, p_raw: float, sigma_1d: float,
+                  delta_sigma: float, vol_ratio: float,
+                  vol_of_vol: float) -> float:
+        """Apply regime-specific multi-feature calibration."""
+        self._init_calibrators()
+        regime = self._get_regime(sigma_1d)
+        return self.calibrators[regime].calibrate(
+            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+
+    def update(self, p_raw: float, y: float, sigma_1d: float,
+               delta_sigma: float, vol_ratio: float,
+               vol_of_vol: float) -> None:
+        """Update the regime-specific multi-feature calibrator."""
+        self._init_calibrators()
+        regime = self._get_regime(sigma_1d)
+        self.calibrators[regime].update(
+            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+
+    def state(self) -> Dict:
+        """Return state of the currently active regime calibrator."""
+        self._init_calibrators()
+        if self._vol_history:
+            regime = self._get_regime(self._vol_history[-1])
+        else:
+            regime = 0
+        active = self.calibrators[regime]
+        return {
+            "a": float(active.w[0]),
+            "b": float(active.w[1]),
+            "n_updates": active.n_updates,
+            "regime": regime,
+            "gated": active._gate_active,
+            "weights": active.w.tolist(),
+        }
+
+
 class MultiFeatureCalibrator:
     """
     Online multi-feature logistic calibration.

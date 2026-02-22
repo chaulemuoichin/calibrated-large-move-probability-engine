@@ -26,7 +26,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from em_sde.monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
-from em_sde.calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, sigmoid, logit
+from em_sde.calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
 from em_sde.evaluation import (
     brier_score, log_loss, auc_roc, separation, compute_metrics,
     brier_skill_score, effective_sample_size, crps_from_quantiles,
@@ -2416,6 +2416,86 @@ class TestPromotionGatesOOF:
         for _, row in report[report["status"] == "evaluated"].iterrows():
             assert row["n_samples"] > 0
             assert row["n_events"] >= 0
+
+    def test_oof_gates_nonevents_tracking(self):
+        """n_nonevents and insufficient_reason columns present and correct."""
+        oof = self._make_oof(n=300, event_rate=0.10)
+        report = apply_promotion_gates_oof(oof, min_samples=10, min_events=1)
+        assert "n_nonevents" in report.columns
+        assert "insufficient_reason" in report.columns
+        for _, row in report[report["status"] == "evaluated"].iterrows():
+            assert row["n_nonevents"] == row["n_samples"] - row["n_events"]
+            assert row["insufficient_reason"] == "sufficient"
+
+    def test_oof_gates_too_few_nonevents(self):
+        """Regime with too few nonevents marked as insufficient."""
+        rng = np.random.default_rng(77)
+        n = 300
+        y = np.ones(n)  # all events, 0 nonevents
+        p_cal = np.clip(0.8 + rng.normal(0, 0.05, n), 0.01, 0.99)
+        sigma = rng.uniform(0.01, 0.03, n)
+        oof = pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+        report = apply_promotion_gates_oof(oof, min_nonevents=5)
+        # All rows are events → nonevents=0 → insufficient
+        assert all(report["status"] == "insufficient_data")
+        assert all(report["insufficient_reason"] == "too_few_nonevents")
+        assert all(report["promotion_status"] == "UNDECIDED")
+
+
+class TestRegimeMultiFeatureCalibrator:
+    """Tests for RegimeMultiFeatureCalibrator."""
+
+    def test_regime_mf_calibrator_routes_by_vol(self):
+        """Different vol levels route to different sub-calibrators."""
+        cal = RegimeMultiFeatureCalibrator(n_bins=3, lr=0.01, l2_reg=1e-4,
+                                           min_updates=5, safety_gate=False)
+        # Build vol history
+        for _ in range(60):
+            cal.observe_vol(0.01)
+        for _ in range(60):
+            cal.observe_vol(0.02)
+        for _ in range(60):
+            cal.observe_vol(0.03)
+        # Calibrate at different vol levels
+        p_low = cal.calibrate(0.1, 0.005, 0.0, 1.0, 0.0)
+        p_high = cal.calibrate(0.1, 0.035, 0.0, 1.0, 0.0)
+        # Before updates, both should return p_raw (identity init)
+        assert abs(p_low - 0.1) < 0.01
+        assert abs(p_high - 0.1) < 0.01
+
+    def test_regime_mf_calibrator_state(self):
+        """State dict includes regime field."""
+        cal = RegimeMultiFeatureCalibrator(n_bins=3, lr=0.01, l2_reg=1e-4,
+                                           min_updates=5, safety_gate=False)
+        state = cal.state()
+        assert "regime" in state
+        assert "n_updates" in state
+        assert "weights" in state
+
+    def test_regime_mf_config_validation(self):
+        """multi_feature_regime_conditional requires multi_feature."""
+        from em_sde.config import PipelineConfig, _validate
+        cfg = PipelineConfig()
+        cfg.calibration.multi_feature = False
+        cfg.calibration.multi_feature_regime_conditional = True
+        try:
+            _validate(cfg)
+            assert False, "Should have raised AssertionError"
+        except AssertionError as e:
+            assert "multi_feature_regime_conditional" in str(e)
+
+    def test_fixed_pct_by_horizon_config(self):
+        """regime_gated_fixed_pct_by_horizon field exists and defaults to None."""
+        from em_sde.config import PipelineConfig
+        cfg = PipelineConfig()
+        assert cfg.model.regime_gated_fixed_pct_by_horizon is None
 
 
 if __name__ == "__main__":

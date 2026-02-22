@@ -246,6 +246,7 @@ def apply_promotion_gates_oof(
     gates: dict = None,
     min_samples: int = 30,
     min_events: int = 5,
+    min_nonevents: int = 5,
 ) -> pd.DataFrame:
     """
     Apply promotion gates on pooled out-of-fold row-level predictions.
@@ -266,13 +267,16 @@ def apply_promotion_gates_oof(
         Minimum rows in a regime bucket for evaluation (else insufficient_data).
     min_events : int
         Minimum positive labels in a regime bucket for evaluation.
+    min_nonevents : int
+        Minimum negative labels in a regime bucket for evaluation.
 
     Returns
     -------
     gate_report : pd.DataFrame
         Columns: config_name, horizon, regime, metric, value, threshold,
-                 passed, margin, n_samples, n_events, status,
-                 ece_ci_low, ece_ci_high, all_gates_passed
+                 passed, margin, n_samples, n_events, n_nonevents,
+                 insufficient_reason, status,
+                 ece_ci_low, ece_ci_high, promotion_status, all_gates_passed
     """
     if gates is None:
         gates = {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
@@ -290,7 +294,6 @@ def apply_promotion_gates_oof(
         # Row-level regime assignment via sigma_1d terciles
         valid_sigma = sigma[~np.isnan(sigma)]
         if len(valid_sigma) < 3:
-            # Not enough sigma data; evaluate as single "all" bucket
             regime_labels = np.full(len(sigma), "all")
         else:
             p33 = float(np.nanpercentile(valid_sigma, 33))
@@ -309,8 +312,19 @@ def apply_promotion_gates_oof(
             y_r = y[rmask]
             n_samples = len(y_r)
             n_events = int(np.sum(y_r))
+            n_nonevents = n_samples - n_events
 
-            insufficient = n_samples < min_samples or n_events < min_events
+            # Determine insufficiency reason
+            if n_samples < min_samples:
+                insufficient_reason = "too_few_samples"
+            elif n_events < min_events:
+                insufficient_reason = "too_few_events"
+            elif n_nonevents < min_nonevents:
+                insufficient_reason = "too_few_nonevents"
+            else:
+                insufficient_reason = "sufficient"
+
+            insufficient = insufficient_reason != "sufficient"
 
             # Compute bootstrap CI for ECE (always, if enough data)
             ece_ci_low, ece_ci_high = np.nan, np.nan
@@ -330,6 +344,8 @@ def apply_promotion_gates_oof(
                         "margin": np.nan,
                         "n_samples": n_samples,
                         "n_events": n_events,
+                        "n_nonevents": n_nonevents,
+                        "insufficient_reason": insufficient_reason,
                         "status": "insufficient_data",
                         "ece_ci_low": np.nan,
                         "ece_ci_high": np.nan,
@@ -365,6 +381,8 @@ def apply_promotion_gates_oof(
                     "margin": margin,
                     "n_samples": n_samples,
                     "n_events": n_events,
+                    "n_nonevents": n_nonevents,
+                    "insufficient_reason": "sufficient",
                     "status": "evaluated",
                     "ece_ci_low": round(ece_ci_low, 6) if not np.isnan(ece_ci_low) else np.nan,
                     "ece_ci_high": round(ece_ci_high, 6) if not np.isnan(ece_ci_high) else np.nan,
