@@ -336,7 +336,7 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 Uses 6 features instead of just `logit(p_raw)`:
 
-$$x_t=\left[1,\ \mathrm{logit}\!\left(p_{\mathrm{raw},t}\right),\ 100\,\sigma_{1d,t},\ 100\,\Delta\sigma_{20d,t},\ \frac{\sigma_{\mathrm{realized},t}}{\sigma_{1d,t}},\ 100\,\mathrm{vol\_of\_vol}_{t}\right]$$
+$$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t}\right]$$
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
