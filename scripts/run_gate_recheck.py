@@ -5,7 +5,7 @@ Re-run CV gates for the two best configs after P0 fixes:
   - Adaptive ECE reported as diagnostic column
 
 Usage:
-    python -u run_gate_recheck.py [jump|cluster]
+    python -u scripts/run_gate_recheck.py [jump|cluster]
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data

@@ -5,7 +5,7 @@ Compares the 3 new regime_gated configs against inst_fixed_multi baselines
 on all 3 patterns (cluster, jump, trend) with 5000 MC paths instead of 30K.
 
 Usage:
-    python run_quick_validation.py
+    python scripts/run_quick_validation.py
 """
 
 import logging
@@ -21,7 +21,7 @@ import numpy as np
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data

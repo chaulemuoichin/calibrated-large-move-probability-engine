@@ -136,6 +136,13 @@ em_sde/              Core library
   output.py            Results output and charts
   run.py               CLI entry point
 configs/             YAML configuration presets
+scripts/             Operational runners
+  run_quick_validation.py
+  run_stress_suite.py
+  run_gate_recheck.py
+  run_remaining_cv.py
+  run_full_institutional.py
+  run_single_timing.py
 tests/               157 unit tests
 METHODOLOGY.md       Full technical methodology (start here for review)
 ```

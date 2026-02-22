@@ -9,7 +9,7 @@ Stages:
 5) CV + promotion gates per pattern family
 
 Usage:
-    python -u run_full_institutional.py
+    python -u scripts/run_full_institutional.py
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# Allow `python scripts/...` execution from repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
@@ -178,8 +181,8 @@ def main() -> int:
 
     try:
         _run_subprocess_stage("00_pytest", [py, "-m", "pytest", "tests", "-q"])
-        _run_subprocess_stage("01_quick_validation", [py, "-u", "run_quick_validation.py"])
-        _run_subprocess_stage("02_stress_suite", [py, "-u", "run_stress_suite.py"])
+        _run_subprocess_stage("01_quick_validation", [py, "-u", "scripts/run_quick_validation.py"])
+        _run_subprocess_stage("02_stress_suite", [py, "-u", "scripts/run_stress_suite.py"])
         _stage_seed_stability()
         _stage_cv_and_gates()
     except Exception as exc:

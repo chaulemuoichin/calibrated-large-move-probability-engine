@@ -246,13 +246,13 @@ $$J_t \sim \mathcal{N}(\mu_J,\sigma_J),\quad \log P_t \leftarrow \log P_t + J_t$
 
 The drift is compensated so that adding jumps doesn't change the expected return:
 
-$$\text{drift\_adjustment} = \lambda\left(e^{\mu_J + \frac{1}{2}\sigma_J^2} - 1\right)$$
+$$d_{\mathrm{adj}} = \lambda\left(e^{\mu_J + \frac{1}{2}\sigma_J^2} - 1\right)$$
 
 ### State-Dependent Jumps (U2)
 
 Jump parameters vary with the current volatility regime:
 
-$$t = \mathrm{clip}\!\left(\frac{\sigma_{1d}-\sigma_{25\%}}{\sigma_{75\%}-\sigma_{25\%}},\,0,\,1\right)$$
+$$t = \mathrm{clip}\!\left(\frac{\sigma_{1d}-\sigma_{p25}}{\sigma_{p75}-\sigma_{p25}},\,0,\,1\right)$$
 
 $$\lambda_t = \lambda_{\mathrm{low}} + t\left(\lambda_{\mathrm{high}}-\lambda_{\mathrm{low}}\right)$$
 $$\mu_{J,t} = \mu_{J,\mathrm{low}} + t\left(\mu_{J,\mathrm{high}}-\mu_{J,\mathrm{low}}\right)$$
@@ -336,7 +336,7 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 Uses 6 features instead of just `logit(p_raw)`:
 
-$$x_t=\left[1,\ \mathrm{logit}(p_{\mathrm{raw},t}),\ 100\sigma_{1d,t},\ 100\Delta\sigma_{20d,t},\ \frac{\sigma_{\mathrm{realized},t}}{\sigma_{1d,t}},\ 100\,\mathrm{vol\_of\_vol}_t\right]$$
+$$x_t=\left[1,\ \mathrm{logit}\!\left(p_{\mathrm{raw},t}\right),\ 100\,\sigma_{1d,t},\ 100\,\Delta\sigma_{20d,t},\ \frac{\sigma_{\mathrm{realized},t}}{\sigma_{1d,t}},\ 100\,\mathrm{vol\_of\_vol}_{t}\right]$$
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 

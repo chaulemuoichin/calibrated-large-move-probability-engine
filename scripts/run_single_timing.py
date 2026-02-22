@@ -4,7 +4,7 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
 from em_sde.backtest import run_walkforward

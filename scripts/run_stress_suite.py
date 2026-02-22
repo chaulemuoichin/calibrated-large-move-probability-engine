@@ -2,7 +2,7 @@
 Stress Suite Runner — Runs all exp_suite configs and collects summary metrics.
 
 Usage:
-    python run_stress_suite.py
+    python scripts/run_stress_suite.py
 """
 
 import logging
@@ -19,7 +19,7 @@ import numpy as np
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data

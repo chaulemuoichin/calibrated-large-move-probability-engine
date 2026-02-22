@@ -2,13 +2,17 @@
 Run only the remaining CV families (jump + trend) and write diagnostics CSVs.
 
 Usage:
-    python -u run_remaining_cv.py
+    python -u scripts/run_remaining_cv.py
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
