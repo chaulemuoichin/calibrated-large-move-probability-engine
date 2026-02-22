@@ -283,16 +283,11 @@ This produces more extreme daily moves than a normal distribution, matching empi
 
 After simulation, we have terminal prices for each path. The raw probability is simply:
 
-```
-simulated_returns = terminal_prices / starting_price - 1
-p_raw = count(|simulated_returns| >= threshold) / n_paths
-```
+$$r_i = \frac{P^{(i)}_{\mathrm{terminal}}}{P_0}-1,\quad p_{\mathrm{raw}}=\frac{1}{N_{\mathrm{paths}}}\sum_{i=1}^{N_{\mathrm{paths}}}\mathbf{1}\{|r_i|\ge \tau\}$$
 
 With Monte Carlo standard error:
 
-```
-SE = sqrt(p_raw * (1 - p_raw) / n_paths)
-```
+$$\mathrm{SE}=\sqrt{\frac{p_{\mathrm{raw}}(1-p_{\mathrm{raw}})}{N_{\mathrm{paths}}}}$$
 
 ### Adaptive Path Boosting
 
@@ -323,23 +318,17 @@ Raw Monte Carlo probabilities are systematically biased. Calibration learns a co
 
 The simplest calibrator maps raw to calibrated via a logistic function:
 
-```
-p_cal = sigmoid(a + b * logit(p_raw))
-```
+$$p_{\mathrm{cal}}=\sigma\!\left(a+b\,\mathrm{logit}(p_{\mathrm{raw}})\right)$$
 
-where `sigmoid(x) = 1/(1+exp(-x))` and `logit(p) = log(p/(1-p))`.
+where $\sigma(x)=\frac{1}{1+e^{-x}}$ and $\mathrm{logit}(p)=\log\!\left(\frac{p}{1-p}\right)$.
 
 **Initialization:** `a=0, b=1` (identity — calibrated = raw).
 
 **Online update** (when an outcome `y` arrives):
 
-```
-error = y - p_cal
-a += lr * error
-b += lr * error * logit(p_raw)
-```
+$$e_t = y_t - p_{\mathrm{cal},t},\quad a \leftarrow a + \eta e_t,\quad b \leftarrow b + \eta e_t\,\mathrm{logit}(p_{\mathrm{raw},t})$$
 
-Learning rate decays over time: `lr_effective = lr / sqrt(1 + n_updates)`.
+Learning rate decays over time: $\eta_t = \eta_0/\sqrt{1+n_{\mathrm{updates}}}$.
 
 The calibrator only starts adjusting after `min_updates` (default 50) outcomes have arrived.
 
@@ -347,18 +336,9 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 Uses 6 features instead of just `logit(p_raw)`:
 
-```
-features = [
-  1.0,                          (intercept)
-  logit(p_raw),                 (MC probability in log-odds)
-  sigma_1d * 100,               (current vol level)
-  delta_sigma_20d * 100,        (vol change over 20 days)
-  realized_vol / sigma_1d,      (forecast error ratio)
-  vol_of_vol * 100,             (instability of vol itself)
-]
+$$x_t=\left[1,\ \mathrm{logit}(p_{\mathrm{raw},t}),\ 100\sigma_{1d,t},\ 100\Delta\sigma_{20d,t},\ \frac{\sigma_{\mathrm{realized},t}}{\sigma_{1d,t}},\ 100\,\mathrm{vol\_of\_vol}_t\right]$$
 
-p_cal = sigmoid(weights^T @ features)
-```
+$$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
 Updated via SGD with L2 regularization (prevents overfitting) and gradient clipping (prevents explosions). Requires 100 outcomes before activating.
 
