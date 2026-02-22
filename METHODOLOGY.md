@@ -97,9 +97,7 @@ The goal is to answer: **how volatile is this stock right now?** The answer is a
 
 The standard model. Volatility tomorrow depends on today's volatility and today's surprise:
 
-```
-sigma_tomorrow^2 = omega + alpha * shock_today^2 + beta * sigma_today^2
-```
+$$\sigma_{t+1}^{2} = \omega + \alpha \epsilon_t^{2} + \beta \sigma_t^{2}$$
 
 - **omega**: a small constant floor (prevents vol from collapsing to zero)
 - **alpha**: how much today's surprise matters (higher = more reactive)
@@ -108,29 +106,23 @@ sigma_tomorrow^2 = omega + alpha * shock_today^2 + beta * sigma_today^2
 
 The model is **stationary** (well-behaved long-term) when `alpha + beta < 1`. In that case, volatility eventually settles to a long-run level:
 
-```
-sigma_long_run = sqrt(omega / (1 - alpha - beta))
-```
+$$\sigma_{\mathrm{long\_run}} = \sqrt{\frac{\omega}{1-\alpha-\beta}}$$
 
 ### GJR-GARCH (Leverage Effect)
 
 An extension that lets negative surprises (drops) have more impact than positive ones:
 
-```
-sigma_tomorrow^2 = omega + (alpha + gamma * I[drop]) * shock^2 + beta * sigma^2
-```
+$$\sigma_{t+1}^{2} = \omega + \left(\alpha + \gamma I_{\epsilon_t<0}\right)\epsilon_t^2 + \beta \sigma_t^2$$
 
 where `I[drop]` is 1 when the shock was negative. This captures the empirical fact that markets react more to bad news than good news.
 
-Stationarity condition: `alpha + beta + gamma/2 < 1`.
+Stationarity condition: $\alpha + \beta + \gamma/2 < 1$.
 
 ### EWMA Fallback
 
 If GARCH fitting fails (optimizer doesn't converge), the system falls back to Exponentially Weighted Moving Average volatility with a 252-day span:
 
-```
-sigma^2 = weighted average of recent squared returns
-```
+$$\sigma_t^2 = \sum_{j=1}^{m} w_j r_{t-j}^2,\quad \sum_{j=1}^{m} w_j = 1$$
 
 This always produces a number but loses the shock-response dynamics of GARCH.
 
@@ -148,12 +140,7 @@ This always produces a number but loses the shock-response dynamics of GARCH.
 
 **Fix:** Scale all the shock-response parameters down proportionally to hit a target persistence (default 0.98), and recompute `omega` so the long-run variance equals the current forecast:
 
-```
-scale = 0.98 / current_persistence
-alpha_new = alpha * scale
-beta_new  = beta  * scale
-omega_new = sigma_1d^2 * (1 - 0.98)
-```
+$$s = \frac{0.98}{\phi_{\mathrm{current}}},\quad \alpha_{\mathrm{new}} = s\alpha,\quad \beta_{\mathrm{new}} = s\beta,\quad \omega_{\mathrm{new}} = \sigma_{1d}^2(1-0.98)$$
 
 This preserves the relative importance of each parameter while anchoring the simulation to current volatility.
 
