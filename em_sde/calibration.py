@@ -40,7 +40,8 @@ def logit(p: float) -> float:
 
 class HistogramCalibrator:
     """
-    Online histogram binning recalibrator with Bayesian shrinkage.
+    Online histogram binning recalibrator with Bayesian shrinkage and
+    monotonic enforcement via Pool Adjacent Violators (PAV).
 
     Tracks running per-bin statistics (mean predicted vs mean observed)
     and applies shrinkage-damped additive bias correction to reduce
@@ -50,6 +51,10 @@ class HistogramCalibrator:
         raw_correction = mean_pred_in_bin - mean_obs_in_bin
         shrinkage = count / (count + prior_strength)
         p_corrected = p_cal - raw_correction * shrinkage
+
+    When monotonic=True (default), corrections are adjusted via PAV so that
+    corrected bin-center values are non-decreasing. This guarantees the
+    mapping preserves probability rank ordering (AUC invariant).
 
     Uses equal-width bins aligned with the ECE evaluation (default 10).
     Optional exponential decay (off by default) can track Platt drift.
@@ -67,18 +72,24 @@ class HistogramCalibrator:
         Bayesian shrinkage strength. Correction is scaled by
         count / (count + prior_strength). Higher values = more conservative.
         At count=prior_strength, correction is halved.
+    monotonic : bool
+        Enforce monotone non-decreasing corrected values via PAV.
+        Preserves discrimination (AUC) while reducing calibration error.
     """
 
     def __init__(self, n_bins: int = 10, min_samples_per_bin: int = 15,
-                 decay: float = 1.0, prior_strength: float = 50.0):
+                 decay: float = 1.0, prior_strength: float = 15.0,
+                 monotonic: bool = True):
         self.n_bins = n_bins
         self.min_samples_per_bin = min_samples_per_bin
         self.decay = decay
         self.prior_strength = prior_strength
+        self.monotonic = monotonic
         self.bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
         self._sum_pred = np.zeros(n_bins)
         self._sum_obs = np.zeros(n_bins)
         self._count = np.zeros(n_bins, dtype=np.float64)
+        self._corrections = np.zeros(n_bins)
 
     def _get_bin(self, p: float) -> int:
         """Get bin index for a prediction."""
@@ -86,17 +97,46 @@ class HistogramCalibrator:
         idx = int(np.searchsorted(self.bin_edges[1:], p, side='right'))
         return min(idx, self.n_bins - 1)
 
+    @staticmethod
+    def _pav(values: np.ndarray) -> np.ndarray:
+        """Pool Adjacent Violators: enforce monotone non-decreasing."""
+        result = values.copy()
+        n = len(result)
+        for _ in range(n):
+            changed = False
+            for i in range(n - 1):
+                if result[i] > result[i + 1]:
+                    avg = (result[i] + result[i + 1]) / 2.0
+                    result[i] = avg
+                    result[i + 1] = avg
+                    changed = True
+            if not changed:
+                break
+        return result
+
+    def _recompute_corrections(self):
+        """Recompute cached corrections with optional monotonic enforcement."""
+        corrections = np.zeros(self.n_bins)
+        for i in range(self.n_bins):
+            if self._count[i] >= self.min_samples_per_bin:
+                mean_pred = self._sum_pred[i] / self._count[i]
+                mean_obs = self._sum_obs[i] / self._count[i]
+                raw = mean_pred - mean_obs
+                shrinkage = self._count[i] / (self._count[i] + self.prior_strength)
+                corrections[i] = raw * shrinkage
+        if self.monotonic:
+            centers = (np.arange(self.n_bins) + 0.5) / self.n_bins
+            corrected = centers - corrections
+            corrected = self._pav(corrected)
+            corrections = centers - corrected
+        self._corrections = corrections
+
     def calibrate(self, p_cal: float) -> float:
         """Apply shrinkage-damped histogram bias correction."""
         idx = self._get_bin(p_cal)
         if self._count[idx] < self.min_samples_per_bin:
             return p_cal
-        mean_pred = self._sum_pred[idx] / self._count[idx]
-        mean_obs = self._sum_obs[idx] / self._count[idx]
-        raw_correction = mean_pred - mean_obs
-        shrinkage = self._count[idx] / (self._count[idx] + self.prior_strength)
-        correction = raw_correction * shrinkage
-        return float(np.clip(p_cal - correction, 0.0, 1.0))
+        return float(np.clip(p_cal - self._corrections[idx], 0.0, 1.0))
 
     def update(self, p_cal: float, y: float):
         """Update bin statistics with a resolved outcome."""
@@ -108,6 +148,7 @@ class HistogramCalibrator:
         self._sum_pred[idx] += p_cal
         self._sum_obs[idx] += y
         self._count[idx] += 1.0
+        self._recompute_corrections()
 
 
 class OnlineCalibrator:
@@ -135,7 +176,8 @@ class OnlineCalibrator:
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
-                 histogram_prior_strength: float = 50.0):
+                 histogram_prior_strength: float = 15.0,
+                 histogram_monotonic: bool = True):
         self.a: float = 0.0
         self.b: float = 1.0
         self.lr: float = lr
@@ -162,7 +204,8 @@ class OnlineCalibrator:
         self._histogram_cal: Optional[HistogramCalibrator] = (
             HistogramCalibrator(n_bins=histogram_n_bins,
                                 min_samples_per_bin=histogram_min_samples,
-                                prior_strength=histogram_prior_strength)
+                                prior_strength=histogram_prior_strength,
+                                monotonic=histogram_monotonic)
             if histogram_post_cal else None
         )
 
@@ -320,7 +363,8 @@ class RegimeCalibrator:
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
-                 histogram_prior_strength: float = 50.0):
+                 histogram_prior_strength: float = 15.0,
+                 histogram_monotonic: bool = True):
         self.n_bins = n_bins
         self.calibrators = [
             OnlineCalibrator(lr=lr, adaptive_lr=adaptive_lr,
@@ -333,7 +377,8 @@ class RegimeCalibrator:
                              histogram_post_cal=histogram_post_cal,
                              histogram_n_bins=histogram_n_bins,
                              histogram_min_samples=histogram_min_samples,
-                             histogram_prior_strength=histogram_prior_strength)
+                             histogram_prior_strength=histogram_prior_strength,
+                             histogram_monotonic=histogram_monotonic)
             for _ in range(n_bins)
         ]
         self._vol_history: deque = deque(maxlen=252)
@@ -407,7 +452,8 @@ class MultiFeatureCalibrator:
                  histogram_post_cal: bool = False,
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
-                 histogram_prior_strength: float = 50.0):
+                 histogram_prior_strength: float = 15.0,
+                 histogram_monotonic: bool = True):
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -434,7 +480,8 @@ class MultiFeatureCalibrator:
         self._histogram_cal: Optional[HistogramCalibrator] = (
             HistogramCalibrator(n_bins=histogram_n_bins,
                                 min_samples_per_bin=histogram_min_samples,
-                                prior_strength=histogram_prior_strength)
+                                prior_strength=histogram_prior_strength,
+                                monotonic=histogram_monotonic)
             if histogram_post_cal else None
         )
 

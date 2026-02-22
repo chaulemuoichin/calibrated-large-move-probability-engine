@@ -34,7 +34,7 @@ def expanding_window_cv(
     config_names: List[str],
     n_folds: int = 5,
     min_train_pct: float = 0.4,
-) -> pd.DataFrame:
+) -> tuple:
     """
     Run expanding-window cross-validation over multiple configs.
 
@@ -57,9 +57,12 @@ def expanding_window_cv(
 
     Returns
     -------
-    results : pd.DataFrame
-        Columns: config_name, fold, horizon, brier, bss, auc, logloss,
-                 separation, event_rate, n
+    cv_results : pd.DataFrame
+        Fold-level summary metrics. Columns: config_name, fold, horizon,
+        brier, bss, auc, logloss, separation, event_rate, n, sigma_mean.
+    oof_df : pd.DataFrame
+        Row-level out-of-fold predictions pooled across all folds.
+        Columns: config_name, fold, horizon, p_cal, y, sigma_1d.
     """
     n = len(df)
     min_train = int(n * min_train_pct)
@@ -70,6 +73,7 @@ def expanding_window_cv(
         logger.warning("Fold size %d is very small; results may be noisy", fold_size)
 
     rows = []
+    oof_parts = []
 
     for fold_i in range(n_folds):
         train_end = min_train + fold_i * fold_size
@@ -93,6 +97,13 @@ def expanding_window_cv(
             if len(test_res) == 0:
                 continue
 
+            # Per-row sigma for OOF collection
+            sigma_1d_all = (
+                _as_float_array(test_res["sigma_garch_1d"])
+                if "sigma_garch_1d" in test_res.columns
+                else np.full(len(test_res), np.nan)
+            )
+
             for H in cfg.model.horizons:
                 y_col = f"y_{H}"
                 if y_col not in test_res.columns:
@@ -109,8 +120,19 @@ def expanding_window_cv(
                 y_m = y[mask]
                 p_raw_m = p_raw[mask]
                 p_cal_m = p_cal[mask]
+                sigma_1d_m = sigma_1d_all[mask]
 
-                # Sigma mean for regime bucketing
+                # Collect OOF row-level predictions
+                oof_parts.append(pd.DataFrame({
+                    "config_name": name,
+                    "fold": fold_i,
+                    "horizon": H,
+                    "p_cal": p_cal_m,
+                    "y": y_m,
+                    "sigma_1d": sigma_1d_m,
+                }))
+
+                # Sigma mean for legacy regime bucketing
                 sigma_mean = np.nan
                 if "sigma_garch_1d" in test_res.columns:
                     sigma_mean = float(np.nanmean(
@@ -136,7 +158,11 @@ def expanding_window_cv(
                     "sigma_mean": sigma_mean,
                 })
 
-    return pd.DataFrame(rows)
+    cv_results = pd.DataFrame(rows)
+    oof_df = pd.concat(oof_parts, ignore_index=True) if oof_parts else pd.DataFrame(
+        columns=["config_name", "fold", "horizon", "p_cal", "y", "sigma_1d"]
+    )
+    return cv_results, oof_df
 
 
 def compare_models(cv_results: pd.DataFrame) -> pd.DataFrame:
@@ -196,12 +222,178 @@ def calibration_bic(p_cal: np.ndarray, y: np.ndarray, n_params: int) -> float:
     return float(n_params * np.log(n) - 2 * ll)
 
 
+def _bootstrap_ece_ci(
+    p: np.ndarray, y: np.ndarray,
+    n_bins: int = 10, n_boot: int = 1000,
+    alpha: float = 0.05, seed: int = 42,
+) -> tuple:
+    """Bootstrap confidence interval for equal-width ECE."""
+    rng = np.random.default_rng(seed)
+    n = len(p)
+    ece_samples = np.empty(n_boot)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        ece_samples[b] = expected_calibration_error(
+            p[idx], y[idx], n_bins=n_bins, adaptive=False,
+        )
+    lo = float(np.percentile(ece_samples, 100 * alpha / 2))
+    hi = float(np.percentile(ece_samples, 100 * (1 - alpha / 2)))
+    return lo, hi
+
+
+def apply_promotion_gates_oof(
+    oof_df: pd.DataFrame,
+    gates: dict = None,
+    min_samples: int = 30,
+    min_events: int = 5,
+) -> pd.DataFrame:
+    """
+    Apply promotion gates on pooled out-of-fold row-level predictions.
+
+    Instead of bucketing folds by sigma_mean (noisy with 5 folds), this
+    assigns each OOF row to a vol regime based on its own sigma_1d, then
+    computes metrics on the pooled rows per regime. Provides much more
+    statistical power and defensible pass/fail decisions.
+
+    Parameters
+    ----------
+    oof_df : pd.DataFrame
+        Row-level OOF predictions from expanding_window_cv.
+        Required columns: config_name, horizon, p_cal, y, sigma_1d.
+    gates : dict, optional
+        Gate thresholds. Default: {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
+    min_samples : int
+        Minimum rows in a regime bucket for evaluation (else insufficient_data).
+    min_events : int
+        Minimum positive labels in a regime bucket for evaluation.
+
+    Returns
+    -------
+    gate_report : pd.DataFrame
+        Columns: config_name, horizon, regime, metric, value, threshold,
+                 passed, margin, n_samples, n_events, status,
+                 ece_ci_low, ece_ci_high, all_gates_passed
+    """
+    if gates is None:
+        gates = {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
+
+    if len(oof_df) == 0:
+        return pd.DataFrame()
+
+    rows = []
+
+    for (config_name, horizon), group in oof_df.groupby(["config_name", "horizon"]):
+        p_cal = _as_float_array(group["p_cal"])
+        y = _as_float_array(group["y"])
+        sigma = _as_float_array(group["sigma_1d"])
+
+        # Row-level regime assignment via sigma_1d terciles
+        valid_sigma = sigma[~np.isnan(sigma)]
+        if len(valid_sigma) < 3:
+            # Not enough sigma data; evaluate as single "all" bucket
+            regime_labels = np.full(len(sigma), "all")
+        else:
+            p33 = float(np.nanpercentile(valid_sigma, 33))
+            p66 = float(np.nanpercentile(valid_sigma, 66))
+            regime_labels = np.array([
+                "all" if np.isnan(s)
+                else "low_vol" if s < p33
+                else "high_vol" if s > p66
+                else "mid_vol"
+                for s in sigma
+            ])
+
+        for regime in sorted(set(regime_labels)):
+            rmask = regime_labels == regime
+            p_r = p_cal[rmask]
+            y_r = y[rmask]
+            n_samples = len(y_r)
+            n_events = int(np.sum(y_r))
+
+            insufficient = n_samples < min_samples or n_events < min_events
+
+            # Compute bootstrap CI for ECE (always, if enough data)
+            ece_ci_low, ece_ci_high = np.nan, np.nan
+            if not insufficient:
+                ece_ci_low, ece_ci_high = _bootstrap_ece_ci(p_r, y_r)
+
+            for metric, threshold in gates.items():
+                if insufficient:
+                    rows.append({
+                        "config_name": config_name,
+                        "horizon": horizon,
+                        "regime": regime,
+                        "metric": metric,
+                        "value": np.nan,
+                        "threshold": threshold,
+                        "passed": None,
+                        "margin": np.nan,
+                        "n_samples": n_samples,
+                        "n_events": n_events,
+                        "status": "insufficient_data",
+                        "ece_ci_low": np.nan,
+                        "ece_ci_high": np.nan,
+                    })
+                    continue
+
+                if metric == "bss_cal":
+                    value = float(brier_skill_score(p_r, y_r))
+                elif metric == "auc_cal":
+                    value = float(auc_roc(p_r, y_r))
+                elif metric == "ece_cal":
+                    value = float(expected_calibration_error(
+                        p_r, y_r, adaptive=False,
+                    ))
+                else:
+                    continue
+
+                if metric == "ece_cal":
+                    passed = value <= threshold
+                    margin = round(threshold - value, 6)
+                else:
+                    passed = value >= threshold
+                    margin = round(value - threshold, 6)
+
+                rows.append({
+                    "config_name": config_name,
+                    "horizon": horizon,
+                    "regime": regime,
+                    "metric": metric,
+                    "value": round(value, 6),
+                    "threshold": threshold,
+                    "passed": bool(passed),
+                    "margin": margin,
+                    "n_samples": n_samples,
+                    "n_events": n_events,
+                    "status": "evaluated",
+                    "ece_ci_low": round(ece_ci_low, 6) if not np.isnan(ece_ci_low) else np.nan,
+                    "ece_ci_high": round(ece_ci_high, 6) if not np.isnan(ece_ci_high) else np.nan,
+                })
+
+    report = pd.DataFrame(rows)
+
+    if len(report) > 0:
+        # all_gates_passed: True only if all evaluated metrics pass in all regimes
+        def _all_pass(grp):
+            evaluated = grp[grp["status"] == "evaluated"]
+            if len(evaluated) == 0:
+                return False
+            return bool(evaluated["passed"].all())
+
+        summary = report.groupby(
+            ["config_name", "horizon"]
+        ).apply(_all_pass, include_groups=False).reset_index(name="all_gates_passed")
+        report = report.merge(summary, on=["config_name", "horizon"])
+
+    return report
+
+
 def apply_promotion_gates(
     cv_results: pd.DataFrame,
     gates: dict = None,
 ) -> pd.DataFrame:
     """
-    Apply hard promotion gates per regime bucket.
+    Apply hard promotion gates per regime bucket (legacy fold-level method).
 
     Splits CV results by vol regime (sigma_mean terciles across folds),
     then checks that every gate passes in every regime bucket.

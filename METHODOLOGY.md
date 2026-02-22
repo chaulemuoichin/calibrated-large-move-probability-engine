@@ -411,14 +411,21 @@ For each of 10 equal-width bins over [0, 1]:
 
 At prediction time:
     raw_correction = mean_pred_in_bin - mean_obs_in_bin
-    shrinkage = count / (count + prior_strength)    (default prior_strength = 50)
+    shrinkage = count / (count + prior_strength)    (default prior_strength = 15)
     correction = raw_correction * shrinkage
     p_final = p_cal - correction    (clipped to [0, 1])
+
+Monotonic enforcement (PAV):
+    After computing all bin corrections, apply Pool Adjacent Violators
+    to ensure corrected bin-center values are non-decreasing.
+    This guarantees the mapping preserves probability rankings (AUC invariant).
 ```
 
 This directly targets calibration error (ECE) rather than squared error (Brier). The 10-bin grid is aligned with the ECE evaluation bins. A minimum of 15 samples per bin is required before correction activates.
 
-Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 samples (activation threshold), shrinkage ≈ 0.23 — very conservative. At 190 samples (typical), shrinkage ≈ 0.79. At 500 samples, shrinkage ≈ 0.91. This prevents noisy overcorrection in sparse bins without requiring decay (which reduces effective sample size and amplifies noise). Enabled by default via `histogram_post_calibration: true` in the calibration config.
+Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 samples (activation threshold), shrinkage = 0.50. At 63 samples (typical per-regime bin), shrinkage ≈ 0.81. At 190 samples, shrinkage ≈ 0.93. This prevents noisy overcorrection in sparse bins without requiring decay (which reduces effective sample size and amplifies noise).
+
+Monotonic enforcement via the Pool Adjacent Violators (PAV) algorithm ensures that higher raw predictions always map to higher corrected predictions. When adjacent bin corrections would violate this ordering, PAV pools them to their average. This provides two benefits: it guarantees AUC cannot be damaged by histogram corrections, and it reduces variance by pooling noisy adjacent bins. Enabled by default via `histogram_post_calibration: true` and `histogram_monotonic: true` in the calibration config.
 
 **File:** `em_sde/calibration.py` (`HistogramCalibrator`)
 
@@ -560,21 +567,27 @@ Each fold runs a full walk-forward backtest. Metrics are computed on the test po
 Hard go/no-go criteria applied per volatility regime bucket:
 
 ```
-Split test data into low / mid / high volatility periods (terciles of mean sigma).
+Pool all out-of-fold (OOF) row-level predictions across CV folds.
+Assign each row to low / mid / high vol regime using its own sigma_1d tercile.
 
 In EACH regime bucket, the model must pass ALL of:
   BSS  >= 0.00    (must beat climatology)
   AUC  >= 0.55    (must have some discrimination)
   ECE  <= 0.02    (must be reasonably calibrated)
 
-If any gate fails in any bucket: model is BLOCKED from promotion.
+Minimum sample guards: 30 rows and 5 events per regime required.
+Regimes with insufficient data are skipped (not counted as pass or fail).
+
+If any gate fails in any evaluated bucket: model is BLOCKED from promotion.
 ```
+
+Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-level means in the legacy approach). Bootstrap confidence intervals for ECE are reported for defensibility.
 
 ### Where to look for problems
 
-- **5 folds on 3200 rows**: Each test fold has ~384 rows. At H=20, only ~19 non-overlapping observations. This is very few for stable metric estimation.
+- **5 folds on 3200 rows**: Each test fold has ~384 rows. At H=20, only ~19 non-overlapping observations per fold. OOF pooling across folds gives ~1900 total rows, improving statistical power.
 - **Expanding window**: Later folds have more training data and may perform better simply due to data quantity, not model quality.
-- **Promotion gates per regime**: With ~128 rows per regime bucket per fold, metrics are noisy. A model might fail/pass gates by random variation.
+- **Overlapping predictions**: OOF rows from adjacent folds may share overlapping prediction horizons. This inflates effective sample size. Always check bootstrap CIs, not just point estimates.
 
 ---
 
@@ -673,4 +686,4 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 150 unit tests |
+| `tests/test_framework.py` | 152 unit tests |

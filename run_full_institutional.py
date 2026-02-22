@@ -157,7 +157,7 @@ def _stage_cv_and_gates() -> None:
         names = [Path(p).stem for p in paths]
 
         df, _ = load_data(configs[0])
-        cv_results = expanding_window_cv(df, configs, names, n_folds=5)
+        cv_results, _oof_df = expanding_window_cv(df, configs, names, n_folds=5)
         summary = compare_models(cv_results)
         gate_report = apply_promotion_gates(
             cv_results,

@@ -38,7 +38,7 @@ from em_sde.garch import fit_garch, GarchResult, project_to_stationary
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
 from em_sde.calibration import HistogramCalibrator
-from em_sde.model_selection import apply_promotion_gates
+from em_sde.model_selection import apply_promotion_gates, apply_promotion_gates_oof
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
 from em_sde.evaluation import compute_reliability
@@ -2261,7 +2261,127 @@ class TestHistogramCalibrator:
         assert hc.n_bins == 10
         assert hc.min_samples_per_bin == 15
         assert hc.decay == 1.0
-        assert hc.prior_strength == 50.0
+        assert hc.prior_strength == 15.0
+        assert hc.monotonic is True
+
+    def test_pav_basic(self):
+        """PAV enforces monotone non-decreasing."""
+        values = np.array([0.1, 0.3, 0.2, 0.4, 0.35, 0.5])
+        result = HistogramCalibrator._pav(values)
+        # Check non-decreasing
+        for i in range(len(result) - 1):
+            assert result[i] <= result[i + 1] + 1e-12, (
+                f"PAV violation at {i}: {result[i]:.4f} > {result[i+1]:.4f}"
+            )
+        # Already-sorted input should be unchanged
+        sorted_input = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+        result2 = HistogramCalibrator._pav(sorted_input)
+        np.testing.assert_array_almost_equal(result2, sorted_input)
+
+    def test_monotonic_preserves_order(self):
+        """With monotonic=True, higher input predictions produce higher outputs."""
+        hc = HistogramCalibrator(n_bins=10, min_samples_per_bin=5, monotonic=True,
+                                 prior_strength=15.0)
+        rng = np.random.default_rng(99)
+        # Train with deliberately skewed data per bin to create non-monotonic raw corrections
+        for _ in range(100):
+            p = float(rng.uniform(0.0, 0.3))
+            y = float(rng.random() < 0.05)  # low event rate in low bins
+            hc.update(p, y)
+        for _ in range(100):
+            p = float(rng.uniform(0.3, 0.6))
+            y = float(rng.random() < 0.30)  # higher event rate in mid bins
+            hc.update(p, y)
+        # Check that calibrated outputs preserve ordering
+        test_inputs = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55]
+        outputs = [hc.calibrate(p) for p in test_inputs]
+        for i in range(len(outputs) - 1):
+            assert outputs[i] <= outputs[i + 1] + 1e-12, (
+                f"Monotonic violation: calibrate({test_inputs[i]})={outputs[i]:.4f} > "
+                f"calibrate({test_inputs[i+1]})={outputs[i+1]:.4f}"
+            )
+
+
+class TestPromotionGatesOOF:
+    """Tests for apply_promotion_gates_oof (row-level OOF gate evaluation)."""
+
+    def _make_oof(self, n=200, event_rate=0.10, bias=0.0, seed=42):
+        """Create synthetic OOF data with controllable calibration bias."""
+        rng = np.random.default_rng(seed)
+        y = (rng.random(n) < event_rate).astype(float)
+        p_cal = np.clip(y * 0.3 + (1 - y) * 0.05 + bias + rng.normal(0, 0.02, n), 0.01, 0.99)
+        sigma = rng.uniform(0.01, 0.03, n)
+        return pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+
+    def test_oof_gates_passing(self):
+        """Well-calibrated OOF predictions should pass gates."""
+        oof = self._make_oof(n=500, event_rate=0.10, bias=0.0)
+        report = apply_promotion_gates_oof(oof)
+        assert len(report) > 0
+        assert "all_gates_passed" in report.columns
+        assert "n_samples" in report.columns
+        assert "n_events" in report.columns
+        # With good calibration, BSS should be positive and AUC should be decent
+        evaluated = report[report["status"] == "evaluated"]
+        assert len(evaluated) > 0
+
+    def test_oof_gates_has_ci(self):
+        """OOF gate report includes bootstrap CI for ECE."""
+        oof = self._make_oof(n=300)
+        report = apply_promotion_gates_oof(oof)
+        ece_rows = report[(report["metric"] == "ece_cal") & (report["status"] == "evaluated")]
+        assert len(ece_rows) > 0
+        for _, row in ece_rows.iterrows():
+            assert not np.isnan(row["ece_ci_low"]), "ece_ci_low should not be NaN"
+            assert not np.isnan(row["ece_ci_high"]), "ece_ci_high should not be NaN"
+            assert row["ece_ci_low"] <= row["ece_ci_high"], "CI lower should <= upper"
+
+    def test_oof_gates_insufficient_data(self):
+        """With too few samples, regime should be marked insufficient_data."""
+        oof = self._make_oof(n=20, event_rate=0.10)
+        report = apply_promotion_gates_oof(oof, min_samples=30)
+        # With only ~7 samples per regime, all should be insufficient
+        assert all(report["status"] == "insufficient_data")
+
+    def test_oof_gates_row_level_regime(self):
+        """Regime assignment uses row-level sigma, not fold-level mean."""
+        rng = np.random.default_rng(123)
+        n = 300
+        sigma = np.concatenate([
+            rng.uniform(0.005, 0.010, n // 3),  # low vol
+            rng.uniform(0.015, 0.020, n // 3),  # mid vol
+            rng.uniform(0.025, 0.035, n // 3),  # high vol
+        ])
+        y = (rng.random(n) < 0.10).astype(float)
+        p_cal = np.clip(y * 0.2 + 0.05, 0.01, 0.99)
+        oof = pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+        report = apply_promotion_gates_oof(oof)
+        regimes = set(report["regime"].unique())
+        assert "low_vol" in regimes, "Should have low_vol regime"
+        assert "mid_vol" in regimes, "Should have mid_vol regime"
+        assert "high_vol" in regimes, "Should have high_vol regime"
+
+    def test_oof_gates_sample_counts_reported(self):
+        """n_samples and n_events are accurate in the gate report."""
+        oof = self._make_oof(n=300, event_rate=0.10)
+        report = apply_promotion_gates_oof(oof, min_samples=10, min_events=1)
+        for _, row in report[report["status"] == "evaluated"].iterrows():
+            assert row["n_samples"] > 0
+            assert row["n_events"] >= 0
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ import sys
 import time
 import warnings
 import logging
+
+import numpy as np
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -21,7 +23,10 @@ logging.disable(logging.WARNING)
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
-from em_sde.model_selection import expanding_window_cv, compare_models, apply_promotion_gates
+from em_sde.model_selection import (
+    expanding_window_cv, compare_models,
+    apply_promotion_gates, apply_promotion_gates_oof,
+)
 
 OUT_DIR = Path("outputs/diagnostics")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,9 +40,16 @@ def run_single_config(name: str, config_path: str) -> None:
     cfg_name = Path(config_path).stem
     df, _ = load_data(cfg)
 
-    cv_results = expanding_window_cv(df, [cfg], [cfg_name], n_folds=5)
+    cv_results, oof_df = expanding_window_cv(df, [cfg], [cfg_name], n_folds=5)
     summary = compare_models(cv_results)
-    gates = apply_promotion_gates(
+
+    # Primary: row-level OOF gates (statistically valid)
+    gates_oof = apply_promotion_gates_oof(
+        oof_df,
+        gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+    )
+    # Legacy: fold-level gates (for comparison)
+    gates_legacy = apply_promotion_gates(
         cv_results,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
     )
@@ -45,13 +57,15 @@ def run_single_config(name: str, config_path: str) -> None:
     # Save results
     cv_results.to_csv(OUT_DIR / f"cv_{name}_folds_recheck.csv", index=False)
     summary.to_csv(OUT_DIR / f"cv_{name}_summary_recheck.csv", index=False)
-    gates.to_csv(OUT_DIR / f"cv_{name}_gates_recheck.csv", index=False)
+    gates_oof.to_csv(OUT_DIR / f"cv_{name}_gates_recheck.csv", index=False)
+    gates_legacy.to_csv(OUT_DIR / f"cv_{name}_gates_legacy.csv", index=False)
 
     elapsed = (time.perf_counter() - t0) / 60.0
 
-    # Print gate report
+    # Print OOF gate report (primary)
     print(f"\nElapsed: {elapsed:.1f} min\n")
-    for (cfg_n, H), grp in gates.groupby(["config_name", "horizon"]):
+    print("=== OOF Row-Level Gates (primary) ===\n")
+    for (cfg_n, H), grp in gates_oof.groupby(["config_name", "horizon"]):
         all_pass = grp["all_gates_passed"].all()
         status = "PASS" if all_pass else "FAIL"
         print(f"{cfg_n} H={H}: {status}")
@@ -61,16 +75,25 @@ def run_single_config(name: str, config_path: str) -> None:
             threshold = row["threshold"]
             passed = row["passed"]
             margin = row["margin"]
-            tag = "[OK]" if passed else "[FAIL]"
-            print(f"  {row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}) {tag}")
+            n_s = row.get("n_samples", "?")
+            n_e = row.get("n_events", "?")
+            if row.get("status") == "insufficient_data":
+                tag = "[SKIP: insufficient data]"
+                print(f"  {row['regime']:>8s}/{metric} = n/a  (n={n_s}, events={n_e}) {tag}")
+            else:
+                tag = "[OK]" if passed else "[FAIL]"
+                ci_str = ""
+                if metric == "ece_cal" and not np.isnan(row.get("ece_ci_low", np.nan)):
+                    ci_str = f"  CI=[{row['ece_ci_low']:.4f}, {row['ece_ci_high']:.4f}]"
+                print(f"  {row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}")
 
-    n_pass = gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
-    n_total = gates.groupby(["config_name", "horizon"]).ngroups
-    print(f"\nGate pass: {n_pass}/{n_total} config-horizon combos")
+    n_pass = gates_oof.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
+    n_total = gates_oof.groupby(["config_name", "horizon"]).ngroups
+    print(f"\nOOF gate pass: {n_pass}/{n_total} config-horizon combos")
 
     # Shadow gate at ECE<=0.04 (reporting only, no policy change)
-    shadow_gates = apply_promotion_gates(
-        cv_results,
+    shadow_gates = apply_promotion_gates_oof(
+        oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.04},
     )
     shadow_pass = shadow_gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()

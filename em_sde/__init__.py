@@ -58,6 +58,7 @@ __all__ = [
     "expanding_window_cv",
     "compare_models",
     "apply_promotion_gates",
+    "apply_promotion_gates_oof",
     "calibration_aic",
     "calibration_bic",
     # Output
@@ -93,5 +94,5 @@ from .evaluation import (
     conditional_var,
     max_drawdown,
 )
-from .model_selection import expanding_window_cv, compare_models, apply_promotion_gates, calibration_aic, calibration_bic
+from .model_selection import expanding_window_cv, compare_models, apply_promotion_gates, apply_promotion_gates_oof, calibration_aic, calibration_bic
 from .output import write_outputs

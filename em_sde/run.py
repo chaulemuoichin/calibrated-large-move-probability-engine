@@ -281,7 +281,7 @@ def _run_compare(args):
     print()
 
     # Run CV
-    cv_results = expanding_window_cv(df, configs, names, n_folds=args.cv_folds)
+    cv_results, _oof_df = expanding_window_cv(df, configs, names, n_folds=args.cv_folds)
 
     # Summarize
     summary = compare_models(cv_results)
