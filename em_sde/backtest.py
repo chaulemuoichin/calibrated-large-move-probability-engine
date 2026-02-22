@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -126,6 +126,11 @@ def run_walkforward(
     garch_window = cfg.model.garch_window
     garch_min = cfg.model.garch_min_window
     t_df = cfg.model.t_df
+    mc_vol_term_structure = cfg.model.mc_vol_term_structure
+    mc_regime_t_df = cfg.model.mc_regime_t_df
+    mc_regime_t_df_low = cfg.model.mc_regime_t_df_low
+    mc_regime_t_df_mid = cfg.model.mc_regime_t_df_mid
+    mc_regime_t_df_high = cfg.model.mc_regime_t_df_high
     garch_in_sim = cfg.model.garch_in_sim
     garch_model_type = cfg.model.garch_model_type
     jump_enabled = cfg.model.jump_enabled
@@ -431,6 +436,32 @@ def run_walkforward(
             step_jump_mean = jump_mean
             step_jump_vol = jump_vol
 
+        # === Step 5b: Per-horizon sigma (term structure) and regime t_df ===
+        # WS1: Use GARCH term-structure average vol per horizon
+        sigma_per_h: Dict[int, float] = {}
+        for H in horizons:
+            if mc_vol_term_structure and garch_result.omega is not None:
+                sigma_per_h[H] = garch_term_structure_vol(
+                    sigma_1d, garch_result.omega, garch_result.alpha,
+                    garch_result.beta, garch_result.gamma, H,
+                    model_type=garch_model_type,
+                )
+            else:
+                sigma_per_h[H] = sigma_1d
+
+        # WS3: Regime-conditional t_df
+        if mc_regime_t_df and len(sigma_history) >= 50:
+            vol_arr = np.sort(np.array(list(sigma_history)))
+            vol_pctile = np.searchsorted(vol_arr, sigma_1d) / len(vol_arr)
+            if vol_pctile < 0.25:
+                step_t_df = mc_regime_t_df_low
+            elif vol_pctile > 0.75:
+                step_t_df = mc_regime_t_df_high
+            else:
+                step_t_df = mc_regime_t_df_mid
+        else:
+            step_t_df = t_df
+
         mc_results = {}
         with ThreadPoolExecutor(max_workers=len(horizons)) as executor:
             futures = {}
@@ -440,8 +471,8 @@ def run_walkforward(
                 seed_val = int(child_seeds[i].generate_state(1)[0]) + idx
                 futures[H] = executor.submit(
                     _simulate_horizon,
-                    S0, sigma_1d, H, path_counts[H], mu_year, thresholds[H],
-                    int(seed_val % (2**31)), t_df,
+                    S0, sigma_per_h[H], H, path_counts[H], mu_year, thresholds[H],
+                    int(seed_val % (2**31)), step_t_df,
                     garch_in_sim=garch_in_sim,
                     omega=garch_result.omega,
                     alpha=garch_result.alpha,

@@ -247,6 +247,7 @@ def apply_promotion_gates_oof(
     min_samples: int = 30,
     min_events: int = 5,
     min_nonevents: int = 5,
+    pooled_gate: bool = False,
 ) -> pd.DataFrame:
     """
     Apply promotion gates on pooled out-of-fold row-level predictions.
@@ -306,10 +307,19 @@ def apply_promotion_gates_oof(
                 for s in sigma
             ])
 
-        for regime in sorted(set(regime_labels)):
-            rmask = regime_labels == regime
-            p_r = p_cal[rmask]
-            y_r = y[rmask]
+        # Build regime list: always include per-regime; add "pooled" when pooled_gate
+        regime_list = sorted(set(regime_labels))
+        if pooled_gate:
+            regime_list = ["pooled"] + regime_list
+
+        for regime in regime_list:
+            if regime == "pooled":
+                p_r = p_cal
+                y_r = y
+            else:
+                rmask = regime_labels == regime
+                p_r = p_cal[rmask]
+                y_r = y[rmask]
             n_samples = len(y_r)
             n_events = int(np.sum(y_r))
             n_nonevents = n_samples - n_events
@@ -383,7 +393,7 @@ def apply_promotion_gates_oof(
                     "n_events": n_events,
                     "n_nonevents": n_nonevents,
                     "insufficient_reason": "sufficient",
-                    "status": "evaluated",
+                    "status": "evaluated" if not (pooled_gate and regime != "pooled") else "diagnostic",
                     "ece_ci_low": round(ece_ci_low, 6) if not np.isnan(ece_ci_low) else np.nan,
                     "ece_ci_high": round(ece_ci_high, 6) if not np.isnan(ece_ci_high) else np.nan,
                 })
@@ -392,14 +402,15 @@ def apply_promotion_gates_oof(
 
     if len(report) > 0:
         # Tri-state promotion: PASS / FAIL / UNDECIDED
-        # UNDECIDED if any regime has insufficient_data (blocks promotion)
+        # When pooled_gate: only "evaluated" rows (pooled) determine pass/fail
+        # When per-regime: UNDECIDED if any regime has insufficient_data
         def _promotion_status(grp):
             has_insufficient = (grp["status"] == "insufficient_data").any()
             evaluated = grp[grp["status"] == "evaluated"]
             if len(evaluated) == 0:
                 return "UNDECIDED"
             all_pass = bool(evaluated["passed"].all())
-            if has_insufficient:
+            if has_insufficient and not pooled_gate:
                 return "UNDECIDED"
             if all_pass:
                 return "PASS"

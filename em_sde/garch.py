@@ -311,3 +311,64 @@ def project_to_stationary(
     )
 
     return omega_new, alpha_new, beta_new, gamma_new
+
+
+def garch_term_structure_vol(
+    sigma_1d: float,
+    omega: float,
+    alpha: float,
+    beta: float,
+    gamma: Optional[float],
+    H: int,
+    model_type: str = "garch",
+) -> float:
+    """
+    Compute average expected daily vol over H steps using GARCH mean-reversion.
+
+    The GARCH conditional variance mean-reverts toward the unconditional variance:
+        E[σ²_{t+h}] = σ²_unc + pers^h * (σ²_t - σ²_unc)
+
+    This returns sqrt(mean(E[σ²_{t+1}], ..., E[σ²_{t+H}])), which accounts
+    for the vol term structure rather than using the 1-step forecast for all
+    horizons. Walk-forward safe (uses only fitted GARCH params).
+
+    Parameters
+    ----------
+    sigma_1d : float
+        One-step-ahead daily vol forecast (decimal).
+    omega, alpha, beta, gamma : float
+        GARCH parameters (decimal^2 units for omega).
+    H : int
+        Forecast horizon in trading days.
+    model_type : str
+        "garch" or "gjr".
+
+    Returns
+    -------
+    sigma_avg : float
+        Average expected daily vol over the horizon.
+    """
+    if omega is None or alpha is None or beta is None:
+        return sigma_1d
+
+    if gamma is not None and model_type == "gjr":
+        persistence = alpha + beta + gamma / 2.0
+    else:
+        persistence = alpha + beta
+
+    # Non-stationary: can't compute unconditional variance, return sigma_1d
+    if persistence >= 1.0 or (1.0 - persistence) < 1e-10:
+        return sigma_1d
+
+    sigma2_t = sigma_1d ** 2
+    sigma2_unc = omega / (1.0 - persistence)
+
+    # Average expected variance over h=1..H
+    total_var = 0.0
+    for h in range(1, H + 1):
+        total_var += sigma2_unc + (persistence ** h) * (sigma2_t - sigma2_unc)
+
+    avg_var = total_var / H
+    # Safety: ensure positive
+    avg_var = max(avg_var, 1e-16)
+    return float(np.sqrt(avg_var))

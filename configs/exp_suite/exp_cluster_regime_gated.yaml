@@ -44,6 +44,11 @@ model:
     5: 0.025
     10: 0.035
     20: 0.04
+  mc_vol_term_structure: true
+  mc_regime_t_df: true
+  mc_regime_t_df_low: 8.0
+  mc_regime_t_df_mid: 5.0
+  mc_regime_t_df_high: 4.0
   store_quantiles: true
 
 calibration:
@@ -64,10 +69,10 @@ calibration:
   multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights: [0.5, 0.3, 0.2]
-  post_cal_method: "isotonic"
   histogram_n_bins: 15
   histogram_min_samples: 8
   histogram_prior_strength: 5.0
+  promotion_pooled_gate: true
 
 output:
   base_dir: "outputs"

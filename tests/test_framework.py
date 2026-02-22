@@ -34,7 +34,7 @@ from em_sde.evaluation import (
     max_drawdown, compute_risk_report,
 )
 from em_sde.config import PipelineConfig, DataConfig, ModelConfig, CalibrationConfig, OutputConfig
-from em_sde.garch import fit_garch, GarchResult, project_to_stationary
+from em_sde.garch import fit_garch, GarchResult, project_to_stationary, garch_term_structure_vol
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
 from em_sde.calibration import HistogramCalibrator, IsotonicCalibrator
@@ -2597,6 +2597,161 @@ class TestRegimeMultiFeatureCalibrator:
         from em_sde.config import PipelineConfig
         cfg = PipelineConfig()
         assert cfg.model.regime_gated_fixed_pct_by_horizon is None
+
+
+class TestGarchTermStructureVol:
+    """Tests for garch_term_structure_vol (WS1: multi-step vol forecast)."""
+
+    def test_identity_at_unconditional(self):
+        """When sigma_1d equals unconditional vol, term structure is flat."""
+        omega = 1e-6
+        alpha = 0.05
+        beta = 0.90
+        persistence = alpha + beta
+        sigma2_unc = omega / (1.0 - persistence)
+        sigma_unc = float(np.sqrt(sigma2_unc))
+        result = garch_term_structure_vol(sigma_unc, omega, alpha, beta, None, 20)
+        assert abs(result - sigma_unc) < 1e-6
+
+    def test_mean_reversion_high_vol(self):
+        """When sigma_1d > unconditional, term-structure vol < sigma_1d."""
+        omega = 1e-6
+        alpha = 0.05
+        beta = 0.90
+        sigma_1d = 0.03  # well above unconditional
+        result = garch_term_structure_vol(sigma_1d, omega, alpha, beta, None, 20)
+        assert result < sigma_1d, f"Expected mean reversion: {result} should be < {sigma_1d}"
+
+    def test_mean_reversion_low_vol(self):
+        """When sigma_1d < unconditional, term-structure vol > sigma_1d."""
+        omega = 5e-6
+        alpha = 0.05
+        beta = 0.90
+        sigma2_unc = omega / 0.05  # = 1e-4, so sigma_unc = 0.01
+        sigma_1d = 0.005  # below unconditional
+        result = garch_term_structure_vol(sigma_1d, omega, alpha, beta, None, 20)
+        assert result > sigma_1d, f"Expected reversion up: {result} should be > {sigma_1d}"
+
+    def test_h1_equals_sigma_1d(self):
+        """For H=1, term-structure vol should equal sigma_1d."""
+        omega = 1e-6
+        alpha = 0.05
+        beta = 0.90
+        sigma_1d = 0.015
+        result = garch_term_structure_vol(sigma_1d, omega, alpha, beta, None, 1)
+        # At H=1: avg = sigma2_unc + pers^1 * (sigma2_t - sigma2_unc)
+        # This is the 1-step-ahead conditional variance, should be close to sigma_1d^2
+        assert abs(result - sigma_1d) < 0.003
+
+    def test_longer_horizon_more_reversion(self):
+        """Longer horizon → more mean reversion → closer to unconditional."""
+        omega = 1e-6
+        alpha = 0.05
+        beta = 0.90
+        sigma_1d = 0.03  # high vol
+        r5 = garch_term_structure_vol(sigma_1d, omega, alpha, beta, None, 5)
+        r20 = garch_term_structure_vol(sigma_1d, omega, alpha, beta, None, 20)
+        assert r20 < r5, f"H=20 ({r20}) should show more reversion than H=5 ({r5})"
+
+    def test_nonstationary_returns_sigma_1d(self):
+        """Non-stationary GARCH returns sigma_1d unchanged."""
+        sigma_1d = 0.02
+        result = garch_term_structure_vol(sigma_1d, 1e-6, 0.10, 0.95, None, 20)
+        assert result == sigma_1d
+
+    def test_none_params_returns_sigma_1d(self):
+        """Missing GARCH params returns sigma_1d unchanged."""
+        assert garch_term_structure_vol(0.02, None, None, None, None, 20) == 0.02
+
+    def test_gjr_model(self):
+        """GJR-GARCH term structure accounts for gamma."""
+        omega = 1e-6
+        alpha = 0.03
+        beta = 0.90
+        gamma = 0.04
+        sigma_1d = 0.03
+        result = garch_term_structure_vol(
+            sigma_1d, omega, alpha, beta, gamma, 20, model_type="gjr")
+        assert result < sigma_1d  # still mean-reverts
+
+
+class TestPooledECEGate:
+    """Tests for pooled ECE gate (WS2)."""
+
+    def _make_oof(self, n=600, event_rate=0.10, bias=0.0, seed=42):
+        """Create synthetic OOF data with vol regimes."""
+        rng = np.random.default_rng(seed)
+        y = (rng.random(n) < event_rate).astype(float)
+        p_cal = np.clip(y * 0.3 + (1 - y) * 0.05 + bias + rng.normal(0, 0.02, n), 0.01, 0.99)
+        sigma = rng.uniform(0.01, 0.03, n)
+        return pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+
+    def test_pooled_gate_adds_pooled_regime(self):
+        """pooled_gate=True adds a 'pooled' regime row."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        assert "pooled" in report["regime"].values
+
+    def test_pooled_gate_per_regime_is_diagnostic(self):
+        """Per-regime rows should have status='diagnostic' when pooled_gate=True."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        per_regime = report[report["regime"] != "pooled"]
+        evaluated_or_diag = per_regime[per_regime["status"].isin(["diagnostic", "insufficient_data"])]
+        assert len(evaluated_or_diag) == len(per_regime)
+
+    def test_pooled_gate_promotion_uses_pooled_only(self):
+        """Promotion decision should be based on pooled rows only."""
+        oof = self._make_oof(n=600, event_rate=0.10, bias=0.0)
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        # Check that promotion_status exists
+        assert "promotion_status" in report.columns
+        # Pooled rows should be "evaluated"
+        pooled = report[report["regime"] == "pooled"]
+        assert (pooled["status"] == "evaluated").all()
+
+    def test_pooled_gate_off_no_pooled_regime(self):
+        """pooled_gate=False should not add pooled regime."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=False)
+        assert "pooled" not in report["regime"].values
+
+    def test_pooled_gate_more_samples(self):
+        """Pooled regime has more samples than any per-regime."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        pooled_n = report[report["regime"] == "pooled"]["n_samples"].iloc[0]
+        per_regime_max = report[report["regime"] != "pooled"]["n_samples"].max()
+        assert pooled_n > per_regime_max
+
+
+class TestRegimeTdfConfig:
+    """Tests for regime-conditional t_df config (WS3)."""
+
+    def test_regime_t_df_config_fields_exist(self):
+        """mc_regime_t_df fields exist with correct defaults."""
+        cfg = PipelineConfig()
+        assert cfg.model.mc_regime_t_df is False
+        assert cfg.model.mc_regime_t_df_low == 8.0
+        assert cfg.model.mc_regime_t_df_mid == 5.0
+        assert cfg.model.mc_regime_t_df_high == 4.0
+
+    def test_vol_term_structure_config_exists(self):
+        """mc_vol_term_structure field exists and defaults to False."""
+        cfg = PipelineConfig()
+        assert cfg.model.mc_vol_term_structure is False
+
+    def test_pooled_gate_config_exists(self):
+        """promotion_pooled_gate field exists and defaults to False."""
+        cfg = PipelineConfig()
+        assert cfg.calibration.promotion_pooled_gate is False
 
 
 if __name__ == "__main__":

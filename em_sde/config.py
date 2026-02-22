@@ -62,6 +62,13 @@ class ModelConfig:
     regime_gated_warmup: int = 252
     regime_gated_vol_window: int = 252
     regime_gated_fixed_pct_by_horizon: Optional[dict] = None  # per-horizon override: {5: 0.03, 10: 0.04}
+    # MC vol term structure: use GARCH h-step average vol instead of 1-step forecast
+    mc_vol_term_structure: bool = False
+    # Regime-conditional Student-t degrees of freedom for MC innovations
+    mc_regime_t_df: bool = False
+    mc_regime_t_df_low: float = 8.0    # thinner tails in low-vol
+    mc_regime_t_df_mid: float = 5.0    # default
+    mc_regime_t_df_high: float = 4.0   # heavier tails in high-vol
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 
@@ -97,6 +104,7 @@ class CalibrationConfig:
     promotion_bss_min: float = 0.0
     promotion_auc_min: float = 0.55
     promotion_ece_max: float = 0.02
+    promotion_pooled_gate: bool = False  # use pooled ECE gate (all regimes combined) as primary
 
 
 @dataclass

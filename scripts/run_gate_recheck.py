@@ -45,10 +45,11 @@ def run_single_config(name: str, config_path: str) -> None:
     cv_results, oof_df = expanding_window_cv(df, [cfg], [cfg_name], n_folds=5)
     summary = compare_models(cv_results)
 
-    # Primary: row-level OOF gates (statistically valid)
+    # Primary: row-level OOF gates (statistically valid, pooled across regimes)
     gates_oof = apply_promotion_gates_oof(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+        pooled_gate=True,
     )
     # Legacy: fold-level gates (for comparison)
     gates_legacy = apply_promotion_gates(
@@ -66,11 +67,12 @@ def run_single_config(name: str, config_path: str) -> None:
 
     # Print OOF gate report (primary)
     print(f"\nElapsed: {elapsed:.1f} min\n")
-    print("=== OOF Row-Level Gates (primary) ===\n")
+    print("=== OOF Gates (pooled=primary, per-regime=diagnostic) ===\n")
     for (cfg_n, H), grp in gates_oof.groupby(["config_name", "horizon"]):
         promo = grp["promotion_status"].iloc[0] if "promotion_status" in grp.columns else "?"
         print(f"{cfg_n} H={H}: {promo}")
-        for _, row in grp.iterrows():
+        # Show pooled (primary) first, then per-regime (diagnostic)
+        for _, row in grp.sort_values("regime", key=lambda s: s.map(lambda x: "0" if x == "pooled" else x)).iterrows():
             metric = row["metric"]
             value = row["value"]
             threshold = row["threshold"]
@@ -78,17 +80,20 @@ def run_single_config(name: str, config_path: str) -> None:
             margin = row["margin"]
             n_s = row.get("n_samples", "?")
             n_e = row.get("n_events", "?")
-            if row.get("status") == "insufficient_data":
+            status = row.get("status", "?")
+            prefix = "*" if status == "evaluated" else " "
+            if status == "insufficient_data":
                 reason = row.get("insufficient_reason", "?")
                 n_ne = row.get("n_nonevents", "?")
                 tag = f"[SKIP: {reason}]"
-                print(f"  {row['regime']:>8s}/{metric} = n/a  (n={n_s}, events={n_e}, nonevents={n_ne}) {tag}")
+                print(f" {prefix}{row['regime']:>8s}/{metric} = n/a  (n={n_s}, events={n_e}, nonevents={n_ne}) {tag}")
             else:
                 tag = "[OK]" if passed else "[FAIL]"
+                diag = " (diag)" if status == "diagnostic" else ""
                 ci_str = ""
                 if metric == "ece_cal" and not np.isnan(row.get("ece_ci_low", np.nan)):
                     ci_str = f"  CI=[{row['ece_ci_low']:.4f}, {row['ece_ci_high']:.4f}]"
-                print(f"  {row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}")
+                print(f" {prefix}{row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}{diag}")
 
     n_pass = gates_oof.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
     n_undecided = (gates_oof.groupby(["config_name", "horizon"])["promotion_status"].first() == "UNDECIDED").sum() if "promotion_status" in gates_oof.columns else 0

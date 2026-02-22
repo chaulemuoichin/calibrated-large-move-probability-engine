@@ -150,6 +150,21 @@ This preserves the relative importance of each parameter while anchoring the sim
 - If `omega_new` becomes very small, the GARCH simulation becomes essentially a martingale — volatility doesn't mean-revert.
 - The EWMA fallback loses all shock-asymmetry information. When it triggers often, GJR features are wasted.
 
+### GARCH Vol Term Structure (mc_vol_term_structure)
+
+When `mc_vol_term_structure: true`, the MC simulation uses a **horizon-adjusted initial volatility** instead of the raw 1-step-ahead GARCH forecast. This addresses the vol mean-reversion bias: when current volatility is elevated, a 1-step forecast overstates the average volatility over longer horizons (H=10, H=20) because GARCH conditional variance mean-reverts toward the unconditional level.
+
+The term-structure average is computed analytically:
+
+```
+E[σ²_{t+h}] = σ²_unc + pers^h * (σ²_t - σ²_unc)
+σ_avg(H) = sqrt(mean(E[σ²_{t+1}], ..., E[σ²_{t+H}]))
+```
+
+For GJR-GARCH, persistence = α + β + γ/2. Walk-forward safe (uses only fitted params).
+
+**File:** `em_sde/garch.py` (`garch_term_structure_vol`)
+
 ---
 
 ## 4. Step 3: Defining "Large Move" (Threshold)
@@ -268,6 +283,12 @@ Instead of drawing `Z` from a standard normal, draw from a Student-t distributio
 $$Z_{\mathrm{fat}} = Z_t\sqrt{\frac{\nu-2}{\nu}},\quad Z_t \sim t_{\nu}$$
 
 This produces more extreme daily moves than a normal distribution, matching empirical return distributions better.
+
+### Regime-Conditional Student-t Degrees of Freedom (mc_regime_t_df)
+
+When `mc_regime_t_df: true`, the Student-t degrees of freedom for MC innovations adapt to the current vol regime. High-vol periods use heavier tails (lower t_df) to better capture crash dynamics; low-vol periods use thinner tails (higher t_df) closer to Gaussian. Regime assignment uses the same rolling vol percentile logic as RegimeRouter (walk-forward safe).
+
+Defaults: low_vol t_df=8.0, mid_vol t_df=5.0, high_vol t_df=4.0. Configured via `mc_regime_t_df_low`, `mc_regime_t_df_mid`, `mc_regime_t_df_high`.
 
 ### Where to look for problems
 
@@ -584,6 +605,27 @@ If FAIL or UNDECIDED: model is BLOCKED from promotion.
 ```
 
 Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-level means in the legacy approach). Bootstrap confidence intervals for ECE are reported for defensibility.
+
+### Pooled ECE Gate (`promotion_pooled_gate`)
+
+Per-regime ECE evaluation with ~200 samples per bucket has estimation noise of ~0.02–0.03, which is the same magnitude as the 0.02 gate threshold. This makes per-regime ECE gates statistically underpowered.
+
+When `promotion_pooled_gate: true`, the gate evaluator adds a **pooled** regime that includes ALL OOF samples for a given (config, horizon) pair (~600+ samples). The pooled evaluation becomes the **primary gate** for promotion decisions:
+
+```text
+With pooled_gate=True:
+  1. Compute BSS, AUC, ECE on ALL OOF samples (regime="pooled")
+  2. Pooled rows have status="evaluated" → determine pass/fail
+  3. Per-regime rows have status="diagnostic" → reported but not blocking
+  4. Insufficient per-regime data does NOT trigger UNDECIDED
+
+Tri-state decision (pooled mode):
+  PASS  — all pooled gates pass
+  FAIL  — any pooled gate fails
+  (UNDECIDED only if pooled itself has insufficient data, which is rare)
+```
+
+This increases statistical power substantially: ECE estimation noise drops from ~0.02–0.03 (per-regime) to ~0.01 (pooled), making the 0.02 threshold meaningful. Per-regime breakdowns remain available as diagnostics for identifying regime-specific calibration issues.
 
 ### Where to look for problems
 
