@@ -596,7 +596,7 @@ Each fold runs a full walk-forward backtest. Metrics are computed on the test po
 
 ### Promotion Gates (U5)
 
-Hard go/no-go criteria applied per volatility regime bucket:
+Hard go/no-go criteria applied per volatility regime bucket (base mode: `promotion_pooled_gate: false`):
 
 ```
 Pool all out-of-fold (OOF) row-level predictions across CV folds.
@@ -622,6 +622,10 @@ If FAIL or UNDECIDED: model is BLOCKED from promotion.
 ```
 
 Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-level means in the legacy approach). Bootstrap confidence intervals for ECE are reported for defensibility.
+
+Implementation note:
+- `python -m em_sde.run --compare ...` currently uses **legacy fold-level** gates (`apply_promotion_gates`).
+- `scripts/run_gate_recheck.py` uses **row-level OOF** gates (`apply_promotion_gates_oof`) and sets `pooled_gate=True` as the primary governance path.
 
 ### Pooled ECE Gate (`promotion_pooled_gate`)
 
@@ -738,4 +742,4 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 164 unit tests |
+| `tests/test_framework.py` | 201 unit tests |

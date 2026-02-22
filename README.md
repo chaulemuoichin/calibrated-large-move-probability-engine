@@ -3,7 +3,7 @@
 A system that estimates the probability of large price moves over the next 1-4 weeks, and keeps correcting itself as real outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-164%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
 
 ## Why This Exists 
 
@@ -56,6 +56,7 @@ python -m em_sde.run --config configs/spy_fixed.yaml --run-id my_first_run
 
 # Compare two model configs
 python -m em_sde.run --compare configs/spy_fixed.yaml configs/spy.yaml --cv-folds 5
+# Note: --compare currently uses fold-level legacy gates.
 ```
 
 Output goes to `outputs/<run_id>/` and includes a results CSV, summary JSON, and charts.
@@ -77,7 +78,7 @@ Each run produces:
 | ------ | ----------------- | ---------- |
 | **Brier Score** | Overall accuracy of probabilities | Lower is better |
 | **Brier Skill Score (BSS)** | How much better than always guessing the average | > 0 means useful |
-| **AUC** | Can the model tell events from non-events? | > 0.5 (1.0 = perfect) |
+| **AUC** | Can the model tell events from non-events? | >= 0.55 for promotion (> 0.5 beats random) |
 | **ECE** | Are the probabilities well-calibrated across the board? | < 0.02 |
 
 ## Configuration
@@ -119,7 +120,7 @@ All settings live in YAML files under `configs/`. Key choices:
 python -m pytest tests/ -v
 ```
 
-164 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
+201 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
 
 **Runner commands (from repo root):**
 
@@ -133,6 +134,7 @@ python scripts/run_stress_suite.py
 python scripts/run_single_timing.py
 
 # CV / gate diagnostics
+# Primary governance path (OOF row-level; pooled gate by default in this script)
 python -u scripts/run_gate_recheck.py cluster
 python -u scripts/run_gate_recheck.py jump
 python -u scripts/run_remaining_cv.py
@@ -170,7 +172,7 @@ scripts/             Operational runners
   run_single_timing.py
   legacy/
     calibrated_large_move_probability_engine.py
-tests/               157 unit tests
+tests/               201 unit tests
 ```
 
 ## Known Limitations
