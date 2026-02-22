@@ -595,94 +595,49 @@ Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-leve
 
 ### GARCH(1,1) Variance Equation
 
-$$
-\sigma_t^2 = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma_{t-1}^2
-$$
+$$\sigma_t^2 = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma_{t-1}^2$$
 
 ### GJR-GARCH(1,1) Variance Equation
 
-$$
-\sigma_t^2
-= \omega
-+ \left(\alpha + \gamma \mathbf{1}_{\{\epsilon_{t-1}<0\}}\right)\epsilon_{t-1}^2
-+ \beta \sigma_{t-1}^2
-$$
+$$\sigma_t^2 = \omega + \left(\alpha + \gamma I_{\epsilon_{t-1}<0}\right)\epsilon_{t-1}^2 + \beta \sigma_{t-1}^2$$
 
 ### GBM Log-Price Discretization (Euler-Maruyama)
 
-$$
-X_{t+1}
-= X_t
-+ \left(\mu - \tfrac{1}{2}\sigma_{\mathrm{ann}}^2\right)\Delta t
-+ \sigma_{\mathrm{ann}}\sqrt{\Delta t}\,Z_t,
-\quad Z_t \sim \mathcal{N}(0,1)
-$$
+$$X_{t+1} = X_t + \left(\mu - \frac{1}{2}\sigma_{\mathrm{ann}}^2\right)\Delta t + \sigma_{\mathrm{ann}}\sqrt{\Delta t}\,Z_t,\quad Z_t \sim \mathcal{N}(0,1)$$
 
-$$
-X_t = \log S_t,\quad \Delta t = \frac{1}{252}
-$$
+$$X_t = \log S_t,\quad \Delta t = \frac{1}{252}$$
 
 ### Merton Jump-Diffusion Drift Compensation
 
-$$
-\mu_{\mathrm{drift}}
-= \mu_{\mathrm{ann}}
-- \lambda\left(e^{\mu_J + \tfrac{1}{2}\sigma_J^2} - 1\right)
-- \tfrac{1}{2}\sigma_{\mathrm{ann}}^2
-$$
+$$\mu_{\mathrm{drift}} = \mu_{\mathrm{ann}} - \lambda\left(e^{\mu_J + \frac{1}{2}\sigma_J^2} - 1\right) - \frac{1}{2}\sigma_{\mathrm{ann}}^2$$
 
 ### Stationarity Projection with Variance Targeting
 
 Define persistence as:
 
-$$
-\phi =
-\begin{cases}
-\alpha + \beta, & \text{GARCH(1,1)} \\
-\alpha + \beta + \tfrac{1}{2}\gamma, & \text{GJR-GARCH(1,1)}
-\end{cases}
-$$
+$$\phi = \alpha + \beta \quad \text{(GARCH(1,1))}$$
 
-If \(\phi \ge 1\), project to target persistence \(\phi^\*\) (default \(0.98\)):
+$$\phi = \alpha + \beta + \frac{1}{2}\gamma \quad \text{(GJR-GARCH(1,1))}$$
 
-$$
-s = \frac{\phi^\*}{\phi},\quad
-\alpha' = s\alpha,\quad
-\beta' = s\beta,\quad
-\gamma' = s\gamma,\quad
-\omega' = \sigma_{1d}^2(1-\phi^\*)
-$$
+If $\phi \ge 1$, project to target persistence $\phi^*$ (default $0.98$):
+
+$$s = \frac{\phi^*}{\phi},\quad \alpha' = s\alpha,\quad \beta' = s\beta,\quad \gamma' = s\gamma,\quad \omega' = \sigma_{1d}^2(1-\phi^*)$$
 
 ### Logistic Calibration (Platt Scaling)
 
-$$
-p_{\mathrm{cal}} = \sigma\!\left(a + b\,\operatorname{logit}(p_{\mathrm{raw}})\right)
-$$
+$$p_{\mathrm{cal}} = \sigma\left(a + b\,\mathrm{logit}(p_{\mathrm{raw}})\right)$$
 
-$$
-\sigma(x)=\frac{1}{1+e^{-x}},\quad
-\operatorname{logit}(p)=\log\!\left(\frac{p}{1-p}\right)
-$$
+$$\sigma(x) = \frac{1}{1+e^{-x}},\quad \mathrm{logit}(p) = \log\left(\frac{p}{1-p}\right)$$
 
 ### Brier Skill Score
 
-$$
-\mathrm{BSS}
-= 1 - \frac{\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2}{\bar{y}(1-\bar{y})}
-$$
+$$\mathrm{BSS} = 1 - \frac{\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2}{\bar{y}(1-\bar{y})}$$
 
 ### Expected Calibration Error (Adaptive Binning)
 
-Let \(B_1,\dots,B_K\) be adaptive (quantile) bins of predictions.
+Let $B_1,\dots,B_K$ be adaptive (quantile) bins of predictions.
 
-$$
-\mathrm{ECE}
-= \sum_{k=1}^{K}\frac{|B_k|}{N}
-\left|
-\frac{1}{|B_k|}\sum_{i\in B_k}p_i
-- \frac{1}{|B_k|}\sum_{i\in B_k}y_i
-\right|
-$$
+$$\mathrm{ECE} = \sum_{k=1}^{K}\frac{|B_k|}{N}\left|\frac{1}{|B_k|}\sum_{i\in B_k}p_i - \frac{1}{|B_k|}\sum_{i\in B_k}y_i\right|$$
 
 Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are available via `adaptive=False`.
 
