@@ -84,11 +84,12 @@ class CalibrationConfig:
     multi_feature_l2: float = 1e-4   # L2 regularization strength
     multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
     multi_feature_regime_conditional: bool = False  # per-regime MF calibrators (requires multi_feature=true)
-    histogram_post_calibration: bool = True  # bin-level bias correction after Platt/logistic
-    histogram_n_bins: int = 10               # number of equal-width histogram bins (aligned with ECE eval)
+    histogram_post_calibration: bool = True  # legacy flag; use post_cal_method instead
+    post_cal_method: str = ""               # "histogram" | "isotonic" | "none"; overrides histogram_post_calibration when set
+    histogram_n_bins: int = 10               # number of equal-width bins for histogram/isotonic post-cal
     histogram_min_samples: int = 15          # min effective samples per bin before correction activates
-    histogram_prior_strength: float = 15.0   # Bayesian shrinkage: correction *= count/(count + prior_strength)
-    histogram_monotonic: bool = True         # monotonic PAV enforcement on bin corrections (preserves AUC)
+    histogram_prior_strength: float = 15.0   # Bayesian shrinkage (histogram only): correction *= count/(count + prior_strength)
+    histogram_monotonic: bool = True         # monotonic PAV enforcement on bin corrections (histogram only)
     ensemble_enabled: bool = True
     ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
     # Promotion gates for model selection
@@ -166,6 +167,10 @@ def _validate(cfg: PipelineConfig):
     if cfg.calibration.multi_feature_regime_conditional:
         assert cfg.calibration.multi_feature, \
             "multi_feature_regime_conditional requires multi_feature=true"
+
+    if cfg.calibration.post_cal_method:
+        assert cfg.calibration.post_cal_method in ("histogram", "isotonic", "none"), \
+            f"post_cal_method must be 'histogram', 'isotonic', or 'none', got {cfg.calibration.post_cal_method!r}"
 
     assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol", "regime_gated"), \
         f"threshold_mode must be 'vol_scaled', 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"

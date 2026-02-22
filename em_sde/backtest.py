@@ -153,6 +153,7 @@ def run_walkforward(
     multi_feature_l2 = cfg.calibration.multi_feature_l2
     multi_feature_min_updates = cfg.calibration.multi_feature_min_updates
     histogram_post_cal = cfg.calibration.histogram_post_calibration
+    post_cal_method = cfg.calibration.post_cal_method
     histogram_n_bins = cfg.calibration.histogram_n_bins
     histogram_min_samples = cfg.calibration.histogram_min_samples
     histogram_prior_strength = cfg.calibration.histogram_prior_strength
@@ -199,6 +200,7 @@ def run_walkforward(
         histogram_min_samples=histogram_min_samples,
         histogram_prior_strength=histogram_prior_strength,
         histogram_monotonic=histogram_monotonic,
+        post_cal_method=post_cal_method,
     )
     if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
@@ -231,6 +233,7 @@ def run_walkforward(
                 histogram_min_samples=histogram_min_samples,
                 histogram_prior_strength=histogram_prior_strength,
                 histogram_monotonic=histogram_monotonic,
+                post_cal_method=post_cal_method,
             )
             for H in horizons
         }
@@ -251,6 +254,7 @@ def run_walkforward(
                 histogram_min_samples=histogram_min_samples,
                 histogram_prior_strength=histogram_prior_strength,
                 histogram_monotonic=histogram_monotonic,
+                post_cal_method=post_cal_method,
             )
             for H in horizons
         }

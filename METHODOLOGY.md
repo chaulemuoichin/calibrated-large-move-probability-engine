@@ -397,6 +397,32 @@ Monotonic enforcement via the Pool Adjacent Violators (PAV) algorithm ensures th
 
 **File:** `em_sde/calibration.py` (`HistogramCalibrator`)
 
+### Isotonic Post-Calibration (alternative)
+
+When `post_cal_method: "isotonic"` is set, the histogram post-calibrator is replaced with online isotonic regression. Instead of additive bias corrections with Bayesian shrinkage, isotonic regression directly maps predicted probabilities to observed conditional means, enforced to be monotone non-decreasing via the Pool Adjacent Violators (PAV) algorithm.
+
+```
+For each of N equal-width bins over [0, 1]:
+    Track running mean(y) for samples in that bin.
+
+When enough bins have min_samples_per_bin observations:
+    Apply PAV to the vector of bin-level mean(y) values.
+    This produces a monotone non-decreasing step function.
+
+At prediction time:
+    Linearly interpolate on (bin_centers, fitted_values) to get p_isotonic.
+    Bins below min_samples use identity (bin center) as their value before PAV.
+```
+
+Key differences from histogram:
+- **No shrinkage parameter**: directly uses observed means (PAV provides implicit regularization through pooling)
+- **Stronger correction**: replaces predictions with observed rates rather than applying damped additive corrections
+- **Linear interpolation**: smooth output between bin centers (vs. step-function correction)
+
+Configured via `post_cal_method` in calibration config. Values: `"histogram"` (default, backward-compatible), `"isotonic"`, `"none"`.
+
+**File:** `em_sde/calibration.py` (`IsotonicCalibrator`)
+
 ### Where to look for problems
 
 - **Cold start**: The first 50-100 predictions are uncalibrated. If the evaluation window is short, this dominates the metrics.

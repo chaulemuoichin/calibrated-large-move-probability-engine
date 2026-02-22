@@ -151,6 +151,81 @@ class HistogramCalibrator:
         self._recompute_corrections()
 
 
+class IsotonicCalibrator:
+    """
+    Online isotonic regression post-calibrator.
+
+    Maintains per-bin observed-mean statistics and fits isotonic regression
+    (Pool Adjacent Violators) to build a monotone non-decreasing mapping
+    from predicted to observed probabilities. Uses linear interpolation
+    between bin centers for smooth output.
+
+    Unlike the histogram calibrator which applies additive bias corrections
+    with Bayesian shrinkage, this directly maps p_cal → p_isotonic using
+    observed conditional means, giving stronger correction for nonlinear
+    miscalibration patterns.
+
+    Parameters
+    ----------
+    n_bins : int
+        Number of equal-width bins over [0, 1].
+    min_samples_per_bin : int
+        Minimum samples in a bin before it contributes to the isotonic fit.
+        Bins below this threshold use identity (bin center) as their value.
+    """
+
+    def __init__(self, n_bins: int = 15, min_samples_per_bin: int = 8):
+        self.n_bins = n_bins
+        self.min_samples_per_bin = min_samples_per_bin
+        self.bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        self._centers = (np.arange(n_bins) + 0.5) / n_bins
+        self._sum_obs = np.zeros(n_bins)
+        self._count = np.zeros(n_bins, dtype=np.float64)
+        self._fitted = self._centers.copy()  # identity mapping initially
+
+    def _get_bin(self, p: float) -> int:
+        """Get bin index for a prediction."""
+        p = np.clip(p, 0.0, 1.0)
+        idx = int(np.searchsorted(self.bin_edges[1:], p, side='right'))
+        return min(idx, self.n_bins - 1)
+
+    def _refit(self):
+        """Re-run isotonic regression on bin means."""
+        values = self._centers.copy()
+        for i in range(self.n_bins):
+            if self._count[i] >= self.min_samples_per_bin:
+                values[i] = self._sum_obs[i] / self._count[i]
+        # PAV: enforce monotone non-decreasing
+        self._fitted = HistogramCalibrator._pav(values)
+
+    def calibrate(self, p_cal: float) -> float:
+        """Apply isotonic mapping with linear interpolation."""
+        p_cal = np.clip(p_cal, 0.0, 1.0)
+        # Linear interpolation on bin centers
+        return float(np.clip(np.interp(p_cal, self._centers, self._fitted), 0.0, 1.0))
+
+    def update(self, p_cal: float, y: float):
+        """Update bin statistics and refit isotonic mapping."""
+        idx = self._get_bin(p_cal)
+        self._sum_obs[idx] += y
+        self._count[idx] += 1.0
+        self._refit()
+
+
+def _make_post_calibrator(method: str, n_bins: int, min_samples: int,
+                          prior_strength: float, monotonic: bool):
+    """Factory for post-calibration method selection."""
+    if method == "isotonic":
+        return IsotonicCalibrator(n_bins=n_bins, min_samples_per_bin=min_samples)
+    elif method == "histogram":
+        return HistogramCalibrator(n_bins=n_bins, min_samples_per_bin=min_samples,
+                                   prior_strength=prior_strength, monotonic=monotonic)
+    elif method == "none":
+        return None
+    else:
+        raise ValueError(f"Unknown post_cal_method: {method!r}")
+
+
 class OnlineCalibrator:
     """
     Online logistic calibration for probability estimates.
@@ -177,7 +252,8 @@ class OnlineCalibrator:
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
-                 histogram_monotonic: bool = True):
+                 histogram_monotonic: bool = True,
+                 post_cal_method: str = ""):
         self.a: float = 0.0
         self.b: float = 1.0
         self.lr: float = lr
@@ -200,13 +276,16 @@ class OnlineCalibrator:
         self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
         self._discrimination_gate_active: bool = False
 
-        # Histogram post-calibration: bin-level bias correction after Platt scaling
-        self._histogram_cal: Optional[HistogramCalibrator] = (
-            HistogramCalibrator(n_bins=histogram_n_bins,
-                                min_samples_per_bin=histogram_min_samples,
-                                prior_strength=histogram_prior_strength,
-                                monotonic=histogram_monotonic)
-            if histogram_post_cal else None
+        # Post-calibration: resolve method from post_cal_method or legacy histogram_post_cal
+        if post_cal_method:
+            effective_method = post_cal_method
+        elif histogram_post_cal:
+            effective_method = "histogram"
+        else:
+            effective_method = "none"
+        self._histogram_cal = _make_post_calibrator(
+            effective_method, histogram_n_bins, histogram_min_samples,
+            histogram_prior_strength, histogram_monotonic,
         )
 
         # Convergence tracking
@@ -364,7 +443,8 @@ class RegimeCalibrator:
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
-                 histogram_monotonic: bool = True):
+                 histogram_monotonic: bool = True,
+                 post_cal_method: str = ""):
         self.n_bins = n_bins
         self.calibrators = [
             OnlineCalibrator(lr=lr, adaptive_lr=adaptive_lr,
@@ -378,7 +458,8 @@ class RegimeCalibrator:
                              histogram_n_bins=histogram_n_bins,
                              histogram_min_samples=histogram_min_samples,
                              histogram_prior_strength=histogram_prior_strength,
-                             histogram_monotonic=histogram_monotonic)
+                             histogram_monotonic=histogram_monotonic,
+                             post_cal_method=post_cal_method)
             for _ in range(n_bins)
         ]
         self._vol_history: deque = deque(maxlen=252)
@@ -528,7 +609,8 @@ class MultiFeatureCalibrator:
                  histogram_n_bins: int = 10,
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
-                 histogram_monotonic: bool = True):
+                 histogram_monotonic: bool = True,
+                 post_cal_method: str = ""):
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -551,13 +633,16 @@ class MultiFeatureCalibrator:
         self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
         self._discrimination_gate_active: bool = False
 
-        # Histogram post-calibration: bin-level bias correction
-        self._histogram_cal: Optional[HistogramCalibrator] = (
-            HistogramCalibrator(n_bins=histogram_n_bins,
-                                min_samples_per_bin=histogram_min_samples,
-                                prior_strength=histogram_prior_strength,
-                                monotonic=histogram_monotonic)
-            if histogram_post_cal else None
+        # Post-calibration: resolve method
+        if post_cal_method:
+            effective_method = post_cal_method
+        elif histogram_post_cal:
+            effective_method = "histogram"
+        else:
+            effective_method = "none"
+        self._histogram_cal = _make_post_calibrator(
+            effective_method, histogram_n_bins, histogram_min_samples,
+            histogram_prior_strength, histogram_monotonic,
         )
 
         # Convergence tracking

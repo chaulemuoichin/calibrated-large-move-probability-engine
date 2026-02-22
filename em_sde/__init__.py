@@ -33,6 +33,7 @@ __all__ = [
     "compute_state_dependent_jumps",
     # Calibration
     "HistogramCalibrator",
+    "IsotonicCalibrator",
     "OnlineCalibrator",
     "RegimeCalibrator",
     "MultiFeatureCalibrator",
@@ -77,7 +78,7 @@ from .config import (
 from .data_layer import load_data, run_data_quality_checks
 from .garch import fit_garch, GarchResult, garch_diagnostics, project_to_stationary, ewma_volatility
 from .monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, compute_state_dependent_jumps
-from .calibration import HistogramCalibrator, OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
+from .calibration import HistogramCalibrator, IsotonicCalibrator, OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
 from .backtest import run_walkforward, compute_backtest_analytics
 from .evaluation import (
     brier_score,

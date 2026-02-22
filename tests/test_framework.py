@@ -37,7 +37,7 @@ from em_sde.config import PipelineConfig, DataConfig, ModelConfig, CalibrationCo
 from em_sde.garch import fit_garch, GarchResult, project_to_stationary
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
-from em_sde.calibration import HistogramCalibrator
+from em_sde.calibration import HistogramCalibrator, IsotonicCalibrator
 from em_sde.model_selection import apply_promotion_gates, apply_promotion_gates_oof
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
@@ -2300,6 +2300,107 @@ class TestHistogramCalibrator:
                 f"Monotonic violation: calibrate({test_inputs[i]})={outputs[i]:.4f} > "
                 f"calibrate({test_inputs[i+1]})={outputs[i+1]:.4f}"
             )
+
+
+class TestIsotonicCalibrator:
+    """Tests for IsotonicCalibrator (isotonic regression post-calibration)."""
+
+    def test_no_correction_before_min_samples(self):
+        """Before min_samples_per_bin, return input unchanged."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=15)
+        for _ in range(10):
+            ic.update(0.10, 0.0)
+        # Not enough samples → identity
+        assert ic.calibrate(0.10) == pytest.approx(0.10, abs=0.01)
+
+    def test_correction_reduces_bias(self):
+        """Systematic over-prediction should be corrected downward."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=10)
+        # Feed predictions of 0.20 with actual event rate ~6%
+        for _ in range(50):
+            ic.update(0.20, 0.0)
+        for _ in range(3):
+            ic.update(0.20, 1.0)
+        corrected = ic.calibrate(0.20)
+        assert corrected < 0.20, f"Expected correction downward, got {corrected}"
+
+    def test_monotonic_output(self):
+        """Output must be monotone non-decreasing."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
+        rng = np.random.default_rng(42)
+        # Feed varied data
+        for _ in range(200):
+            p = float(rng.uniform(0.0, 0.5))
+            y = float(rng.random() < 0.15)
+            ic.update(p, y)
+        test_inputs = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65]
+        outputs = [ic.calibrate(p) for p in test_inputs]
+        for i in range(len(outputs) - 1):
+            assert outputs[i] <= outputs[i + 1] + 1e-12, (
+                f"Monotonic violation: calibrate({test_inputs[i]})={outputs[i]:.4f} > "
+                f"calibrate({test_inputs[i+1]})={outputs[i+1]:.4f}"
+            )
+
+    def test_well_calibrated_minimal_adjustment(self):
+        """Well-calibrated data should have near-identity mapping."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=10)
+        rng = np.random.default_rng(42)
+        # Feed perfectly calibrated data: p ≈ true event rate
+        for _ in range(500):
+            p = float(rng.uniform(0.05, 0.40))
+            y = float(rng.random() < p)
+            ic.update(p, y)
+        # Check that correction is small
+        assert abs(ic.calibrate(0.20) - 0.20) < 0.05
+
+    def test_interpolation_smooth(self):
+        """Output should interpolate smoothly between bin centers."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
+        rng = np.random.default_rng(42)
+        for _ in range(200):
+            p = float(rng.uniform(0.0, 0.5))
+            y = float(rng.random() < 0.10)
+            ic.update(p, y)
+        # Values between bin centers should be between neighbors
+        p1 = ic.calibrate(0.10)
+        p2 = ic.calibrate(0.15)
+        p_mid = ic.calibrate(0.125)
+        assert min(p1, p2) - 1e-12 <= p_mid <= max(p1, p2) + 1e-12
+
+    def test_output_bounds(self):
+        """Output must be in [0, 1]."""
+        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            ic.update(float(rng.uniform(0, 1)), float(rng.random() < 0.2))
+        for p in [0.0, 0.01, 0.5, 0.99, 1.0]:
+            out = ic.calibrate(p)
+            assert 0.0 <= out <= 1.0, f"Out of bounds: calibrate({p})={out}"
+
+    def test_online_calibrator_with_isotonic(self):
+        """OnlineCalibrator with post_cal_method='isotonic' produces valid output."""
+        cal = OnlineCalibrator(lr=0.05, min_updates=5, post_cal_method="isotonic",
+                               histogram_n_bins=10, histogram_min_samples=5)
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            p_raw = float(rng.uniform(0.01, 0.50))
+            y = float(rng.random() < 0.10)
+            p_cal = cal.calibrate(p_raw)
+            assert 0.0 <= p_cal <= 1.0
+            cal.update(p_raw, y)
+
+    def test_mf_calibrator_with_isotonic(self):
+        """MultiFeatureCalibrator with post_cal_method='isotonic' produces valid output."""
+        cal = MultiFeatureCalibrator(lr=0.01, min_updates=5, post_cal_method="isotonic",
+                                     histogram_n_bins=10, histogram_min_samples=5)
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            p_raw = float(rng.uniform(0.01, 0.50))
+            sigma = float(rng.uniform(0.01, 0.03))
+            y = float(rng.random() < 0.10)
+            p_cal = cal.calibrate(p_raw, sigma, 0.001, 1.0, 0.005)
+            assert 0.0 <= p_cal <= 1.0
+            cal.update(p_raw, y, sigma, 0.001, 1.0, 0.005)
 
 
 class TestPromotionGatesOOF:
