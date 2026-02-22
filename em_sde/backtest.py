@@ -25,7 +25,7 @@ import numpy.typing as npt
 import pandas as pd
 from numpy.random import SeedSequence
 
-from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
+from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
 from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
@@ -164,6 +164,12 @@ def run_walkforward(
     histogram_prior_strength = cfg.calibration.histogram_prior_strength
     histogram_monotonic = cfg.calibration.histogram_monotonic
     multi_feature_regime_conditional = cfg.calibration.multi_feature_regime_conditional
+    calibration_method = cfg.calibration.calibration_method
+    neural_hidden_size = cfg.calibration.neural_hidden_size
+    neural_lr = cfg.calibration.neural_lr
+    neural_l2 = cfg.calibration.neural_l2
+    neural_min_updates = cfg.calibration.neural_min_updates
+    neural_regime_conditional = cfg.calibration.neural_regime_conditional
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
@@ -207,7 +213,32 @@ def run_walkforward(
         histogram_monotonic=histogram_monotonic,
         post_cal_method=post_cal_method,
     )
-    if multi_feature and multi_feature_regime_conditional:
+    _neural_kwargs = dict(
+        hidden_size=neural_hidden_size,
+        lr=neural_lr,
+        l2_reg=neural_l2,
+        min_updates=neural_min_updates,
+        safety_gate=safety_gate,
+        gate_window=gate_window,
+        gate_on_discrimination=gate_on_disc,
+        gate_auc_threshold=gate_auc_thr,
+        gate_separation_threshold=gate_sep_thr,
+        gate_discrimination_window=gate_disc_win,
+    )
+    if calibration_method == "neural" and neural_regime_conditional:
+        calibrators_mf = {
+            H: RegimeNeuralCalibrator(
+                n_bins=regime_n_bins,
+                **_neural_kwargs,
+            )
+            for H in horizons
+        }
+    elif calibration_method == "neural":
+        calibrators_mf = {
+            H: NeuralCalibrator(**_neural_kwargs)
+            for H in horizons
+        }
+    elif multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
             H: RegimeMultiFeatureCalibrator(
                 n_bins=regime_n_bins,

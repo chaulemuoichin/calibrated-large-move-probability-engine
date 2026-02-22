@@ -105,6 +105,13 @@ class CalibrationConfig:
     promotion_auc_min: float = 0.55
     promotion_ece_max: float = 0.02
     promotion_pooled_gate: bool = False  # use pooled ECE gate (all regimes combined) as primary
+    # Neural calibrator (MLP): replaces multi-feature + histogram stack
+    calibration_method: str = ""         # "online" | "multi_feature" | "neural" | "" (legacy: uses multi_feature flag)
+    neural_hidden_size: int = 8          # MLP hidden layer width
+    neural_lr: float = 0.005             # learning rate (lower than MF due to more params)
+    neural_l2: float = 1e-4              # L2 regularization
+    neural_min_updates: int = 100        # warmup before calibration active
+    neural_regime_conditional: bool = False  # separate MLP per vol regime
 
 
 @dataclass
@@ -179,6 +186,13 @@ def _validate(cfg: PipelineConfig):
     if cfg.calibration.post_cal_method:
         assert cfg.calibration.post_cal_method in ("histogram", "isotonic", "none"), \
             f"post_cal_method must be 'histogram', 'isotonic', or 'none', got {cfg.calibration.post_cal_method!r}"
+
+    if cfg.calibration.calibration_method:
+        assert cfg.calibration.calibration_method in ("online", "multi_feature", "neural"), \
+            f"calibration_method must be 'online', 'multi_feature', or 'neural', got {cfg.calibration.calibration_method!r}"
+    if cfg.calibration.neural_regime_conditional:
+        assert cfg.calibration.calibration_method == "neural", \
+            "neural_regime_conditional requires calibration_method='neural'"
 
     assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol", "regime_gated"), \
         f"threshold_mode must be 'vol_scaled', 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"

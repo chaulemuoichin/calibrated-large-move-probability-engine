@@ -807,3 +807,260 @@ class MultiFeatureCalibrator:
             "gated": self._gate_active,
             "weights": self.w.tolist(),
         }
+
+
+class NeuralCalibrator:
+    """
+    Online MLP calibrator with 1 hidden layer.
+
+    Replaces the linear MultiFeatureCalibrator + HistogramCalibrator stack
+    with a single nonlinear mapping that can capture feature interactions
+    (e.g., σ × vol_ratio jointly predicting calibration bias).
+
+    Architecture:
+        Input (6) → Hidden (hidden_size, ReLU) → Output (1, sigmoid)
+
+    Same interface as MultiFeatureCalibrator for drop-in replacement.
+    Same safety gate and discrimination gate logic.
+
+    Identity initialization: before any updates, calibrate(p_raw) ≈ p_raw.
+    """
+
+    N_FEATURES = 6
+
+    def __init__(self, hidden_size: int = 8, lr: float = 0.005,
+                 l2_reg: float = 1e-4, min_updates: int = 100,
+                 safety_gate: bool = True, gate_window: int = 200,
+                 gate_on_discrimination: bool = False,
+                 gate_auc_threshold: float = 0.50,
+                 gate_separation_threshold: float = 0.0,
+                 gate_discrimination_window: int = 200,
+                 **kwargs):
+        self.hidden_size = hidden_size
+        self.lr = lr
+        self.l2_reg = l2_reg
+        self.min_updates = min_updates
+        self.n_updates = 0
+
+        # Identity-preserving initialization via ReLU pair:
+        # Neurons 0,1 form: ReLU(logit(p)) - ReLU(-logit(p)) = logit(p)
+        # → sigmoid(logit(p)) = p (exact identity)
+        # Remaining neurons start near zero for symmetry breaking.
+        rng = np.random.RandomState(42)
+        scale1 = 0.01 * np.sqrt(2.0 / (self.N_FEATURES + hidden_size))
+        self.W1 = rng.randn(self.N_FEATURES, hidden_size) * scale1
+        self.b1 = np.zeros(hidden_size)
+
+        # Neuron 0: +logit(p_raw), Neuron 1: -logit(p_raw)
+        self.W1[:, 0] = 0.0
+        self.W1[1, 0] = 1.0        # +logit(p_raw)
+        self.W1[:, 1] = 0.0
+        self.W1[1, 1] = -1.0       # -logit(p_raw)
+
+        self.W2 = rng.randn(hidden_size) * 0.01
+        self.W2[0] = 1.0           # +ReLU(logit)
+        self.W2[1] = -1.0          # -ReLU(-logit) → net = logit(p)
+        self.b2 = 0.0
+
+        # Safety gate
+        self.safety_gate = safety_gate
+        self.gate_window = gate_window
+        self._gate_raw_brier: deque = deque(maxlen=gate_window)
+        self._gate_cal_brier: deque = deque(maxlen=gate_window)
+        self._gate_active: bool = False
+
+        # Discrimination guardrail
+        self.gate_on_discrimination: bool = gate_on_discrimination
+        self.gate_auc_threshold: float = gate_auc_threshold
+        self.gate_separation_threshold: float = gate_separation_threshold
+        self._gate_discrimination_window: int = gate_discrimination_window
+        self._gate_pry_triples: deque = deque(maxlen=gate_discrimination_window)
+        self._discrimination_gate_active: bool = False
+
+    def _build_features(self, p_raw: float, sigma_1d: float,
+                        delta_sigma: float, vol_ratio: float,
+                        vol_of_vol: float) -> np.ndarray:
+        """Build feature vector (same as MultiFeatureCalibrator)."""
+        return np.array([
+            1.0,
+            logit(p_raw),
+            sigma_1d * 100.0,
+            delta_sigma * 100.0,
+            vol_ratio,
+            vol_of_vol * 100.0,
+        ])
+
+    def _forward(self, x: np.ndarray):
+        """Forward pass. Returns (p_cal, hidden_pre, hidden_act) for backprop."""
+        # Hidden layer: z1 = x @ W1 + b1, h = ReLU(z1)
+        z1 = x @ self.W1 + self.b1
+        h = np.maximum(z1, 0.0)  # ReLU
+        # Output layer: z2 = h @ W2 + b2, p = sigmoid(z2)
+        z2 = float(h @ self.W2 + self.b2)
+        p = sigmoid(z2)
+        return p, z1, h
+
+    def _compute_cal(self, p_raw: float, sigma_1d: float,
+                     delta_sigma: float, vol_ratio: float,
+                     vol_of_vol: float) -> float:
+        """Apply MLP mapping (internal, ignoring gate)."""
+        if self.n_updates < self.min_updates:
+            return p_raw
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        p, _, _ = self._forward(x)
+        return p
+
+    def calibrate(self, p_raw: float, sigma_1d: float,
+                  delta_sigma: float, vol_ratio: float,
+                  vol_of_vol: float) -> float:
+        """Apply calibration. Falls back to raw if safety gate triggers."""
+        p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        if self.safety_gate and self._gate_active:
+            return p_raw
+        if self.gate_on_discrimination and self._discrimination_gate_active:
+            return p_raw
+        return p_cal
+
+    def update(self, p_raw: float, y: float, sigma_1d: float,
+               delta_sigma: float, vol_ratio: float,
+               vol_of_vol: float) -> None:
+        """Backprop SGD update on single sample."""
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        p_cal, z1, h = self._forward(x)
+
+        effective_lr = self.lr / np.sqrt(1.0 + self.n_updates)
+
+        # Binary cross-entropy gradient: dL/dz2 = p_cal - y
+        dz2 = p_cal - y
+
+        # Output layer gradients
+        dW2 = h * dz2               # (hidden_size,)
+        db2 = dz2                    # scalar
+
+        # Backprop through hidden layer
+        dh = self.W2 * dz2          # (hidden_size,)
+        dz1 = dh * (z1 > 0).astype(float)  # ReLU derivative
+
+        # Input layer gradients
+        dW1 = np.outer(x, dz1)      # (N_FEATURES, hidden_size)
+        db1 = dz1                    # (hidden_size,)
+
+        # L2 regularization on weights (not biases)
+        dW1 += self.l2_reg * self.W1
+        dW2 += self.l2_reg * self.W2
+
+        # Gradient clipping
+        grad_norm = np.sqrt(
+            np.sum(dW1 ** 2) + np.sum(dW2 ** 2) +
+            np.sum(db1 ** 2) + db2 ** 2
+        )
+        if grad_norm > 10.0:
+            scale = 10.0 / grad_norm
+            dW1 *= scale
+            dW2 *= scale
+            db1 *= scale
+            db2 *= scale
+
+        # SGD step (negative gradient for minimization)
+        self.W1 -= effective_lr * dW1
+        self.b1 -= effective_lr * db1
+        self.W2 -= effective_lr * dW2
+        self.b2 -= effective_lr * db2
+
+        self.n_updates += 1
+
+        # Safety gate
+        if self.safety_gate:
+            self._gate_raw_brier.append((p_raw - y) ** 2)
+            self._gate_cal_brier.append((p_cal - y) ** 2)
+            if len(self._gate_raw_brier) >= self.gate_window:
+                mean_raw = sum(self._gate_raw_brier) / len(self._gate_raw_brier)
+                mean_cal = sum(self._gate_cal_brier) / len(self._gate_cal_brier)
+                self._gate_active = bool(mean_cal > mean_raw)
+
+        # Discrimination guardrail
+        if self.gate_on_discrimination:
+            self._update_discrimination_gate(p_raw, p_cal, y)
+
+    def _update_discrimination_gate(self, p_raw: float, p_cal: float, y: float) -> None:
+        """Update rolling AUC and separation tracking."""
+        self._gate_pry_triples.append((p_raw, p_cal, y))
+        if len(self._gate_pry_triples) < self._gate_discrimination_window:
+            return
+        from .evaluation import auc_roc, separation as sep_fn
+        triples = list(self._gate_pry_triples)
+        p_cal_arr = np.array([t[1] for t in triples])
+        y_arr = np.array([t[2] for t in triples])
+        rolling_auc = auc_roc(p_cal_arr, y_arr)
+        rolling_sep = sep_fn(p_cal_arr, y_arr)
+        auc_bad = (np.isfinite(rolling_auc) and rolling_auc < self.gate_auc_threshold)
+        sep_bad = (np.isfinite(rolling_sep) and rolling_sep < self.gate_separation_threshold)
+        self._discrimination_gate_active = bool(auc_bad or sep_bad)
+
+    def state(self) -> Dict:
+        """Return current calibrator state."""
+        return {
+            "a": float(self.W1[0, 0]),
+            "b": float(self.W1[1, 0]),
+            "n_updates": self.n_updates,
+            "gated": self._gate_active,
+            "hidden_size": self.hidden_size,
+        }
+
+
+class RegimeNeuralCalibrator:
+    """
+    Regime-conditional neural calibration.
+
+    Maintains separate NeuralCalibrator instances for each vol regime.
+    Same interface as RegimeMultiFeatureCalibrator.
+    """
+
+    def __init__(self, n_bins: int = 3, **neural_kwargs):
+        self.n_bins = n_bins
+        self._neural_kwargs = neural_kwargs
+        self.calibrators = [
+            NeuralCalibrator(**neural_kwargs)
+            for _ in range(n_bins)
+        ]
+        self._vol_history: deque = deque(maxlen=252)
+        self._warmup: int = 50
+
+    def _get_regime(self, sigma_1d: float) -> int:
+        """Assign regime bin based on rolling vol percentile."""
+        if len(self._vol_history) < self._warmup:
+            return 0
+        arr = np.sort(np.array(self._vol_history))
+        pctile = np.searchsorted(arr, sigma_1d) / len(arr)
+        return min(int(pctile * self.n_bins), self.n_bins - 1)
+
+    def observe_vol(self, sigma_1d: float):
+        """Record vol observation for percentile computation."""
+        self._vol_history.append(sigma_1d)
+
+    def calibrate(self, p_raw: float, sigma_1d: float,
+                  delta_sigma: float, vol_ratio: float,
+                  vol_of_vol: float) -> float:
+        """Apply regime-specific neural calibration."""
+        regime = self._get_regime(sigma_1d)
+        return self.calibrators[regime].calibrate(
+            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+
+    def update(self, p_raw: float, y: float, sigma_1d: float,
+               delta_sigma: float, vol_ratio: float,
+               vol_of_vol: float) -> None:
+        """Update the regime-specific neural calibrator."""
+        regime = self._get_regime(sigma_1d)
+        self.calibrators[regime].update(
+            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+
+    def state(self) -> Dict:
+        """Return state of the currently active regime calibrator."""
+        if self._vol_history:
+            regime = self._get_regime(self._vol_history[-1])
+        else:
+            regime = 0
+        active = self.calibrators[regime]
+        s = active.state()
+        s["regime"] = regime
+        return s

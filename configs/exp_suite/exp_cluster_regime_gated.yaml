@@ -62,11 +62,14 @@ calibration:
   gate_separation_threshold: 0.0
   gate_discrimination_window: 200
   regime_conditional: false
-  multi_feature: true
-  multi_feature_lr: 0.01
-  multi_feature_l2: 0.0001
-  multi_feature_min_updates: 100
-  multi_feature_regime_conditional: true
+  calibration_method: "neural"
+  neural_hidden_size: 8
+  neural_lr: 0.005
+  neural_l2: 0.0001
+  neural_min_updates: 100
+  neural_regime_conditional: true
+  multi_feature: false
+  multi_feature_regime_conditional: false
   ensemble_enabled: true
   ensemble_weights: [0.5, 0.3, 0.2]
   histogram_n_bins: 15

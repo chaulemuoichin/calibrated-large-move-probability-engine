@@ -370,6 +370,24 @@ Updated via SGD with L2 regularization (prevents overfitting) and gradient clipp
 
 When `multi_feature_regime_conditional=true`, the system maintains one `MultiFeatureCalibrator` per volatility regime bin (low/mid/high vol). Regime assignment uses the same rolling sigma_1d percentile approach as `RegimeCalibrator` (walk-forward safe). Each regime-specific calibrator learns its own weight vector independently, so calibration adapts to the distinct probability-outcome relationship within each vol environment. Enabled via config flag; default off for backward compatibility.
 
+### Neural Calibrator (`calibration_method: "neural"`)
+
+Replaces the linear Multi-Feature Calibrator + Histogram post-calibration stack with a single-hidden-layer MLP that can capture nonlinear feature interactions:
+
+$$p_{\mathrm{cal},t} = \sigma\!\left(W_2^\top\,\mathrm{ReLU}\!\left(W_1^\top x_t + b_1\right) + b_2\right)$$
+
+where $x_t$ is the same 6-feature vector as the Multi-Feature Calibrator.
+
+Architecture: Input (6) → Hidden (8 neurons, ReLU) → Output (1, sigmoid). Total 65 parameters.
+
+**Identity initialization**: Neurons 0 and 1 form a ReLU pair that passes `logit(p_raw)` through exactly: `ReLU(logit(p)) - ReLU(-logit(p)) = logit(p)` → `sigmoid(logit(p)) = p`. Before any updates, the network outputs `p_raw` unchanged.
+
+**Learning**: Online SGD with backpropagation, adaptive learning rate `lr / √(1 + n)`, L2 regularization on weights, gradient clipping (max norm 10). Same safety gate and discrimination guardrail as Multi-Feature Calibrator.
+
+**Why it helps**: The linear calibrator maps `sigmoid(w·x)` — it cannot learn that high σ combined with high vol_ratio predicts a different bias than either feature alone. The hidden layer captures these interactions via `ReLU(W1·x)`, where each hidden neuron represents a nonlinear feature combination.
+
+When `neural_regime_conditional: true`, separate MLPs are maintained per vol regime (same percentile-based routing as `RegimeMultiFeatureCalibrator`).
+
 ### Safety Gate (Brier-based)
 
 If calibration makes things worse, stop doing it:
