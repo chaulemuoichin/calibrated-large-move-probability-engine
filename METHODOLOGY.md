@@ -506,17 +506,17 @@ After the backtest, we measure how good the predictions were.
 
 | Metric | Formula | What it tells you |
 |--------|---------|-------------------|
-| **Brier Score** | mean((p - y)^2) | Average squared error. Lower = better. Range [0, 1]. |
-| **Brier Skill Score** | 1 - Brier / Brier_climatology | How much better than always predicting the event rate. BSS > 0 = useful. |
-| **Log Loss** | -mean(y*log(p) + (1-y)*log(1-p)) | Penalizes confident wrong predictions heavily. Lower = better. |
-| **ECE** | Weighted average of \|predicted - observed\| per adaptive (quantile) bin | Measures systematic over/under-confidence. Lower = better. |
+| **Brier Score** | $\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2$ | Average squared error. Lower = better. Range [0, 1]. |
+| **Brier Skill Score** | $\mathrm{BSS}=1-\frac{\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2}{\bar{y}(1-\bar{y})}$ | How much better than always predicting the event rate. BSS > 0 = useful. |
+| **Log Loss** | $-\frac{1}{N}\sum_{i=1}^{N}\left[y_i\log(p_i)+(1-y_i)\log(1-p_i)\right]$ | Penalizes confident wrong predictions heavily. Lower = better. |
+| **ECE** | $\sum_{k=1}^{K}\frac{n_k}{N}\lvert\hat{p}_k-\hat{y}_k\rvert$ | Measures systematic over/under-confidence. Lower = better. |
 
 ### Secondary: Discrimination Quality
 
 | Metric | Formula | What it tells you |
 |--------|---------|-------------------|
-| **AUC-ROC** | Area under ROC curve | Can the model rank events above non-events? 0.5 = random. 1.0 = perfect. |
-| **Separation** | mean(p\|event) - mean(p\|non-event) | Average probability gap between events and non-events. |
+| **AUC-ROC** | $\int \mathrm{TPR}\,d(\mathrm{FPR})$ | Can the model rank events above non-events? 0.5 = random. 1.0 = perfect. |
+| **Separation** | $\mathbb{E}[p\mid y=1]-\mathbb{E}[p\mid y=0]$ | Average probability gap between events and non-events. |
 
 ### Sample Size Correction
 
