@@ -338,7 +338,7 @@ Uses 6 features instead of just `logit(p_raw)`:
 
 $$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t}\right]$$
 
-Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, and $v_{ov,t}\equiv \mathrm{vol\_of\_vol}_t$.
+Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, and $v_{ov,t}$ corresponds to `vol_of_vol_t`.
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
