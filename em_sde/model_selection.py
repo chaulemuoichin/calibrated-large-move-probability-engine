@@ -373,16 +373,24 @@ def apply_promotion_gates_oof(
     report = pd.DataFrame(rows)
 
     if len(report) > 0:
-        # all_gates_passed: True only if all evaluated metrics pass in all regimes
-        def _all_pass(grp):
+        # Tri-state promotion: PASS / FAIL / UNDECIDED
+        # UNDECIDED if any regime has insufficient_data (blocks promotion)
+        def _promotion_status(grp):
+            has_insufficient = (grp["status"] == "insufficient_data").any()
             evaluated = grp[grp["status"] == "evaluated"]
             if len(evaluated) == 0:
-                return False
-            return bool(evaluated["passed"].all())
+                return "UNDECIDED"
+            all_pass = bool(evaluated["passed"].all())
+            if has_insufficient:
+                return "UNDECIDED"
+            if all_pass:
+                return "PASS"
+            return "FAIL"
 
         summary = report.groupby(
             ["config_name", "horizon"]
-        ).apply(_all_pass, include_groups=False).reset_index(name="all_gates_passed")
+        ).apply(_promotion_status, include_groups=False).reset_index(name="promotion_status")
+        summary["all_gates_passed"] = summary["promotion_status"] == "PASS"
         report = report.merge(summary, on=["config_name", "horizon"])
 
     return report

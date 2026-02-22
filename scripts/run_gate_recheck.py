@@ -68,9 +68,8 @@ def run_single_config(name: str, config_path: str) -> None:
     print(f"\nElapsed: {elapsed:.1f} min\n")
     print("=== OOF Row-Level Gates (primary) ===\n")
     for (cfg_n, H), grp in gates_oof.groupby(["config_name", "horizon"]):
-        all_pass = grp["all_gates_passed"].all()
-        status = "PASS" if all_pass else "FAIL"
-        print(f"{cfg_n} H={H}: {status}")
+        promo = grp["promotion_status"].iloc[0] if "promotion_status" in grp.columns else "?"
+        print(f"{cfg_n} H={H}: {promo}")
         for _, row in grp.iterrows():
             metric = row["metric"]
             value = row["value"]
@@ -90,8 +89,9 @@ def run_single_config(name: str, config_path: str) -> None:
                 print(f"  {row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}")
 
     n_pass = gates_oof.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
+    n_undecided = (gates_oof.groupby(["config_name", "horizon"])["promotion_status"].first() == "UNDECIDED").sum() if "promotion_status" in gates_oof.columns else 0
     n_total = gates_oof.groupby(["config_name", "horizon"]).ngroups
-    print(f"\nOOF gate pass: {n_pass}/{n_total} config-horizon combos")
+    print(f"\nOOF gate: {n_pass}/{n_total} PASS, {n_undecided}/{n_total} UNDECIDED")
 
     # Shadow gate at ECE<=0.04 (reporting only, no policy change)
     shadow_gates = apply_promotion_gates_oof(

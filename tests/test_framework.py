@@ -2326,6 +2326,7 @@ class TestPromotionGatesOOF:
         report = apply_promotion_gates_oof(oof)
         assert len(report) > 0
         assert "all_gates_passed" in report.columns
+        assert "promotion_status" in report.columns
         assert "n_samples" in report.columns
         assert "n_events" in report.columns
         # With good calibration, BSS should be positive and AUC should be decent
@@ -2349,6 +2350,9 @@ class TestPromotionGatesOOF:
         report = apply_promotion_gates_oof(oof, min_samples=30)
         # With only ~7 samples per regime, all should be insufficient
         assert all(report["status"] == "insufficient_data")
+        # Tri-state: all insufficient → UNDECIDED, not PASS
+        assert all(report["promotion_status"] == "UNDECIDED")
+        assert not any(report["all_gates_passed"])
 
     def test_oof_gates_row_level_regime(self):
         """Regime assignment uses row-level sigma, not fold-level mean."""
@@ -2374,6 +2378,36 @@ class TestPromotionGatesOOF:
         assert "low_vol" in regimes, "Should have low_vol regime"
         assert "mid_vol" in regimes, "Should have mid_vol regime"
         assert "high_vol" in regimes, "Should have high_vol regime"
+
+    def test_oof_gates_undecided_blocks_promotion(self):
+        """Promotion blocked (UNDECIDED) when any regime has insufficient events."""
+        rng = np.random.default_rng(99)
+        n = 300
+        # Create 3 sigma bands; low_vol will have 0 events (mimics cluster H=5 low_vol)
+        sigma = np.concatenate([
+            rng.uniform(0.005, 0.010, n // 3),   # low vol — 0 events
+            rng.uniform(0.015, 0.020, n // 3),   # mid vol — has events
+            rng.uniform(0.025, 0.035, n // 3),   # high vol — has events
+        ])
+        y = np.zeros(n)
+        # Only mid and high vol have events
+        y[n // 3: 2 * n // 3] = (rng.random(n // 3) < 0.15).astype(float)
+        y[2 * n // 3:] = (rng.random(n // 3) < 0.20).astype(float)
+        p_cal = np.clip(y * 0.25 + 0.05 + rng.normal(0, 0.01, n), 0.01, 0.99)
+        oof = pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+        report = apply_promotion_gates_oof(oof, min_events=5)
+        # low_vol has 0 events → insufficient_data → promotion must be UNDECIDED
+        low_vol = report[report["regime"] == "low_vol"]
+        assert all(low_vol["status"] == "insufficient_data"), "low_vol should be insufficient"
+        assert all(report["promotion_status"] == "UNDECIDED"), "Should be UNDECIDED, not PASS"
+        assert not any(report["all_gates_passed"]), "all_gates_passed must be False"
 
     def test_oof_gates_sample_counts_reported(self):
         """n_samples and n_events are accurate in the gate report."""

@@ -338,7 +338,7 @@ Uses 6 features instead of just `logit(p_raw)`:
 
 $$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t}\right]$$
 
-Here, \(p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}\), \(\sigma_{d,t}\equiv\sigma_{1d,t}\), \(\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}\), and \(v_{ov,t}\equiv \mathrm{vol\_of\_vol}_t\).
+Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, and $v_{ov,t}\equiv \mathrm{vol\_of\_vol}_t$.
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
@@ -539,9 +539,13 @@ In EACH regime bucket, the model must pass ALL of:
   ECE  <= 0.02    (must be reasonably calibrated)
 
 Minimum sample guards: 30 rows and 5 events per regime required.
-Regimes with insufficient data are skipped (not counted as pass or fail).
 
-If any gate fails in any evaluated bucket: model is BLOCKED from promotion.
+Tri-state promotion decision:
+  PASS       — all regimes evaluated, all gates pass
+  FAIL       — any evaluated gate fails
+  UNDECIDED  — any regime has insufficient data for evaluation
+
+If FAIL or UNDECIDED: model is BLOCKED from promotion.
 ```
 
 Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-level means in the legacy approach). Bootstrap confidence intervals for ECE are reported for defensibility.
