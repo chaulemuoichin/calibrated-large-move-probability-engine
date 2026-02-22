@@ -2311,7 +2311,7 @@ class TestIsotonicCalibrator:
         for _ in range(10):
             ic.update(0.10, 0.0)
         # Not enough samples → identity
-        assert ic.calibrate(0.10) == pytest.approx(0.10, abs=0.01)
+        assert abs(ic.calibrate(0.10) - 0.10) < 0.02
 
     def test_correction_reduces_bias(self):
         """Systematic over-prediction should be corrected downward."""

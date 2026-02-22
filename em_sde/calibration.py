@@ -189,14 +189,46 @@ class IsotonicCalibrator:
         idx = int(np.searchsorted(self.bin_edges[1:], p, side='right'))
         return min(idx, self.n_bins - 1)
 
+    @staticmethod
+    def _pav_weighted(values: np.ndarray, weights: np.ndarray) -> np.ndarray:
+        """Weighted Pool Adjacent Violators for strict monotone non-decreasing."""
+        n = len(values)
+        result = values.astype(float).copy()
+        w = weights.astype(float).copy()
+        # Iteratively merge violating adjacent blocks
+        for _ in range(n * n):
+            changed = False
+            i = 0
+            while i < n - 1:
+                if result[i] > result[i + 1]:
+                    # Weighted average of the two
+                    total_w = w[i] + w[i + 1]
+                    if total_w > 0:
+                        avg = (result[i] * w[i] + result[i + 1] * w[i + 1]) / total_w
+                    else:
+                        avg = (result[i] + result[i + 1]) / 2.0
+                    result[i] = avg
+                    result[i + 1] = avg
+                    w[i] = total_w
+                    w[i + 1] = total_w
+                    changed = True
+                i += 1
+            if not changed:
+                break
+        return result
+
     def _refit(self):
         """Re-run isotonic regression on bin means."""
         values = self._centers.copy()
+        weights = np.ones(self.n_bins)
         for i in range(self.n_bins):
             if self._count[i] >= self.min_samples_per_bin:
                 values[i] = self._sum_obs[i] / self._count[i]
-        # PAV: enforce monotone non-decreasing
-        self._fitted = HistogramCalibrator._pav(values)
+                weights[i] = self._count[i]
+            else:
+                weights[i] = 0.01  # low weight for identity-defaulted bins
+        # Weighted PAV: enforce monotone non-decreasing
+        self._fitted = self._pav_weighted(values, weights)
 
     def calibrate(self, p_cal: float) -> float:
         """Apply isotonic mapping with linear interpolation."""
