@@ -64,6 +64,8 @@ calibration:
   multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights: [0.5, 0.3, 0.2]
+  histogram_min_samples: 8
+  histogram_prior_strength: 8.0
 
 output:
   base_dir: "outputs"
