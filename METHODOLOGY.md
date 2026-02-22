@@ -595,58 +595,94 @@ Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-leve
 
 ### GARCH(1,1) Variance Equation
 
-```
-sigma^2[t] = omega + alpha * epsilon^2[t-1] + beta * sigma^2[t-1]
-```
+$$
+\sigma_t^2 = \omega + \alpha \epsilon_{t-1}^2 + \beta \sigma_{t-1}^2
+$$
 
 ### GJR-GARCH(1,1) Variance Equation
 
-```
-sigma^2[t] = omega + (alpha + gamma * I[epsilon < 0]) * epsilon^2[t-1] + beta * sigma^2[t-1]
-```
+$$
+\sigma_t^2
+= \omega
++ \left(\alpha + \gamma \mathbf{1}_{\{\epsilon_{t-1}<0\}}\right)\epsilon_{t-1}^2
++ \beta \sigma_{t-1}^2
+$$
 
 ### GBM Log-Price Discretization (Euler-Maruyama)
 
-```
-X[t+1] = X[t] + (mu - 0.5 * sigma_annual^2) * dt + sigma_annual * sqrt(dt) * Z[t]
+$$
+X_{t+1}
+= X_t
++ \left(\mu - \tfrac{1}{2}\sigma_{\mathrm{ann}}^2\right)\Delta t
++ \sigma_{\mathrm{ann}}\sqrt{\Delta t}\,Z_t,
+\quad Z_t \sim \mathcal{N}(0,1)
+$$
 
-where X = log(S), dt = 1/252, Z ~ N(0,1)
-```
+$$
+X_t = \log S_t,\quad \Delta t = \frac{1}{252}
+$$
 
 ### Merton Jump-Diffusion Drift Compensation
 
-```
-drift = mu_annual - lambda * (exp(mu_J + 0.5 * sigma_J^2) - 1) - 0.5 * sigma_annual^2
-```
+$$
+\mu_{\mathrm{drift}}
+= \mu_{\mathrm{ann}}
+- \lambda\left(e^{\mu_J + \tfrac{1}{2}\sigma_J^2} - 1\right)
+- \tfrac{1}{2}\sigma_{\mathrm{ann}}^2
+$$
 
 ### Stationarity Projection with Variance Targeting
 
-```
-If persistence = alpha + beta >= 1.0:
-    scale = target_persistence / persistence
-    alpha_new = alpha * scale
-    beta_new  = beta  * scale
-    omega_new = sigma_1d^2 * (1 - target_persistence)
-```
+Define persistence as:
+
+$$
+\phi =
+\begin{cases}
+\alpha + \beta, & \text{GARCH(1,1)} \\
+\alpha + \beta + \tfrac{1}{2}\gamma, & \text{GJR-GARCH(1,1)}
+\end{cases}
+$$
+
+If \(\phi \ge 1\), project to target persistence \(\phi^\*\) (default \(0.98\)):
+
+$$
+s = \frac{\phi^\*}{\phi},\quad
+\alpha' = s\alpha,\quad
+\beta' = s\beta,\quad
+\gamma' = s\gamma,\quad
+\omega' = \sigma_{1d}^2(1-\phi^\*)
+$$
 
 ### Logistic Calibration (Platt Scaling)
 
-```
-p_cal = 1 / (1 + exp(-(a + b * log(p_raw / (1 - p_raw)))))
-```
+$$
+p_{\mathrm{cal}} = \sigma\!\left(a + b\,\operatorname{logit}(p_{\mathrm{raw}})\right)
+$$
+
+$$
+\sigma(x)=\frac{1}{1+e^{-x}},\quad
+\operatorname{logit}(p)=\log\!\left(\frac{p}{1-p}\right)
+$$
 
 ### Brier Skill Score
 
-```
-BSS = 1 - mean((p - y)^2) / (event_rate * (1 - event_rate))
-```
+$$
+\mathrm{BSS}
+= 1 - \frac{\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2}{\bar{y}(1-\bar{y})}
+$$
 
 ### Expected Calibration Error (Adaptive Binning)
 
-```
-bin_edges = quantiles of predictions at [0%, 10%, 20%, ..., 100%]  (adaptive)
-ECE = sum over bins: (bin_count / total) * |mean_predicted_in_bin - mean_observed_in_bin|
-```
+Let \(B_1,\dots,B_K\) be adaptive (quantile) bins of predictions.
+
+$$
+\mathrm{ECE}
+= \sum_{k=1}^{K}\frac{|B_k|}{N}
+\left|
+\frac{1}{|B_k|}\sum_{i\in B_k}p_i
+- \frac{1}{|B_k|}\sum_{i\in B_k}y_i
+\right|
+$$
 
 Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are available via `adaptive=False`.
 
@@ -686,4 +722,4 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 152 unit tests |
+| `tests/test_framework.py` | 157 unit tests |
