@@ -121,9 +121,34 @@ python -m pytest tests/ -v
 
 157 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
 
+**Runner commands (from repo root):**
+
+```bash
+# Full institutional battery
+python -u scripts/run_full_institutional.py
+
+# Quick checks
+python scripts/run_quick_validation.py
+python scripts/run_stress_suite.py
+python scripts/run_single_timing.py
+
+# CV / gate diagnostics
+python -u scripts/run_gate_recheck.py cluster
+python -u scripts/run_gate_recheck.py jump
+python -u scripts/run_remaining_cv.py
+
+# Legacy compatibility wrapper (optional)
+python scripts/legacy/calibrated_large_move_probability_engine.py --help
+```
+
 **Project layout:**
 
 ```text
+.gitignore
+README.md
+METHODOLOGY.md
+requirements.txt
+data/                Versioned data assets (if used)
 em_sde/              Core library
   data_layer.py        Data loading, caching, quality checks
   garch.py             Volatility estimation (GARCH/GJR)
@@ -143,8 +168,9 @@ scripts/             Operational runners
   run_remaining_cv.py
   run_full_institutional.py
   run_single_timing.py
+  legacy/
+    calibrated_large_move_probability_engine.py
 tests/               157 unit tests
-METHODOLOGY.md       Full technical methodology (start here for review)
 ```
 
 ## Known Limitations
