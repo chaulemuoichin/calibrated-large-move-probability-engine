@@ -104,7 +104,7 @@ $$\sigma_{t+1}^{2} = \omega + \alpha \epsilon_t^{2} + \beta \sigma_t^{2}$$
 - **beta**: how much yesterday's vol persists (higher = slower to change)
 - **shock**: the unexpected part of today's return
 
-The model is **stationary** (well-behaved long-term) when `alpha + beta < 1`. In that case, volatility eventually settles to a long-run level:
+The model is **stationary** (well-behaved long-term) when $\alpha + \beta < 1$. In that case, volatility eventually settles to a long-run level:
 
 $$\sigma_{\mathrm{long\_run}} = \sqrt{\frac{\omega}{1-\alpha-\beta}}$$
 
@@ -136,7 +136,7 @@ This always produces a number but loses the shock-response dynamics of GARCH.
 
 ### Stationarity Projection (U4)
 
-**Problem:** Sometimes the fitted parameters have `alpha + beta >= 1`, meaning volatility would explode over time in simulation.
+**Problem:** Sometimes the fitted parameters have $\alpha + \beta \ge 1$, meaning volatility would explode over time in simulation.
 
 **Fix:** Scale all the shock-response parameters down proportionally to hit a target persistence (default 0.98), and recompute `omega` so the long-run variance equals the current forecast:
 
@@ -146,7 +146,7 @@ This preserves the relative importance of each parameter while anchoring the sim
 
 ### Where to look for problems
 
-- If `alpha + beta` is frequently >= 1, the underlying data may have structural breaks.
+- If $\alpha + \beta$ is frequently >= 1, the underlying data may have structural breaks.
 - If `omega_new` becomes very small, the GARCH simulation becomes essentially a martingale — volatility doesn't mean-revert.
 - The EWMA fallback loses all shock-asymmetry information. When it triggers often, GJR features are wasted.
 
@@ -217,7 +217,7 @@ where:
 - `dt` = 1/252 (one trading day)
 - `Z` = random standard normal draw
 
-After `H` steps, convert back: `price_terminal = exp(log_price_final)`.
+After $H$ steps, convert back: $P_{\mathrm{terminal}} = \exp(X_{\mathrm{final}})$.
 
 ### GARCH-in-Simulation
 
@@ -322,7 +322,7 @@ $$p_{\mathrm{cal}}=\sigma\!\left(a+b\,\mathrm{logit}(p_{\mathrm{raw}})\right)$$
 
 where $\sigma(x)=\frac{1}{1+e^{-x}}$ and $\mathrm{logit}(p)=\log\!\left(\frac{p}{1-p}\right)$.
 
-**Initialization:** `a=0, b=1` (identity — calibrated = raw).
+**Initialization:** $a=0,\ b=1$ (identity — calibrated = raw).
 
 **Online update** (when an outcome `y` arrives):
 
@@ -384,7 +384,7 @@ Monotonic enforcement (PAV):
 
 This directly targets calibration error (ECE) rather than squared error (Brier). The 10-bin grid is aligned with the ECE evaluation bins. A minimum of 15 samples per bin is required before correction activates.
 
-Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 samples (activation threshold), shrinkage = 0.50. At 63 samples (typical per-regime bin), shrinkage ≈ 0.81. At 190 samples, shrinkage ≈ 0.93. This prevents noisy overcorrection in sparse bins without requiring decay (which reduces effective sample size and amplifies noise).
+Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 samples (activation threshold), shrinkage = 0.50. At 63 samples (typical per-regime bin), shrinkage ~ 0.81. At 190 samples, shrinkage ~ 0.93. This prevents noisy overcorrection in sparse bins without requiring decay (which reduces effective sample size and amplifies noise).
 
 Monotonic enforcement via the Pool Adjacent Violators (PAV) algorithm ensures that higher raw predictions always map to higher corrected predictions. When adjacent bin corrections would violate this ordering, PAV pools them to their average. This provides two benefits: it guarantees AUC cannot be damaged by histogram corrections, and it reduces variance by pooling noisy adjacent bins. Enabled by default via `histogram_post_calibration: true` and `histogram_monotonic: true` in the calibration config.
 
