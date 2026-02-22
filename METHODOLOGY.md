@@ -162,9 +162,9 @@ Before we can estimate the probability of a "large move," we need to define what
 
 | Mode | Formula | When to use |
 |------|---------|-------------|
-| `fixed_pct` | threshold = constant (e.g., 5%) | Best for genuine discrimination — the goalpost doesn't move |
-| `vol_scaled` | threshold = k * sigma_1d * sqrt(H) | Legacy mode — threshold moves with vol, making AUC ~0.50 |
-| `anchored_vol` | threshold = k * sigma_unconditional * sqrt(H) | Slowly-moving goalpost using historical average vol |
+| `fixed_pct` | $\tau = c$ (e.g., $c=5\%$) | Best for genuine discrimination — the goalpost doesn't move |
+| `vol_scaled` | $\tau = k\,\sigma_{1d}\sqrt{H}$ | Legacy mode — threshold moves with vol, making AUC ~0.50 |
+| `anchored_vol` | $\tau = k\,\sigma_{\mathrm{unconditional}}\sqrt{H}$ | Slowly-moving goalpost using historical average vol |
 | `regime_gated` | Routes between above modes based on current vol percentile | Adaptive: uses different strategy in calm vs volatile markets |
 
 **Regime-gated routing logic:**
@@ -181,10 +181,13 @@ otherwise:                               use mid-vol mode  (default: fixed_pct)
 
 For a prediction made on date `t` with horizon `H` trading days:
 
-```
-event = 1   if |price(t+H) / price(t) - 1| >= threshold
-event = 0   otherwise
-```
+$$
+\mathrm{event}_t^{(H)} =
+\begin{cases}
+1,& \left|\frac{P_{t+H}}{P_t}-1\right|\ge \tau \\
+0,& \text{otherwise}
+\end{cases}
+$$
 
 This is **two-sided**: both large up-moves and large down-moves count.
 
