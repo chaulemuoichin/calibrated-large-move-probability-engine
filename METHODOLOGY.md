@@ -619,9 +619,9 @@ $$\phi = \alpha + \beta \quad \text{(GARCH(1,1))}$$
 
 $$\phi = \alpha + \beta + \frac{1}{2}\gamma \quad \text{(GJR-GARCH(1,1))}$$
 
-If $\phi \ge 1$, project to target persistence $\phi^*$ (default $0.98$):
+If $\phi \ge 1$, project to target persistence $\phi_{\mathrm{target}}$ (default $0.98$):
 
-$$s = \frac{\phi^*}{\phi},\quad \alpha' = s\alpha,\quad \beta' = s\beta,\quad \gamma' = s\gamma,\quad \omega' = \sigma_{1d}^2(1-\phi^*)$$
+$$s = \frac{\phi_{\mathrm{target}}}{\phi},\quad \alpha^{\prime} = s\alpha,\quad \beta^{\prime} = s\beta,\quad \gamma^{\prime} = s\gamma,\quad \omega^{\prime} = \sigma_{1d}^{2}\left(1-\phi_{\mathrm{target}}\right)$$
 
 ### Logistic Calibration (Platt Scaling)
 
