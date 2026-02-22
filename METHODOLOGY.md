@@ -209,9 +209,7 @@ We generate thousands of possible future price paths (default: 100,000) and look
 
 The simplest model. Each daily step:
 
-```
-log_price(tomorrow) = log_price(today) + (drift - 0.5*vol^2)*dt + vol*sqrt(dt)*Z
-```
+$$\log P_{t+1} = \log P_t + \left(\mu-\frac{1}{2}\sigma^2\right)\Delta t + \sigma\sqrt{\Delta t}\,Z_t$$
 
 where:
 - `drift` = annualized expected return (default 0)
@@ -238,32 +236,27 @@ This means each simulated future has its own volatility story — some paths see
 
 Adds rare, sudden jumps on top of the diffusion:
 
-```
 On any given day, there is a small probability of a jump:
-  N_jump ~ Poisson(lambda / 252)     (lambda = jumps per year)
+
+$$N_{\mathrm{jump}} \sim \mathrm{Poisson}(\lambda/252)$$
 
 If a jump happens:
-  jump_size ~ Normal(mu_J, sigma_J)   (in log-space)
-  log_price += jump_size
-```
+
+$$J_t \sim \mathcal{N}(\mu_J,\sigma_J),\quad \log P_t \leftarrow \log P_t + J_t$$
 
 The drift is compensated so that adding jumps doesn't change the expected return:
 
-```
-drift_adjustment = lambda * (exp(mu_J + 0.5*sigma_J^2) - 1)
-```
+$$\text{drift\_adjustment} = \lambda\left(e^{\mu_J + \frac{1}{2}\sigma_J^2} - 1\right)$$
 
 ### State-Dependent Jumps (U2)
 
 Jump parameters vary with the current volatility regime:
 
-```
-t = clip((sigma_1d - vol_25th_pctile) / (vol_75th_pctile - vol_25th_pctile), 0, 1)
+$$t = \mathrm{clip}\!\left(\frac{\sigma_{1d}-\sigma_{25\%}}{\sigma_{75\%}-\sigma_{25\%}},\,0,\,1\right)$$
 
-lambda_today = lambda_low + t * (lambda_high - lambda_low)
-mu_J_today   = mu_J_low   + t * (mu_J_high   - mu_J_low)
-sigma_J_today = sigma_J_low + t * (sigma_J_high - sigma_J_low)
-```
+$$\lambda_t = \lambda_{\mathrm{low}} + t\left(\lambda_{\mathrm{high}}-\lambda_{\mathrm{low}}\right)$$
+$$\mu_{J,t} = \mu_{J,\mathrm{low}} + t\left(\mu_{J,\mathrm{high}}-\mu_{J,\mathrm{low}}\right)$$
+$$\sigma_{J,t} = \sigma_{J,\mathrm{low}} + t\left(\sigma_{J,\mathrm{high}}-\sigma_{J,\mathrm{low}}\right)$$
 
 In calm markets (low `t`): fewer, smaller jumps. In stressed markets (high `t`): more frequent, larger jumps.
 
@@ -271,9 +264,7 @@ In calm markets (low `t`): fewer, smaller jumps. In stressed markets (high `t`):
 
 Instead of drawing `Z` from a standard normal, draw from a Student-t distribution and rescale to unit variance:
 
-```
-Z_fat = Z_t * sqrt((df - 2) / df)
-```
+$$Z_{\mathrm{fat}} = Z_t\sqrt{\frac{\nu-2}{\nu}},\quad Z_t \sim t_{\nu}$$
 
 This produces more extreme daily moves than a normal distribution, matching empirical return distributions better.
 
