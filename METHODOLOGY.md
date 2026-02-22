@@ -156,12 +156,21 @@ When `mc_vol_term_structure: true`, the MC simulation uses a **horizon-adjusted 
 
 The term-structure average is computed analytically:
 
-```
-E[σ²_{t+h}] = σ²_unc + pers^h * (σ²_t - σ²_unc)
-σ_avg(H) = sqrt(mean(E[σ²_{t+1}], ..., E[σ²_{t+H}]))
-```
+$$
+\mathbb{E}\!\left[\sigma_{t+h}^{2}\right]
+=
+\sigma_{\mathrm{unc}}^{2}
++
+\phi^{h}\left(\sigma_t^{2}-\sigma_{\mathrm{unc}}^{2}\right)
+$$
 
-For GJR-GARCH, persistence = α + β + γ/2. Walk-forward safe (uses only fitted params).
+$$
+\sigma_{\mathrm{avg}}(H)
+=
+\sqrt{\frac{1}{H}\sum_{h=1}^{H}\mathbb{E}\!\left[\sigma_{t+h}^{2}\right]}
+$$
+
+For GARCH(1,1), $\phi=\alpha+\beta$. For GJR-GARCH(1,1), $\phi=\alpha+\beta+\frac{\gamma}{2}$. Walk-forward safe (uses only fitted params).
 
 **File:** `em_sde/garch.py` (`garch_term_structure_vol`)
 
