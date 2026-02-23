@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(python scripts/run_bayesian_opt.py:*)"
+    ]
+  }
+}

@@ -1,16 +1,18 @@
 data:
-  source: "csv"
-  ticker: "CLUSTER"
-  csv_path: "data/pattern_cluster_leverage.csv"
-  start: "2012-01-02"
-  end: "2025-12-31"
+  source: csv
+  ticker: CLUSTER
+  csv_path: data/pattern_cluster_leverage.csv
+  start: '2012-01-02'
+  end: '2025-12-31'
   fallback_to_synthetic: false
   min_rows: 756
-
 model:
   k: 2.0
   mu_year: 0.0
-  horizons: [5, 10, 20]
+  horizons:
+  - 5
+  - 10
+  - 20
   garch_window: 756
   garch_min_window: 252
   mc_base_paths: 30000
@@ -19,9 +21,9 @@ model:
   seed: 42
   t_df: 5.0
   garch_in_sim: true
-  garch_model_type: "gjr"
+  garch_model_type: gjr
   garch_stationarity_constraint: true
-  garch_target_persistence: 0.98
+  garch_target_persistence: 0.9588
   jump_enabled: true
   jump_intensity: 2.0
   jump_mean: -0.02
@@ -33,32 +35,31 @@ model:
   jump_high_intensity: 4.0
   jump_high_mean: -0.04
   jump_high_vol: 0.06
-  threshold_mode: "regime_gated"
+  threshold_mode: regime_gated
   fixed_threshold_pct: 0.04
-  regime_gated_low_mode: "fixed_pct"
-  regime_gated_mid_mode: "fixed_pct"
-  regime_gated_high_mode: "anchored_vol"
+  regime_gated_low_mode: fixed_pct
+  regime_gated_mid_mode: fixed_pct
+  regime_gated_high_mode: anchored_vol
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
   regime_gated_fixed_pct_by_horizon:
-    5: 0.025
-    10: 0.035
-    20: 0.04
-  hmm_regime: true
+    5: 0.0344
+    10: 0.0532
+    20: 0.0568
+  hmm_regime: false
   hmm_n_regimes: 2
-  hmm_vol_blend: 0.2
+  hmm_vol_blend: 0.0
   hmm_refit_interval: 63
-  har_rv: true
+  har_rv: false
   har_rv_min_window: 252
   har_rv_refit_interval: 21
   har_rv_ridge_alpha: 0.01
   mc_vol_term_structure: true
   mc_regime_t_df: true
-  mc_regime_t_df_low: 8.0
-  mc_regime_t_df_mid: 5.0
-  mc_regime_t_df_high: 4.0
+  mc_regime_t_df_low: 10.5
+  mc_regime_t_df_mid: 3.9
+  mc_regime_t_df_high: 5.9
   store_quantiles: true
-
 calibration:
   lr: 0.05
   adaptive_lr: true
@@ -66,22 +67,24 @@ calibration:
   safety_gate: true
   gate_window: 200
   gate_on_discrimination: true
-  gate_auc_threshold: 0.50
+  gate_auc_threshold: 0.5
   gate_separation_threshold: 0.0
   gate_discrimination_window: 200
   regime_conditional: false
   multi_feature: true
-  multi_feature_lr: 0.01
-  multi_feature_l2: 0.0001
-  multi_feature_min_updates: 100
+  multi_feature_lr: 0.013704
+  multi_feature_l2: 0.005829
+  multi_feature_min_updates: 63
   multi_feature_regime_conditional: true
   ensemble_enabled: true
-  ensemble_weights: [0.5, 0.3, 0.2]
+  ensemble_weights:
+  - 0.5
+  - 0.3
+  - 0.2
   histogram_n_bins: 15
   histogram_min_samples: 8
   histogram_prior_strength: 5.0
   promotion_pooled_gate: true
-
 output:
-  base_dir: "outputs"
+  base_dir: outputs
   charts: false

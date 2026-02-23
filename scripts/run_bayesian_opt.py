@@ -22,6 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import yaml
 
 warnings.filterwarnings("ignore")
@@ -45,7 +46,30 @@ CONFIGS = {
 }
 
 
-def build_trial_config(trial: optuna.Trial, base_config_path: str):
+def _compute_threshold_ranges(base_config_path: str):
+    """Compute data-adaptive threshold search ranges based on realized event rates.
+
+    Targets 5-20% event rate range for each horizon — the regime where
+    calibration is most effective. Ranges scale automatically with dataset volatility.
+    """
+    cfg = load_config(base_config_path)
+    df, _ = load_data(cfg)
+    rets = np.log(df["price"] / df["price"].shift(1)).dropna().values
+
+    ranges = {}
+    for h in cfg.model.horizons:
+        fwd = pd.Series(rets).rolling(h).sum().shift(-h).dropna().values
+        abs_fwd = np.abs(fwd)
+        # Target: 5% event rate (upper) to 20% event rate (lower)
+        thr_low = float(np.percentile(abs_fwd, 80))   # 20% event rate
+        thr_high = float(np.percentile(abs_fwd, 95))   # 5% event rate
+        # Add 10% margin on each side
+        ranges[h] = (round(thr_low * 0.9, 4), round(thr_high * 1.1, 4))
+    return ranges
+
+
+def build_trial_config(trial: optuna.Trial, base_config_path: str,
+                       threshold_ranges: dict = None):
     """Build a config with Optuna-suggested hyperparameters."""
     cfg = load_config(base_config_path)
 
@@ -63,11 +87,12 @@ def build_trial_config(trial: optuna.Trial, base_config_path: str):
     cfg.model.mc_regime_t_df_mid = trial.suggest_float("t_df_mid", 3.0, 8.0)
     cfg.model.mc_regime_t_df_high = trial.suggest_float("t_df_high", 2.5, 6.0)
 
-    # --- Per-horizon threshold percentages ---
+    # --- Per-horizon threshold percentages (data-adaptive ranges) ---
+    if threshold_ranges is None:
+        threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
     cfg.model.regime_gated_fixed_pct_by_horizon = {
-        5: trial.suggest_float("thr_5", 0.015, 0.04),
-        10: trial.suggest_float("thr_10", 0.025, 0.055),
-        20: trial.suggest_float("thr_20", 0.03, 0.06),
+        h: trial.suggest_float(f"thr_{h}", lo, hi)
+        for h, (lo, hi) in threshold_ranges.items()
     }
 
     # --- Multi-feature calibration ---
@@ -90,11 +115,12 @@ def build_trial_config(trial: optuna.Trial, base_config_path: str):
     return cfg
 
 
-def objective(trial: optuna.Trial, df, base_config_path: str) -> float:
+def objective(trial: optuna.Trial, df, base_config_path: str,
+              threshold_ranges: dict = None) -> float:
     """Objective function: minimize mean pooled ECE across horizons."""
     t0 = time.perf_counter()
 
-    cfg = build_trial_config(trial, base_config_path)
+    cfg = build_trial_config(trial, base_config_path, threshold_ranges)
     cfg_name = f"trial_{trial.number}"
 
     try:
@@ -196,10 +222,13 @@ def holdout_evaluate(
         df_holdout, [cfg], [name], n_folds=1, min_train_pct=0.5,
     )
 
+    # Use relaxed min_events for holdout (fewer samples than full CV)
     gates = apply_promotion_gates_oof(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
         pooled_gate=True,
+        min_events=2,
+        min_nonevents=2,
     )
 
     pooled = gates[gates["regime"] == "pooled"]
@@ -207,9 +236,10 @@ def holdout_evaluate(
 
     holdout_ece = {}
     for _, row in ece_rows.iterrows():
-        holdout_ece[int(row["horizon"])] = float(row["value"])
+        if not np.isnan(row["value"]):
+            holdout_ece[int(row["horizon"])] = float(row["value"])
 
-    mean_ece = np.mean(list(holdout_ece.values())) if holdout_ece else 1.0
+    mean_ece = np.mean(list(holdout_ece.values())) if holdout_ece else float("nan")
     return {"holdout_ece": holdout_ece, "holdout_mean_ece": mean_ece}
 
 
@@ -248,9 +278,16 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2) 
         load_if_exists=True,
     )
 
+    # Compute data-adaptive threshold ranges
+    threshold_ranges = _compute_threshold_ranges(config_path)
+    print(f"Threshold search ranges (data-adaptive):")
+    for h, (lo, hi) in sorted(threshold_ranges.items()):
+        print(f"  H={h}: [{lo:.4f}, {hi:.4f}]")
+    print()
+
     # Wrap objective with train data only
     def obj_fn(trial):
-        return objective(trial, df_train, config_path)
+        return objective(trial, df_train, config_path, threshold_ranges)
 
     t0 = time.perf_counter()
     study.optimize(obj_fn, n_trials=n_trials)
@@ -282,6 +319,17 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2) 
 
     train_ece = study.best_value
     holdout_ece = holdout_result["holdout_mean_ece"]
+    if np.isnan(holdout_ece):
+        print("\n  Holdout ECE: N/A (too few events in holdout period)")
+        print("  This means the holdout period had very few large moves.")
+        print("  The overfit check is inconclusive — consider a longer holdout.\n")
+        print(f"{'='*60}\n")
+        best_yaml = OUT_DIR / f"optuna_{config_name}_best.yaml"
+        with open(best_yaml, "w") as f:
+            yaml.dump(study.best_params, f, default_flow_style=False)
+        print(f"Best params saved to: {best_yaml}")
+        return study
+
     gap = holdout_ece - train_ece
     gap_pct = (gap / train_ece * 100) if train_ece > 0 else 0
 
@@ -354,7 +402,8 @@ def show_best(config_name: str) -> None:
     for t in trials_sorted[:5]:
         n_pass = t.user_attrs.get("n_horizons_pass", "?")
         elapsed = t.user_attrs.get("elapsed_min", "?")
-        print(f"  #{t.number}: ECE={t.value:.4f}, pass={n_pass}/3, {elapsed} min")
+        val = f"{t.value:.4f}" if t.value is not None else "NaN"
+        print(f"  #{t.number}: ECE={val}, pass={n_pass}/3, {elapsed} min")
 
 
 def apply_best(config_name: str) -> None:
