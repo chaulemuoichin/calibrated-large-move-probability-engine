@@ -229,13 +229,7 @@ otherwise:                               use mid-vol mode  (default: fixed_pct)
 
 For a prediction made on date `t` with horizon `H` trading days:
 
-$$
-\mathrm{event}_t^{(H)} =
-\begin{cases}
-1,& \left|\frac{P_{t+H}}{P_t}-1\right|\ge \tau \\
-0,& \text{otherwise}
-\end{cases}
-$$
+$$\mathrm{event}_t^{(H)}=\begin{cases}1,& \left|\frac{P_{t+H}}{P_t}-1\right|\ge \tau \\ 0,& \text{otherwise}\end{cases}$$
 
 This is **two-sided**: both large up-moves and large down-moves count.
 
