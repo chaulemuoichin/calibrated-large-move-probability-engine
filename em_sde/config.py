@@ -74,6 +74,11 @@ class ModelConfig:
     hmm_n_regimes: int = 2               # Number of HMM states (2 = low/high vol)
     hmm_vol_blend: float = 0.5           # Blend weight: 0=pure GARCH, 1=pure HMM sigma
     hmm_refit_interval: int = 63         # Refit HMM every N days (not every day — too slow)
+    # HAR-RV volatility model (replaces GARCH sigma forecast)
+    har_rv: bool = False                  # Enable HAR-RV sigma engine
+    har_rv_min_window: int = 252          # Minimum returns for HAR-RV fitting
+    har_rv_refit_interval: int = 21       # Refit HAR-RV every N trading days
+    har_rv_ridge_alpha: float = 0.01      # Ridge regularization strength
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 
@@ -217,6 +222,11 @@ def _validate(cfg: PipelineConfig):
         assert cfg.model.hmm_n_regimes >= 2, "hmm_n_regimes must be >= 2"
         assert 0.0 <= cfg.model.hmm_vol_blend <= 1.0, "hmm_vol_blend must be in [0, 1]"
         assert cfg.model.hmm_refit_interval >= 1, "hmm_refit_interval must be >= 1"
+
+    if cfg.model.har_rv:
+        assert cfg.model.har_rv_min_window >= 66, "har_rv_min_window must be >= 66"
+        assert cfg.model.har_rv_refit_interval >= 1, "har_rv_refit_interval must be >= 1"
+        assert cfg.model.har_rv_ridge_alpha > 0, "har_rv_ridge_alpha must be positive"
 
     assert cfg.model.garch_model_type in ("garch", "gjr"), \
         f"garch_model_type must be 'garch' or 'gjr', got {cfg.model.garch_model_type}"

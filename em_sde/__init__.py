@@ -30,6 +30,9 @@ __all__ = [
     "HmmRegimeResult",
     "fit_hmm_regime",
     "hmm_adjusted_sigma",
+    "HarRvResult",
+    "fit_har_rv",
+    "compute_realized_variance",
     # Monte Carlo
     "simulate_gbm_terminal",
     "simulate_garch_terminal",
@@ -82,7 +85,7 @@ from .config import (
     load_config,
 )
 from .data_layer import load_data, run_data_quality_checks
-from .garch import fit_garch, GarchResult, garch_diagnostics, project_to_stationary, ewma_volatility, garch_term_structure_vol, HmmRegimeResult, fit_hmm_regime, hmm_adjusted_sigma
+from .garch import fit_garch, GarchResult, garch_diagnostics, project_to_stationary, ewma_volatility, garch_term_structure_vol, HmmRegimeResult, fit_hmm_regime, hmm_adjusted_sigma, HarRvResult, fit_har_rv, compute_realized_variance
 from .monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, compute_state_dependent_jumps
 from .calibration import HistogramCalibrator, IsotonicCalibrator, OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
 from .backtest import run_walkforward, compute_backtest_analytics

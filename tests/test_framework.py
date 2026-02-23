@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from em_sde.monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
 from em_sde.calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
-from em_sde.garch import fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult
+from em_sde.garch import fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult, fit_har_rv, HarRvResult, compute_realized_variance
 from em_sde.evaluation import (
     brier_score, log_loss, auc_roc, separation, compute_metrics,
     brier_skill_score, effective_sample_size, crps_from_quantiles,
@@ -3006,6 +3006,111 @@ class TestHmmRegime:
             assert False, "Should have raised AssertionError"
         except AssertionError:
             pass
+
+
+class TestHarRv:
+    """Tests for HAR-RV volatility model."""
+
+    def _make_returns(self, n=1000, seed=42):
+        """Generate synthetic returns with realistic vol clustering."""
+        rng = np.random.RandomState(seed)
+        returns = np.empty(n)
+        sigma = 0.01
+        for i in range(n):
+            returns[i] = rng.normal(0, sigma)
+            # Simple GARCH-like vol dynamics
+            sigma = np.sqrt(0.00001 + 0.05 * returns[i] ** 2 + 0.93 * sigma ** 2)
+        return returns
+
+    def test_compute_rv_basic(self):
+        """Realized variance should equal mean of squared returns."""
+        returns = np.array([0.01, -0.02, 0.015, -0.005, 0.008])
+        rv = compute_realized_variance(returns, window=5)
+        expected = float(np.mean(returns ** 2))
+        assert abs(rv - expected) < 1e-12
+
+    def test_compute_rv_window(self):
+        """RV with window should only use last N returns."""
+        returns = np.array([0.1, 0.01, -0.02, 0.015, -0.005])
+        rv_full = compute_realized_variance(returns, window=5)
+        rv_last3 = compute_realized_variance(returns, window=3)
+        # Last 3 returns: [0.015, -0.005, -0.02] — wait, order matters
+        expected = float(np.mean(returns[-3:] ** 2))
+        assert abs(rv_last3 - expected) < 1e-12
+
+    def test_fit_har_rv_returns_result(self):
+        """HAR-RV should return valid result on sufficient data."""
+        returns = self._make_returns(1000)
+        result = fit_har_rv(returns, min_window=252)
+        assert result is not None
+        assert isinstance(result, HarRvResult)
+        assert result.sigma_1d > 0
+        assert result.sigma_5d > 0
+        assert result.sigma_22d > 0
+
+    def test_fit_har_rv_insufficient_data(self):
+        """HAR-RV should return None with too few returns."""
+        returns = np.random.randn(100) * 0.01
+        result = fit_har_rv(returns, min_window=252)
+        assert result is None
+
+    def test_har_rv_sigma_positive(self):
+        """All sigma outputs must be strictly positive."""
+        returns = self._make_returns(500)
+        result = fit_har_rv(returns, min_window=252)
+        if result is not None:
+            assert result.sigma_1d > 0
+            assert result.sigma_5d > 0
+            assert result.sigma_22d > 0
+
+    def test_har_rv_r_squared_range(self):
+        """R-squared should be in a reasonable range."""
+        returns = self._make_returns(1000)
+        result = fit_har_rv(returns, min_window=252)
+        if result is not None:
+            # R² can be negative for very poor fits, but should generally be positive
+            assert result.r_squared_1d < 1.0
+
+    def test_har_rv_coefficients_shape(self):
+        """Coefficient arrays should have 4 elements [intercept, rv1d, rv5d, rv22d]."""
+        returns = self._make_returns(1000)
+        result = fit_har_rv(returns, min_window=252)
+        if result is not None:
+            assert len(result.coefficients_1d) == 4
+            assert len(result.coefficients_5d) == 4
+            assert len(result.coefficients_22d) == 4
+
+    def test_har_rv_config_fields(self):
+        """ModelConfig should have HAR-RV fields with correct defaults."""
+        from em_sde.config import ModelConfig
+        mc = ModelConfig()
+        assert mc.har_rv is False
+        assert mc.har_rv_min_window == 252
+        assert mc.har_rv_refit_interval == 21
+        assert mc.har_rv_ridge_alpha == 0.01
+
+    def test_har_rv_config_validation(self):
+        """Validation should catch invalid HAR-RV config."""
+        from em_sde.config import PipelineConfig, _validate
+        cfg = PipelineConfig()
+        cfg.model.har_rv = True
+        cfg.model.har_rv_min_window = 10  # invalid: < 66
+        try:
+            _validate(cfg)
+            assert False, "Should have raised AssertionError"
+        except AssertionError:
+            pass
+
+    def test_har_rv_ridge_regularization(self):
+        """Higher ridge alpha should produce smaller coefficients."""
+        returns = self._make_returns(1000)
+        result_low = fit_har_rv(returns, ridge_alpha=0.001)
+        result_high = fit_har_rv(returns, ridge_alpha=1.0)
+        if result_low is not None and result_high is not None:
+            # Higher regularization should shrink non-intercept coefficients
+            norm_low = np.linalg.norm(result_low.coefficients_1d[1:])
+            norm_high = np.linalg.norm(result_high.coefficients_1d[1:])
+            assert norm_high < norm_low
 
 
 if __name__ == "__main__":

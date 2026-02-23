@@ -48,6 +48,10 @@ model:
   hmm_n_regimes: 2
   hmm_vol_blend: 0.2
   hmm_refit_interval: 63
+  har_rv: true
+  har_rv_min_window: 252
+  har_rv_refit_interval: 21
+  har_rv_ridge_alpha: 0.01
   mc_vol_term_structure: true
   mc_regime_t_df: true
   mc_regime_t_df_low: 8.0

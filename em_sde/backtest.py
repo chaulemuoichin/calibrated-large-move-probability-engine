@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult, fit_har_rv, HarRvResult
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -180,6 +180,10 @@ def run_walkforward(
     hmm_n_regimes = cfg.model.hmm_n_regimes
     hmm_vol_blend = cfg.model.hmm_vol_blend
     hmm_refit_interval = cfg.model.hmm_refit_interval
+    har_rv_enabled = cfg.model.har_rv
+    har_rv_min_window = cfg.model.har_rv_min_window
+    har_rv_refit_interval = cfg.model.har_rv_refit_interval
+    har_rv_ridge_alpha = cfg.model.har_rv_ridge_alpha
     fixed_pct_by_horizon = cfg.model.regime_gated_fixed_pct_by_horizon or {}
 
     # Regime-gated threshold router
@@ -327,6 +331,10 @@ def run_walkforward(
     hmm_result: Optional[HmmRegimeResult] = None
     last_hmm_fit: int = -999  # last index where HMM was fitted
 
+    # HAR-RV volatility model state
+    har_rv_result: Optional[HarRvResult] = None
+    last_har_rv_fit: int = -999  # last index where HAR-RV was fitted
+
     logger.info(
         "Starting walk-forward: %d dates, warmup=%d, horizons=%s",
         n, warmup, horizons,
@@ -413,6 +421,23 @@ def run_walkforward(
                 row["hmm_sigma_low"] = hmm_result.sigma_low
                 row["hmm_sigma_high"] = hmm_result.sigma_high
                 row["sigma_hmm_adj"] = sigma_1d
+
+        # === HAR-RV sigma override (refit every har_rv_refit_interval days) ===
+        if har_rv_enabled:
+            if har_rv_result is None or (idx - last_har_rv_fit) >= har_rv_refit_interval:
+                har_rv_result = fit_har_rv(
+                    available_returns,
+                    min_window=har_rv_min_window,
+                    ridge_alpha=har_rv_ridge_alpha,
+                )
+                last_har_rv_fit = idx
+
+            if har_rv_result is not None:
+                sigma_1d = har_rv_result.sigma_1d
+                row["sigma_har_rv_1d"] = har_rv_result.sigma_1d
+                row["sigma_har_rv_5d"] = har_rv_result.sigma_5d
+                row["sigma_har_rv_22d"] = har_rv_result.sigma_22d
+                row["har_rv_r2"] = har_rv_result.r_squared_1d
 
         # Compute auxiliary features for multi-feature calibration (walk-forward safe)
         sigma_history.append(sigma_1d)
@@ -502,17 +527,29 @@ def run_walkforward(
             step_jump_vol = jump_vol
 
         # === Step 5b: Per-horizon sigma (term structure) and regime t_df ===
-        # WS1: Use GARCH term-structure average vol per horizon
         sigma_per_h: Dict[int, float] = {}
-        for H in horizons:
-            if mc_vol_term_structure and garch_result.omega is not None:
-                sigma_per_h[H] = garch_term_structure_vol(
-                    sigma_1d, garch_result.omega, garch_result.alpha,
-                    garch_result.beta, garch_result.gamma, H,
-                    model_type=garch_model_type,
-                )
-            else:
-                sigma_per_h[H] = sigma_1d
+        if har_rv_enabled and har_rv_result is not None:
+            # HAR-RV provides horizon-specific sigma directly
+            for H in horizons:
+                if H <= 5:
+                    sigma_per_h[H] = har_rv_result.sigma_5d
+                elif H <= 10:
+                    # Interpolate between 5d and 22d
+                    w = (H - 5) / (22 - 5)
+                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_5d + w * har_rv_result.sigma_22d
+                else:
+                    sigma_per_h[H] = har_rv_result.sigma_22d
+        else:
+            # WS1: Use GARCH term-structure average vol per horizon
+            for H in horizons:
+                if mc_vol_term_structure and garch_result.omega is not None:
+                    sigma_per_h[H] = garch_term_structure_vol(
+                        sigma_1d, garch_result.omega, garch_result.alpha,
+                        garch_result.beta, garch_result.gamma, H,
+                        model_type=garch_model_type,
+                    )
+                else:
+                    sigma_per_h[H] = sigma_1d
 
         # WS3: Regime-conditional t_df
         if mc_regime_t_df and len(sigma_history) >= 50:

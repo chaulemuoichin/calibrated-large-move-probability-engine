@@ -32,6 +32,7 @@ Raw Prices
   |
   v
 Daily Returns  ──>  GARCH/GJR-GARCH fit  ──>  sigma_1d (today's vol forecast)
+               ──>  HAR-RV fit (optional) ──>  sigma_1d/5d/22d (horizon-specific)
                                                    |
                                                    v
                                             Threshold ("what counts as a large move?")
@@ -198,6 +199,46 @@ where $w$ = `hmm_vol_blend` (default 0.5). This preserves GARCH's short-term for
 - `hmm_refit_interval: 20` — refit every N days
 
 **File:** `em_sde/garch.py` (`fit_hmm_regime`, `hmm_adjusted_sigma`, `HmmRegimeResult`)
+
+### HAR-RV Volatility Model (`har_rv`)
+
+When `har_rv: true`, a Heterogeneous AutoRegressive Realized Variance model (Corsi, 2009) replaces GARCH as the primary sigma engine. This directly addresses the root cause of `p_raw` bias: GARCH persistence (~0.97) keeps sigma elevated after vol spikes, but HAR-RV uses actual realized variance which mean-reverts at the correct speed.
+
+**Model**: Three separate ridge regressions, one per forecast horizon:
+
+$$RV_{t+1}^{(h)} = \beta_0 + \beta_1 \cdot RV_{1d,t} + \beta_2 \cdot RV_{5d,t} + \beta_3 \cdot RV_{22d,t}$$
+
+Where:
+- $RV_{1d} = r_t^2$ (daily realized variance)
+- $RV_{5d} = \frac{1}{5}\sum_{i=0}^{4} r_{t-i}^2$ (weekly average)
+- $RV_{22d} = \frac{1}{22}\sum_{i=0}^{21} r_{t-i}^2$ (monthly average)
+
+**Three regressions produce horizon-specific forecasts**:
+- **1-day target**: $RV_{t+1}$ → `sigma_1d`
+- **5-day target**: $\text{mean}(RV_{t+1} \ldots RV_{t+5})$ → `sigma_5d`
+- **22-day target**: $\text{mean}(RV_{t+1} \ldots RV_{t+22})$ → `sigma_22d`
+
+This is the key advantage over GARCH: each forecast horizon gets its own optimized sigma, eliminating the horizon-conflicted blend problem that limited HMM.
+
+**Horizon-specific sigma mapping**:
+- H=5: uses `sigma_5d`
+- H=10: interpolates between `sigma_5d` and `sigma_22d`
+- H=20: uses `sigma_22d`
+
+**Integration with existing pipeline**:
+- GARCH is still fitted (provides omega/alpha/beta for GARCH-in-sim MC dynamics)
+- HAR-RV overrides `sigma_1d` and `sigma_per_h` for MC initial conditions
+- HMM can still blend on top if enabled
+- Multi-feature calibration features (vol_ratio, delta_sigma) use HAR-RV sigma
+
+**Config fields** (in `model` section):
+
+- `har_rv: true` — enable HAR-RV sigma engine
+- `har_rv_min_window: 252` — minimum returns for fitting
+- `har_rv_refit_interval: 21` — refit every N days
+- `har_rv_ridge_alpha: 0.01` — ridge regularization strength
+
+**File:** `em_sde/garch.py` (`fit_har_rv`, `HarRvResult`, `compute_realized_variance`)
 
 ---
 
@@ -743,7 +784,7 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 2. **No transaction costs or market impact.** This is a probability engine, not a trading simulator.
 
-3. **GARCH assumes a single volatility regime.** Structural breaks (e.g., 2020 COVID crash) can cause parameter instability. The stationarity projection mitigates but doesn't eliminate this. HMM regime detection (when enabled) provides probabilistic regime awareness, but the sigma blending is horizon-conflicted: short horizons (H=5) benefit from low blend weights while long horizons (H=20) need higher blend weights.
+3. **GARCH persistence bias.** GARCH persistence (~0.97) keeps sigma elevated after vol spikes, causing p_raw to be systematically biased upward. HAR-RV (when enabled) directly addresses this by using realized variance which mean-reverts at the correct speed and provides horizon-specific sigma forecasts. HMM regime detection can complement HAR-RV but its sigma blending is horizon-conflicted when used alone.
 
 4. **Overlapping predictions are correlated.** A bad week shows up in H=5, H=10, and H=20 predictions simultaneously. Always check N_eff, not raw N.
 
@@ -763,9 +804,10 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 The system includes an Optuna-based Bayesian optimization script for jointly tuning hyperparameters. This addresses the problem of manual tuning reaching its limit — e.g., HMM blend weight being horizon-conflicted (short horizons need low blend, long horizons need high blend).
 
-### Search Space (12 parameters)
+### Search Space (14 parameters)
 
 - **HMM**: `hmm_regime` (on/off), `hmm_vol_blend` [0, 0.6], `hmm_refit_interval` [21, 126]
+- **HAR-RV**: `har_rv` (on/off), `har_rv_ridge` [0.001, 0.1], `har_rv_refit` [5, 63]
 - **Student-t df**: `t_df_low` [5, 15], `t_df_mid` [3, 8], `t_df_high` [2.5, 6]
 - **Thresholds**: per-horizon `thr_5`, `thr_10`, `thr_20` (ranges around current values)
 - **Calibration**: `multi_feature_lr` [0.002, 0.05], `multi_feature_l2` [1e-5, 1e-2]
@@ -792,7 +834,7 @@ Each config (cluster, jump) is optimized independently since they have different
 | File | What it does |
 |------|-------------|
 | `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
-| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HMM regime detection |
+| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HMM regime detection, HAR-RV volatility model |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
 | `em_sde/calibration.py` | Online/multi-feature/regime/regime-MF/neural calibrators, histogram post-calibration, safety gates |
 | `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, HMM sigma blending |

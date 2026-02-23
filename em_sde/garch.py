@@ -9,6 +9,9 @@ Returns GarchResult with extracted parameters for GARCH-in-simulation.
 
 Includes HMM regime detection (Markov-switching variance) for
 regime-weighted volatility forecasts.
+
+Includes HAR-RV (Heterogeneous AutoRegressive Realized Variance) model
+for horizon-specific volatility forecasting (Corsi, 2009).
 """
 
 import warnings
@@ -546,3 +549,206 @@ def hmm_adjusted_sigma(
     sigma_adj = min(sigma_adj, 1.0)
 
     return sigma_adj
+
+
+# ---------------------------------------------------------------------------
+# HAR-RV: Heterogeneous AutoRegressive Realized Variance (Corsi 2009)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HarRvResult:
+    """Result from HAR-RV model fitting."""
+    sigma_1d: float          # 1-day-ahead vol forecast (decimal)
+    sigma_5d: float          # 5-day-ahead average daily vol forecast (decimal)
+    sigma_22d: float         # 22-day-ahead average daily vol forecast (decimal)
+    coefficients_1d: np.ndarray   # [beta0, beta1, beta2, beta3] for 1d target
+    coefficients_5d: np.ndarray   # [beta0, beta1, beta2, beta3] for 5d target
+    coefficients_22d: np.ndarray  # [beta0, beta1, beta2, beta3] for 22d target
+    r_squared_1d: float      # in-sample R² for 1d regression
+
+
+def compute_realized_variance(returns: NDArray[np.float64], window: int) -> float:
+    """
+    Compute realized variance as mean of squared returns over a window.
+
+    Parameters
+    ----------
+    returns : np.ndarray
+        Daily simple returns (decimal form).
+    window : int
+        Number of recent returns to average.
+
+    Returns
+    -------
+    rv : float
+        Realized variance (decimal^2 units).
+    """
+    if len(returns) < window:
+        return float(np.mean(returns ** 2))
+    return float(np.mean(returns[-window:] ** 2))
+
+
+def _build_har_features(returns: NDArray[np.float64]) -> tuple:
+    """
+    Build HAR-RV feature matrix and target vectors from returns.
+
+    Computes rolling RV at 1d, 5d, 22d windows, then constructs
+    regression targets for 1-day, 5-day, and 22-day ahead forecasts.
+
+    Returns (X, y_1d, y_5d, y_22d) where X has columns [1, RV_1d, RV_5d, RV_22d].
+    All arrays are aligned so row t predicts t+1 (or t+1..t+k for multi-day).
+    """
+    n = len(returns)
+    r2 = returns ** 2  # squared returns
+
+    # Rolling RV at different windows
+    rv_1d = r2  # daily RV = r_t^2
+    rv_5d = np.convolve(r2, np.ones(5) / 5, mode='full')[:n]
+    rv_22d = np.convolve(r2, np.ones(22) / 22, mode='full')[:n]
+
+    # Need at least 22 days of lookback for rv_22d to be valid
+    start = 21  # first valid index where all RV components are properly averaged
+
+    # Forward targets
+    # y_1d[t] = rv_1d[t+1] = r2[t+1]
+    # y_5d[t] = mean(r2[t+1]..r2[t+5])
+    # y_22d[t] = mean(r2[t+1]..r2[t+22])
+    max_t_1d = n - 2      # need at least 1 future day
+    max_t_5d = n - 6      # need at least 5 future days
+    max_t_22d = n - 23     # need at least 22 future days
+
+    if max_t_22d <= start:
+        return None, None, None, None  # insufficient data
+
+    # Build aligned arrays for the longest common range (22d target)
+    idx = np.arange(start, max_t_22d + 1)
+
+    X = np.column_stack([
+        np.ones(len(idx)),
+        rv_1d[idx],
+        rv_5d[idx],
+        rv_22d[idx],
+    ])
+
+    y_1d = r2[idx + 1]
+    y_5d = np.array([np.mean(r2[t + 1:t + 6]) for t in idx])
+    y_22d = np.array([np.mean(r2[t + 1:t + 23]) for t in idx])
+
+    return X, y_1d, y_5d, y_22d
+
+
+def _ridge_fit(X: np.ndarray, y: np.ndarray, alpha: float = 0.01) -> np.ndarray:
+    """
+    Ridge regression: beta = (X'X + alpha*I)^{-1} X'y.
+
+    No external dependencies (pure numpy).
+    """
+    n_features = X.shape[1]
+    reg = alpha * np.eye(n_features)
+    reg[0, 0] = 0.0  # don't regularize intercept
+    beta = np.linalg.solve(X.T @ X + reg, X.T @ y)
+    return beta
+
+
+def fit_har_rv(
+    returns: NDArray[np.float64],
+    min_window: int = 252,
+    ridge_alpha: float = 0.01,
+) -> Optional[HarRvResult]:
+    """
+    Fit HAR-RV model on available returns and forecast volatility.
+
+    Three separate regressions for three forecast horizons (Corsi 2009):
+        RV_target = beta0 + beta1*RV_1d + beta2*RV_5d + beta3*RV_22d
+
+    Where targets are:
+        1d:  RV_{t+1}
+        5d:  mean(RV_{t+1}...RV_{t+5})
+        22d: mean(RV_{t+1}...RV_{t+22})
+
+    Parameters
+    ----------
+    returns : np.ndarray
+        Daily simple returns (decimal form, e.g. 0.01 = 1%).
+    min_window : int
+        Minimum returns required for fitting.
+    ridge_alpha : float
+        Ridge regularization strength.
+
+    Returns
+    -------
+    HarRvResult or None
+        HAR-RV forecasts, or None if insufficient data.
+    """
+    n = len(returns)
+    if n < min_window:
+        logger.debug("HAR-RV: insufficient data (%d < %d)", n, min_window)
+        return None
+
+    data = np.asarray(returns, dtype=np.float64)
+
+    X, y_1d, y_5d, y_22d = _build_har_features(data)
+    if X is None:
+        logger.debug("HAR-RV: insufficient data for feature construction")
+        return None
+
+    if len(X) < 44:  # need reasonable sample for regression
+        logger.debug("HAR-RV: too few training samples (%d)", len(X))
+        return None
+
+    try:
+        # Fit three regressions
+        beta_1d = _ridge_fit(X, y_1d, alpha=ridge_alpha)
+        beta_5d = _ridge_fit(X, y_5d, alpha=ridge_alpha)
+        beta_22d = _ridge_fit(X, y_22d, alpha=ridge_alpha)
+
+        # Current features (last available observation)
+        r2 = data ** 2
+        rv_1d_now = r2[-1]
+        rv_5d_now = float(np.mean(r2[-5:]))
+        rv_22d_now = float(np.mean(r2[-22:]))
+        x_now = np.array([1.0, rv_1d_now, rv_5d_now, rv_22d_now])
+
+        # Forecasts (variance, then take sqrt for sigma)
+        var_1d = float(x_now @ beta_1d)
+        var_5d = float(x_now @ beta_5d)
+        var_22d = float(x_now @ beta_22d)
+
+        # Floor at small positive value
+        var_1d = max(var_1d, 1e-16)
+        var_5d = max(var_5d, 1e-16)
+        var_22d = max(var_22d, 1e-16)
+
+        sigma_1d = float(np.sqrt(var_1d))
+        sigma_5d = float(np.sqrt(var_5d))
+        sigma_22d = float(np.sqrt(var_22d))
+
+        # Safety clamp
+        sigma_1d = min(max(sigma_1d, 1e-8), 1.0)
+        sigma_5d = min(max(sigma_5d, 1e-8), 1.0)
+        sigma_22d = min(max(sigma_22d, 1e-8), 1.0)
+
+        # R² for 1d regression
+        y_pred = X @ beta_1d
+        ss_res = np.sum((y_1d - y_pred) ** 2)
+        ss_tot = np.sum((y_1d - np.mean(y_1d)) ** 2)
+        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+        logger.info(
+            "HAR-RV fit: sigma_1d=%.4f, sigma_5d=%.4f, sigma_22d=%.4f, R²=%.3f",
+            sigma_1d, sigma_5d, sigma_22d, r_squared,
+        )
+
+        return HarRvResult(
+            sigma_1d=sigma_1d,
+            sigma_5d=sigma_5d,
+            sigma_22d=sigma_22d,
+            coefficients_1d=beta_1d,
+            coefficients_5d=beta_5d,
+            coefficients_22d=beta_22d,
+            r_squared_1d=r_squared,
+        )
+
+    except Exception as e:
+        logger.debug("HAR-RV fit failed: %s", e)
+        return None
