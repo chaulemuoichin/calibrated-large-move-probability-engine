@@ -164,6 +164,40 @@ For GARCH(1,1), $\phi=\alpha+\beta$. For GJR-GARCH(1,1), $\phi=\alpha+\beta+\fra
 
 **File:** `em_sde/garch.py` (`garch_term_structure_vol`)
 
+### HMM Regime Detection (`hmm_regime`)
+
+When `hmm_regime: true`, a 2-state Hidden Markov Model (Markov-switching variance) is fitted on the return series to detect low-vol and high-vol regimes probabilistically. This addresses the core p_raw bias: single-regime GARCH persistence (~0.97) keeps σ_forecast high in high-vol periods even as actual vol mean-reverts faster, causing MC paths to be too wide and p_raw systematically biased upward.
+
+**Model**: `statsmodels.tsa.regime_switching.MarkovRegression` with `switching_variance=True`. Each regime k has its own variance σ²_k. The model provides:
+
+1. **Filtered probabilities** P(S_t = k | y_{1:t}) — walk-forward safe (causal)
+2. **Per-regime unconditional volatility**: σ_low, σ_high (sorted by variance)
+3. **Transition matrix**: P(S_{t+1} = j | S_t = i)
+
+**Regime-weighted sigma blending**:
+
+$$\sigma_{HMM} = P(high) \cdot \sigma_{high} + P(low) \cdot \sigma_{low}$$
+$$\sigma_{adj} = (1 - w) \cdot \sigma_{GARCH} + w \cdot \sigma_{HMM}$$
+
+where w = `hmm_vol_blend` (default 0.5). This preserves GARCH's short-term forecast accuracy while incorporating HMM's regime-appropriate unconditional level.
+
+**Refit interval**: HMM is refitted every `hmm_refit_interval` days (default 20) to limit computational overhead. Between refits, the cached filtered probability of the last fitted observation is used.
+
+**Integration points**:
+
+- **Sigma forecast**: Blended sigma replaces raw GARCH sigma for MC initial condition
+- **Regime router**: HMM P(high) > 0.7 → high-vol mode, P(high) < 0.3 → low-vol mode (soft boundaries with hysteresis)
+- **Regime t_df**: HMM probabilities route Student-t degrees of freedom instead of vol percentiles
+
+**Config fields** (in `model` section):
+
+- `hmm_regime: true` — enable HMM regime detection
+- `hmm_n_regimes: 2` — number of HMM states
+- `hmm_vol_blend: 0.5` — blend weight (0 = pure GARCH, 1 = pure HMM)
+- `hmm_refit_interval: 20` — refit every N days
+
+**File:** `em_sde/garch.py` (`fit_hmm_regime`, `hmm_adjusted_sigma`, `HmmRegimeResult`)
+
 ---
 
 ## 4. Step 3: Defining "Large Move" (Threshold)

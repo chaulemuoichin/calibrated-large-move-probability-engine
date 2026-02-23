@@ -69,6 +69,11 @@ class ModelConfig:
     mc_regime_t_df_low: float = 8.0    # thinner tails in low-vol
     mc_regime_t_df_mid: float = 5.0    # default
     mc_regime_t_df_high: float = 4.0   # heavier tails in high-vol
+    # HMM regime detection
+    hmm_regime: bool = False              # Enable HMM-based regime detection
+    hmm_n_regimes: int = 2               # Number of HMM states (2 = low/high vol)
+    hmm_vol_blend: float = 0.5           # Blend weight: 0=pure GARCH, 1=pure HMM sigma
+    hmm_refit_interval: int = 20         # Refit HMM every N days (not every day — too slow)
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 
@@ -207,6 +212,11 @@ def _validate(cfg: PipelineConfig):
         assert cfg.model.regime_gated_high_mode in _valid_sub, \
             f"regime_gated_high_mode must be one of {_valid_sub}"
         assert cfg.model.regime_gated_warmup >= 50, "regime_gated_warmup must be >= 50"
+
+    if cfg.model.hmm_regime:
+        assert cfg.model.hmm_n_regimes >= 2, "hmm_n_regimes must be >= 2"
+        assert 0.0 <= cfg.model.hmm_vol_blend <= 1.0, "hmm_vol_blend must be in [0, 1]"
+        assert cfg.model.hmm_refit_interval >= 1, "hmm_refit_interval must be >= 1"
 
     assert cfg.model.garch_model_type in ("garch", "gjr"), \
         f"garch_model_type must be 'garch' or 'gjr', got {cfg.model.garch_model_type}"

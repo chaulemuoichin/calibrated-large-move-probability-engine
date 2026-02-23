@@ -44,6 +44,10 @@ model:
     5: 0.025
     10: 0.035
     20: 0.04
+  hmm_regime: true
+  hmm_n_regimes: 2
+  hmm_vol_blend: 0.5
+  hmm_refit_interval: 20
   mc_vol_term_structure: true
   mc_regime_t_df: true
   mc_regime_t_df_low: 8.0
@@ -62,14 +66,11 @@ calibration:
   gate_separation_threshold: 0.0
   gate_discrimination_window: 200
   regime_conditional: false
-  calibration_method: "neural"
-  neural_hidden_size: 8
-  neural_lr: 0.005
-  neural_l2: 0.0001
-  neural_min_updates: 100
-  neural_regime_conditional: true
-  multi_feature: false
-  multi_feature_regime_conditional: false
+  multi_feature: true
+  multi_feature_lr: 0.01
+  multi_feature_l2: 0.0001
+  multi_feature_min_updates: 100
+  multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights: [0.5, 0.3, 0.2]
   histogram_n_bins: 15

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from em_sde.monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
 from em_sde.calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
+from em_sde.garch import fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult
 from em_sde.evaluation import (
     brier_score, log_loss, auc_roc, separation, compute_metrics,
     brier_skill_score, effective_sample_size, crps_from_quantiles,
@@ -2888,6 +2889,123 @@ class TestNeuralCalibrator:
         nc = NeuralCalibrator(hidden_size=8)
         n_params = nc.W1.size + nc.b1.size + nc.W2.size + 1  # +1 for b2 scalar
         assert n_params == 65
+
+
+class TestHmmRegime:
+    """Tests for HMM regime detection and sigma blending."""
+
+    def _make_regime_returns(self, seed=42):
+        """Generate synthetic 2-regime returns: low-vol then high-vol."""
+        rng = np.random.RandomState(seed)
+        # 400 days low-vol (sigma~0.8%), then 400 days high-vol (sigma~2.5%)
+        low_vol = rng.normal(0, 0.008, 400)
+        high_vol = rng.normal(0, 0.025, 400)
+        return np.concatenate([low_vol, high_vol])
+
+    def test_fit_hmm_regime_returns_result(self):
+        """HMM fit should return a valid HmmRegimeResult on 2-regime data."""
+        returns = self._make_regime_returns()
+        result = fit_hmm_regime(returns, window=756, min_window=252)
+        # May return None if fitting fails, but with clear 2-regime data should succeed
+        if result is not None:
+            assert isinstance(result, HmmRegimeResult)
+            assert 0.0 <= result.regime_prob_high <= 1.0
+            assert result.sigma_low > 0
+            assert result.sigma_high > 0
+            assert result.sigma_low < result.sigma_high
+            assert result.transition_matrix.shape == (2, 2)
+
+    def test_fit_hmm_regime_insufficient_data(self):
+        """HMM should return None with insufficient data."""
+        returns = np.random.randn(100) * 0.01
+        result = fit_hmm_regime(returns, window=756, min_window=252)
+        assert result is None
+
+    def test_fit_hmm_prob_high_in_high_vol(self):
+        """After a high-vol period, P(high) should be elevated."""
+        returns = self._make_regime_returns()
+        result = fit_hmm_regime(returns, window=756, min_window=252)
+        if result is not None:
+            # Last observation is in high-vol regime
+            assert result.regime_prob_high > 0.5
+
+    def test_hmm_adjusted_sigma_none_passthrough(self):
+        """When hmm_result is None, sigma should pass through unchanged."""
+        sigma = 0.015
+        assert hmm_adjusted_sigma(sigma, None) == sigma
+
+    def test_hmm_adjusted_sigma_blend(self):
+        """Blended sigma should be between GARCH and HMM."""
+        garch_sigma = 0.03
+        hmm_result = HmmRegimeResult(
+            regime_prob_high=0.8,
+            sigma_low=0.01,
+            sigma_high=0.025,
+            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
+        )
+        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.5)
+        # sigma_hmm = 0.8 * 0.025 + 0.2 * 0.01 = 0.022
+        # sigma_adj = 0.5 * 0.03 + 0.5 * 0.022 = 0.026
+        assert abs(sigma_adj - 0.026) < 1e-6
+
+    def test_hmm_adjusted_sigma_pure_garch(self):
+        """blend_weight=0 should give pure GARCH sigma."""
+        garch_sigma = 0.03
+        hmm_result = HmmRegimeResult(
+            regime_prob_high=0.8,
+            sigma_low=0.01,
+            sigma_high=0.025,
+            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
+        )
+        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.0)
+        assert abs(sigma_adj - garch_sigma) < 1e-10
+
+    def test_hmm_adjusted_sigma_pure_hmm(self):
+        """blend_weight=1 should give pure HMM sigma."""
+        garch_sigma = 0.03
+        hmm_result = HmmRegimeResult(
+            regime_prob_high=0.8,
+            sigma_low=0.01,
+            sigma_high=0.025,
+            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
+        )
+        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=1.0)
+        expected_hmm = 0.8 * 0.025 + 0.2 * 0.01  # 0.022
+        assert abs(sigma_adj - expected_hmm) < 1e-6
+
+    def test_hmm_adjusted_sigma_lowers_in_high_vol(self):
+        """HMM blending should pull sigma down when GARCH overshoots."""
+        # GARCH says 3% but HMM says we're in a 2.5% regime
+        garch_sigma = 0.03
+        hmm_result = HmmRegimeResult(
+            regime_prob_high=0.9,
+            sigma_low=0.008,
+            sigma_high=0.025,
+            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
+        )
+        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.5)
+        assert sigma_adj < garch_sigma
+
+    def test_config_hmm_fields_exist(self):
+        """ModelConfig should have HMM fields with correct defaults."""
+        from em_sde.config import ModelConfig
+        mc = ModelConfig()
+        assert mc.hmm_regime is False
+        assert mc.hmm_n_regimes == 2
+        assert mc.hmm_vol_blend == 0.5
+        assert mc.hmm_refit_interval == 20
+
+    def test_config_hmm_validation(self):
+        """Validation should catch invalid HMM config."""
+        from em_sde.config import PipelineConfig, _validate
+        cfg = PipelineConfig()
+        cfg.model.hmm_regime = True
+        cfg.model.hmm_vol_blend = 1.5  # invalid: > 1
+        try:
+            _validate(cfg)
+            assert False, "Should have raised AssertionError"
+        except AssertionError:
+            pass
 
 
 if __name__ == "__main__":

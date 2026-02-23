@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -176,6 +176,10 @@ def run_walkforward(
     garch_stationarity = cfg.model.garch_stationarity_constraint
     garch_target_persistence = cfg.model.garch_target_persistence
     garch_fallback_ewma = cfg.model.garch_fallback_to_ewma
+    hmm_regime = cfg.model.hmm_regime
+    hmm_n_regimes = cfg.model.hmm_n_regimes
+    hmm_vol_blend = cfg.model.hmm_vol_blend
+    hmm_refit_interval = cfg.model.hmm_refit_interval
     fixed_pct_by_horizon = cfg.model.regime_gated_fixed_pct_by_horizon or {}
 
     # Regime-gated threshold router
@@ -319,6 +323,10 @@ def run_walkforward(
     # Auxiliary feature tracking for multi-feature calibration
     sigma_history: Deque[float] = deque(maxlen=300)  # rolling sigma history
 
+    # HMM regime detection state
+    hmm_result: Optional[HmmRegimeResult] = None
+    last_hmm_fit: int = -999  # last index where HMM was fitted
+
     logger.info(
         "Starting walk-forward: %d dates, warmup=%d, horizons=%s",
         n, warmup, horizons,
@@ -390,6 +398,22 @@ def run_walkforward(
         row["sigma_source"] = garch_result.source
         row["garch_projected"] = projected
 
+        # === HMM regime detection (refit every hmm_refit_interval days) ===
+        if hmm_regime:
+            if hmm_result is None or (idx - last_hmm_fit) >= hmm_refit_interval:
+                hmm_result = fit_hmm_regime(
+                    available_returns, window=garch_window, min_window=garch_min,
+                    n_regimes=hmm_n_regimes,
+                )
+                last_hmm_fit = idx
+
+            if hmm_result is not None:
+                sigma_1d = hmm_adjusted_sigma(sigma_1d, hmm_result, blend_weight=hmm_vol_blend)
+                row["hmm_prob_high"] = hmm_result.regime_prob_high
+                row["hmm_sigma_low"] = hmm_result.sigma_low
+                row["hmm_sigma_high"] = hmm_result.sigma_high
+                row["sigma_hmm_adj"] = sigma_1d
+
         # Compute auxiliary features for multi-feature calibration (walk-forward safe)
         sigma_history.append(sigma_1d)
         if regime_router is not None:
@@ -422,7 +446,17 @@ def run_walkforward(
         # === Step 3: Compute thresholds ===
         thresholds = {}
         if regime_router is not None:
-            effective_mode = regime_router.get_threshold_mode(sigma_1d)
+            # HMM-aware regime routing: use filtered probabilities for soft boundaries
+            if hmm_regime and hmm_result is not None:
+                p_high = hmm_result.regime_prob_high
+                if p_high > 0.7:
+                    effective_mode = regime_router._high_mode
+                elif p_high < 0.3:
+                    effective_mode = regime_router._low_mode
+                else:
+                    effective_mode = regime_router._mid_mode
+            else:
+                effective_mode = regime_router.get_threshold_mode(sigma_1d)
             row["threshold_regime"] = effective_mode
         else:
             effective_mode = threshold_mode
@@ -482,14 +516,24 @@ def run_walkforward(
 
         # WS3: Regime-conditional t_df
         if mc_regime_t_df and len(sigma_history) >= 50:
-            vol_arr = np.sort(np.array(list(sigma_history)))
-            vol_pctile = np.searchsorted(vol_arr, sigma_1d) / len(vol_arr)
-            if vol_pctile < 0.25:
-                step_t_df = mc_regime_t_df_low
-            elif vol_pctile > 0.75:
-                step_t_df = mc_regime_t_df_high
+            if hmm_regime and hmm_result is not None:
+                # Use HMM filtered probabilities for smoother regime routing
+                p_high = hmm_result.regime_prob_high
+                if p_high > 0.7:
+                    step_t_df = mc_regime_t_df_high
+                elif p_high < 0.3:
+                    step_t_df = mc_regime_t_df_low
+                else:
+                    step_t_df = mc_regime_t_df_mid
             else:
-                step_t_df = mc_regime_t_df_mid
+                vol_arr = np.sort(np.array(list(sigma_history)))
+                vol_pctile = np.searchsorted(vol_arr, sigma_1d) / len(vol_arr)
+                if vol_pctile < 0.25:
+                    step_t_df = mc_regime_t_df_low
+                elif vol_pctile > 0.75:
+                    step_t_df = mc_regime_t_df_high
+                else:
+                    step_t_df = mc_regime_t_df_mid
         else:
             step_t_df = t_df
 
