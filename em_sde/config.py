@@ -73,7 +73,7 @@ class ModelConfig:
     hmm_regime: bool = False              # Enable HMM-based regime detection
     hmm_n_regimes: int = 2               # Number of HMM states (2 = low/high vol)
     hmm_vol_blend: float = 0.5           # Blend weight: 0=pure GARCH, 1=pure HMM sigma
-    hmm_refit_interval: int = 20         # Refit HMM every N days (not every day — too slow)
+    hmm_refit_interval: int = 63         # Refit HMM every N days (not every day — too slow)
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
 
 

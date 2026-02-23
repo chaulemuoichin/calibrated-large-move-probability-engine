@@ -443,40 +443,35 @@ def fit_hmm_regime(
                 switching_variance=True,
             )
             result = model.fit(
-                search_reps=10,
-                em_iter=100,
+                search_reps=3,
+                em_iter=30,
                 disp=False,
             )
 
-        # Extract per-regime variance (in pct^2 units)
-        # MarkovRegression stores sigma2 per regime in params
-        # sigma2[k] = result.params[f'sigma2[{k}]'] for regime k
-        regime_variances = []
-        for k in range(n_regimes):
-            key = f"sigma2[{k}]"
-            if key in result.params.index:
-                regime_variances.append(float(result.params[key]))
-            else:
-                logger.debug("HMM: missing variance param %s", key)
-                return None
+        # Extract per-regime variance from params array.
+        # Layout for 2 regimes: [p[0->0], p[1->0], const_0, const_1, sigma2_0, sigma2_1]
+        # For k regimes: last k params are sigma2 values, preceded by k const values,
+        # preceded by k*(k-1) transition params.
+        params = np.asarray(result.params, dtype=np.float64)
+        # sigma2 values are the last n_regimes entries
+        regime_variances = [float(params[-(n_regimes - k)]) for k in range(n_regimes)]
 
-        # Sort regimes by variance: regime 0 = low-vol, regime 1 = high-vol
+        # Sort regimes by variance: index 0 = low-vol, index -1 = high-vol
         sort_idx = np.argsort(regime_variances)
         regime_variances_sorted = [regime_variances[sort_idx[i]] for i in range(n_regimes)]
 
         # Per-regime sigma in decimal units (sqrt(var_pct) / 100)
-        sigmas = [float(np.sqrt(v)) / 100.0 for v in regime_variances_sorted]
+        sigmas = [float(np.sqrt(max(v, 1e-16))) / 100.0 for v in regime_variances_sorted]
 
         # Filtered probabilities: P(S_t = k | y_{1:t}) — walk-forward safe
         filtered_probs = result.filtered_marginal_probabilities
         # filtered_probs shape: (T, n_regimes)
-        # Last observation's probability of being in high-vol state
         high_regime_idx = sort_idx[-1]  # original index of highest-variance regime
         prob_high = float(filtered_probs[-1, high_regime_idx])
 
-        # Transition matrix (reorder to match sorted regime labels)
-        raw_transition = result.regime_transition
-        # raw_transition[i,j] = P(S_t=j | S_{t-1}=i)
+        # Transition matrix (regime_transition has shape (k, k, 1) — squeeze last dim)
+        raw_transition = np.squeeze(result.regime_transition)
+        # Reorder to match sorted regime labels
         trans = np.zeros((n_regimes, n_regimes))
         for i in range(n_regimes):
             for j in range(n_regimes):

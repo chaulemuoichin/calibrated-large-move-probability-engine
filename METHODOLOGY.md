@@ -20,7 +20,8 @@ If something here does not match the code, the code wins and this document needs
 10. [Step 9: Model Selection and Promotion](#10-step-9-model-selection-and-promotion)
 11. [Mathematical Reference](#11-mathematical-reference)
 12. [Known Limitations and Assumptions](#12-known-limitations-and-assumptions)
-13. [File Map](#13-file-map)
+13. [Bayesian Hyperparameter Optimization](#13-bayesian-hyperparameter-optimization)
+14. [File Map](#14-file-map)
 
 ---
 
@@ -742,7 +743,7 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 2. **No transaction costs or market impact.** This is a probability engine, not a trading simulator.
 
-3. **GARCH assumes a single volatility regime.** Structural breaks (e.g., 2020 COVID crash) can cause parameter instability. The stationarity projection mitigates but doesn't eliminate this.
+3. **GARCH assumes a single volatility regime.** Structural breaks (e.g., 2020 COVID crash) can cause parameter instability. The stationarity projection mitigates but doesn't eliminate this. HMM regime detection (when enabled) provides probabilistic regime awareness, but the sigma blending is horizon-conflicted: short horizons (H=5) benefit from low blend weights while long horizons (H=20) need higher blend weights.
 
 4. **Overlapping predictions are correlated.** A bad week shows up in H=5, H=10, and H=20 predictions simultaneously. Always check N_eff, not raw N.
 
@@ -756,18 +757,50 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 ---
 
-## 13. File Map
+## 13. Bayesian Hyperparameter Optimization
+
+**File:** `scripts/run_bayesian_opt.py`
+
+The system includes an Optuna-based Bayesian optimization script for jointly tuning hyperparameters. This addresses the problem of manual tuning reaching its limit — e.g., HMM blend weight being horizon-conflicted (short horizons need low blend, long horizons need high blend).
+
+### Search Space (12 parameters)
+
+- **HMM**: `hmm_regime` (on/off), `hmm_vol_blend` [0, 0.6], `hmm_refit_interval` [21, 126]
+- **Student-t df**: `t_df_low` [5, 15], `t_df_mid` [3, 8], `t_df_high` [2.5, 6]
+- **Thresholds**: per-horizon `thr_5`, `thr_10`, `thr_20` (ranges around current values)
+- **Calibration**: `multi_feature_lr` [0.002, 0.05], `multi_feature_l2` [1e-5, 1e-2]
+- **GARCH**: `garch_target_persistence` [0.95, 0.995]
+
+### Objective
+
+Minimize **mean pooled ECE across all horizons** via 5-fold expanding-window CV. The optimizer uses Optuna's TPE (Tree-structured Parzen Estimator) sampler with SQLite-backed persistence for resume capability.
+
+### Usage
+
+```bash
+python scripts/run_bayesian_opt.py cluster --n-trials 15   # ~5 hours
+python scripts/run_bayesian_opt.py cluster --show-best      # view results
+python scripts/run_bayesian_opt.py cluster --apply           # write best to YAML
+```
+
+Each config (cluster, jump) is optimized independently since they have different data characteristics.
+
+---
+
+## 14. File Map
 
 | File | What it does |
 |------|-------------|
 | `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
-| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection |
+| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HMM regime detection |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
-| `em_sde/calibration.py` | Online/multi-feature/regime/regime-MF calibrators, histogram post-calibration, safety gates |
-| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing |
+| `em_sde/calibration.py` | Online/multi-feature/regime/regime-MF/neural calibrators, histogram post-calibration, safety gates |
+| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, HMM sigma blending |
 | `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
-| `tests/test_framework.py` | 201 unit tests |
+| `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
+| `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
+| `tests/test_framework.py` | 211 unit tests |

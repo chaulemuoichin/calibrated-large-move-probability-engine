@@ -2993,7 +2993,7 @@ class TestHmmRegime:
         assert mc.hmm_regime is False
         assert mc.hmm_n_regimes == 2
         assert mc.hmm_vol_blend == 0.5
-        assert mc.hmm_refit_interval == 20
+        assert mc.hmm_refit_interval == 63
 
     def test_config_hmm_validation(self):
         """Validation should catch invalid HMM config."""

@@ -46,8 +46,8 @@ model:
     20: 0.04
   hmm_regime: true
   hmm_n_regimes: 2
-  hmm_vol_blend: 0.5
-  hmm_refit_interval: 20
+  hmm_vol_blend: 0.2
+  hmm_refit_interval: 63
   mc_vol_term_structure: true
   mc_regime_t_df: true
   mc_regime_t_df_low: 8.0

@@ -7,3 +7,4 @@ yfinance>=0.2.18
 pyarrow>=12.0
 pyyaml>=6.0
 pytest>=8.0
+optuna>=3.0
