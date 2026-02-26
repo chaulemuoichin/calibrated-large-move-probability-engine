@@ -43,6 +43,9 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 CONFIGS = {
     "cluster": "configs/exp_suite/exp_cluster_regime_gated.yaml",
     "jump": "configs/exp_suite/exp_jump_regime_gated.yaml",
+    "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
+    "aapl": "configs/exp_suite/exp_aapl_regime_gated.yaml",
+    "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
 }
 
 
@@ -69,58 +72,90 @@ def _compute_threshold_ranges(base_config_path: str):
 
 
 def build_trial_config(trial: optuna.Trial, base_config_path: str,
-                       threshold_ranges: dict = None):
-    """Build a config with Optuna-suggested hyperparameters."""
+                       threshold_ranges: dict = None, lean: bool = True):
+    """Build a config with Optuna-suggested hyperparameters.
+
+    Args:
+        lean: If True (default), only tune 6 high-impact parameters and fix
+              the rest at sensible defaults.  This improves N_eff/N_params
+              ratio by ~2.3x, reducing overfitting risk.
+    """
     cfg = load_config(base_config_path)
 
-    # --- HMM regime detection ---
-    cfg.model.hmm_regime = trial.suggest_categorical("hmm_regime", [True, False])
-    if cfg.model.hmm_regime:
-        cfg.model.hmm_vol_blend = trial.suggest_float("hmm_vol_blend", 0.0, 0.6)
-        cfg.model.hmm_refit_interval = trial.suggest_int("hmm_refit_interval", 21, 126)
-    else:
+    if lean:
+        # === LEAN MODE: 6 tunable parameters ===
+        # Fix well-understood params at defaults
+        cfg.model.hmm_regime = False
         cfg.model.hmm_vol_blend = 0.0
         cfg.model.hmm_refit_interval = 63
-
-    # --- Regime-conditional Student-t df ---
-    cfg.model.mc_regime_t_df_low = trial.suggest_float("t_df_low", 5.0, 15.0)
-    cfg.model.mc_regime_t_df_mid = trial.suggest_float("t_df_mid", 3.0, 8.0)
-    cfg.model.mc_regime_t_df_high = trial.suggest_float("t_df_high", 2.5, 6.0)
-
-    # --- Per-horizon threshold percentages (data-adaptive ranges) ---
-    if threshold_ranges is None:
-        threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
-    cfg.model.regime_gated_fixed_pct_by_horizon = {
-        h: trial.suggest_float(f"thr_{h}", lo, hi)
-        for h, (lo, hi) in threshold_ranges.items()
-    }
-
-    # --- Multi-feature calibration ---
-    cfg.calibration.multi_feature_lr = trial.suggest_float("mf_lr", 0.002, 0.05, log=True)
-    cfg.calibration.multi_feature_l2 = trial.suggest_float("mf_l2", 1e-5, 1e-2, log=True)
-    cfg.calibration.multi_feature_min_updates = trial.suggest_int("mf_min_updates", 50, 200)
-
-    # --- GARCH stationarity target ---
-    cfg.model.garch_target_persistence = trial.suggest_float("garch_persistence", 0.95, 0.995)
-
-    # --- HAR-RV volatility model ---
-    cfg.model.har_rv = trial.suggest_categorical("har_rv", [True, False])
-    if cfg.model.har_rv:
-        cfg.model.har_rv_ridge_alpha = trial.suggest_float("har_rv_ridge", 0.001, 0.1, log=True)
-        cfg.model.har_rv_refit_interval = trial.suggest_int("har_rv_refit", 5, 63)
-    else:
+        cfg.model.mc_regime_t_df_low = 10.0
+        cfg.model.mc_regime_t_df_mid = 5.0
+        cfg.model.mc_regime_t_df_high = 4.0
+        cfg.model.har_rv = False
         cfg.model.har_rv_ridge_alpha = 0.01
         cfg.model.har_rv_refit_interval = 21
+        cfg.calibration.multi_feature_min_updates = 63
+
+        # Tune only 6 params: 3 thresholds + garch_persistence + mf_lr + mf_l2
+        if threshold_ranges is None:
+            threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
+        cfg.model.regime_gated_fixed_pct_by_horizon = {
+            h: trial.suggest_float(f"thr_{h}", lo, hi)
+            for h, (lo, hi) in threshold_ranges.items()
+        }
+        cfg.model.garch_target_persistence = trial.suggest_float("garch_persistence", 0.95, 0.995)
+        cfg.calibration.multi_feature_lr = trial.suggest_float("mf_lr", 0.002, 0.05, log=True)
+        cfg.calibration.multi_feature_l2 = trial.suggest_float("mf_l2", 1e-5, 1e-2, log=True)
+    else:
+        # === FULL MODE: 14 tunable parameters (original) ===
+        # --- HMM regime detection ---
+        cfg.model.hmm_regime = trial.suggest_categorical("hmm_regime", [True, False])
+        if cfg.model.hmm_regime:
+            cfg.model.hmm_vol_blend = trial.suggest_float("hmm_vol_blend", 0.0, 0.6)
+            cfg.model.hmm_refit_interval = trial.suggest_int("hmm_refit_interval", 21, 126)
+        else:
+            cfg.model.hmm_vol_blend = 0.0
+            cfg.model.hmm_refit_interval = 63
+
+        # --- Regime-conditional Student-t df ---
+        cfg.model.mc_regime_t_df_low = trial.suggest_float("t_df_low", 5.0, 15.0)
+        cfg.model.mc_regime_t_df_mid = trial.suggest_float("t_df_mid", 3.0, 8.0)
+        cfg.model.mc_regime_t_df_high = trial.suggest_float("t_df_high", 2.5, 6.0)
+
+        # --- Per-horizon threshold percentages (data-adaptive ranges) ---
+        if threshold_ranges is None:
+            threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
+        cfg.model.regime_gated_fixed_pct_by_horizon = {
+            h: trial.suggest_float(f"thr_{h}", lo, hi)
+            for h, (lo, hi) in threshold_ranges.items()
+        }
+
+        # --- Multi-feature calibration ---
+        cfg.calibration.multi_feature_lr = trial.suggest_float("mf_lr", 0.002, 0.05, log=True)
+        cfg.calibration.multi_feature_l2 = trial.suggest_float("mf_l2", 1e-5, 1e-2, log=True)
+        cfg.calibration.multi_feature_min_updates = trial.suggest_int("mf_min_updates", 50, 200)
+
+        # --- GARCH stationarity target ---
+        cfg.model.garch_target_persistence = trial.suggest_float("garch_persistence", 0.95, 0.995)
+
+        # --- HAR-RV volatility model ---
+        cfg.model.har_rv = trial.suggest_categorical("har_rv", [True, False])
+        if cfg.model.har_rv:
+            cfg.model.har_rv_ridge_alpha = trial.suggest_float("har_rv_ridge", 0.001, 0.1, log=True)
+            cfg.model.har_rv_refit_interval = trial.suggest_int("har_rv_refit", 5, 63)
+        else:
+            cfg.model.har_rv_ridge_alpha = 0.01
+            cfg.model.har_rv_refit_interval = 21
 
     return cfg
 
 
 def objective(trial: optuna.Trial, df, base_config_path: str,
-              threshold_ranges: dict = None) -> float:
+              threshold_ranges: dict = None, lean: bool = True) -> float:
     """Objective function: minimize mean pooled ECE across horizons."""
     t0 = time.perf_counter()
 
-    cfg = build_trial_config(trial, base_config_path, threshold_ranges)
+    cfg = build_trial_config(trial, base_config_path, threshold_ranges, lean=lean)
     cfg_name = f"trial_{trial.number}"
 
     try:
@@ -180,23 +215,47 @@ def holdout_evaluate(
     Evaluate best BO params on a held-out test set that was never seen during
     optimization.  Returns dict with holdout ECE per horizon and overfit flag.
     """
-    from copy import deepcopy as _dc
-
-    # Build config from best params by creating a fake trial
     cfg = load_config(base_config_path)
 
-    # Apply best params manually (mirrors build_trial_config)
-    cfg.model.hmm_regime = best_params["hmm_regime"]
-    if cfg.model.hmm_regime:
-        cfg.model.hmm_vol_blend = best_params.get("hmm_vol_blend", 0.0)
-        cfg.model.hmm_refit_interval = best_params.get("hmm_refit_interval", 63)
-    else:
+    # Detect lean vs full mode based on which params are present
+    is_lean = "hmm_regime" not in best_params
+
+    if is_lean:
+        # Lean mode: fix non-tuned params at defaults
+        cfg.model.hmm_regime = False
         cfg.model.hmm_vol_blend = 0.0
         cfg.model.hmm_refit_interval = 63
+        cfg.model.mc_regime_t_df_low = 10.0
+        cfg.model.mc_regime_t_df_mid = 5.0
+        cfg.model.mc_regime_t_df_high = 4.0
+        cfg.model.har_rv = False
+        cfg.model.har_rv_ridge_alpha = 0.01
+        cfg.model.har_rv_refit_interval = 21
+        cfg.calibration.multi_feature_min_updates = 63
+    else:
+        # Full mode: apply all params
+        cfg.model.hmm_regime = best_params["hmm_regime"]
+        if cfg.model.hmm_regime:
+            cfg.model.hmm_vol_blend = best_params.get("hmm_vol_blend", 0.0)
+            cfg.model.hmm_refit_interval = best_params.get("hmm_refit_interval", 63)
+        else:
+            cfg.model.hmm_vol_blend = 0.0
+            cfg.model.hmm_refit_interval = 63
 
-    cfg.model.mc_regime_t_df_low = best_params["t_df_low"]
-    cfg.model.mc_regime_t_df_mid = best_params["t_df_mid"]
-    cfg.model.mc_regime_t_df_high = best_params["t_df_high"]
+        cfg.model.mc_regime_t_df_low = best_params["t_df_low"]
+        cfg.model.mc_regime_t_df_mid = best_params["t_df_mid"]
+        cfg.model.mc_regime_t_df_high = best_params["t_df_high"]
+        cfg.calibration.multi_feature_min_updates = best_params["mf_min_updates"]
+
+        cfg.model.har_rv = best_params.get("har_rv", False)
+        if cfg.model.har_rv:
+            cfg.model.har_rv_ridge_alpha = best_params.get("har_rv_ridge", 0.01)
+            cfg.model.har_rv_refit_interval = best_params.get("har_rv_refit", 21)
+        else:
+            cfg.model.har_rv_ridge_alpha = 0.01
+            cfg.model.har_rv_refit_interval = 21
+
+    # Common params (both lean and full)
     cfg.model.garch_target_persistence = best_params["garch_persistence"]
     cfg.model.regime_gated_fixed_pct_by_horizon = {
         5: best_params["thr_5"],
@@ -205,15 +264,6 @@ def holdout_evaluate(
     }
     cfg.calibration.multi_feature_lr = best_params["mf_lr"]
     cfg.calibration.multi_feature_l2 = best_params["mf_l2"]
-    cfg.calibration.multi_feature_min_updates = best_params["mf_min_updates"]
-
-    cfg.model.har_rv = best_params.get("har_rv", False)
-    if cfg.model.har_rv:
-        cfg.model.har_rv_ridge_alpha = best_params.get("har_rv_ridge", 0.01)
-        cfg.model.har_rv_refit_interval = best_params.get("har_rv_refit", 21)
-    else:
-        cfg.model.har_rv_ridge_alpha = 0.01
-        cfg.model.har_rv_refit_interval = 21
 
     name = f"holdout_{config_name}"
 
@@ -243,13 +293,15 @@ def holdout_evaluate(
     return {"holdout_ece": holdout_ece, "holdout_mean_ece": mean_ece}
 
 
-def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2) -> optuna.Study:
+def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
+                     lean: bool = True) -> optuna.Study:
     """Run Bayesian optimization for a single config with holdout validation."""
     config_path = CONFIGS[config_name]
     db_path = OUT_DIR / f"optuna_{config_name}.db"
+    mode = "lean (6 params)" if lean else "full (14 params)"
 
     print(f"\n{'='*60}")
-    print(f"Bayesian Optimization: {config_name}")
+    print(f"Bayesian Optimization: {config_name} [{mode}]")
     print(f"Config: {config_path}")
     print(f"Trials: {n_trials}")
     print(f"Holdout: last {holdout_pct:.0%} of data")
@@ -287,7 +339,7 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2) 
 
     # Wrap objective with train data only
     def obj_fn(trial):
-        return objective(trial, df_train, config_path, threshold_ranges)
+        return objective(trial, df_train, config_path, threshold_ranges, lean=lean)
 
     t0 = time.perf_counter()
     study.optimize(obj_fn, n_trials=n_trials)
@@ -424,40 +476,57 @@ def apply_best(config_name: str) -> None:
 
     best = study.best_params
 
-    # Apply best params to config
-    raw["model"]["hmm_regime"] = best["hmm_regime"]
-    if best["hmm_regime"]:
-        raw["model"]["hmm_vol_blend"] = round(best["hmm_vol_blend"], 4)
-        raw["model"]["hmm_refit_interval"] = best["hmm_refit_interval"]
-    else:
+    # Detect lean vs full mode based on which params are present
+    is_lean = "hmm_regime" not in best
+
+    if is_lean:
+        # Lean mode: only 6 params were tuned, fix the rest
+        raw["model"]["hmm_regime"] = False
         raw["model"]["hmm_vol_blend"] = 0.0
+        raw["model"]["hmm_refit_interval"] = 63
+        raw["model"]["mc_regime_t_df_low"] = 10.0
+        raw["model"]["mc_regime_t_df_mid"] = 5.0
+        raw["model"]["mc_regime_t_df_high"] = 4.0
+        raw["model"]["har_rv"] = False
+        raw["model"]["har_rv_ridge_alpha"] = 0.01
+        raw["model"]["har_rv_refit_interval"] = 21
+        raw["calibration"]["multi_feature_min_updates"] = 63
+    else:
+        # Full mode: apply all params
+        raw["model"]["hmm_regime"] = best["hmm_regime"]
+        if best["hmm_regime"]:
+            raw["model"]["hmm_vol_blend"] = round(best["hmm_vol_blend"], 4)
+            raw["model"]["hmm_refit_interval"] = best["hmm_refit_interval"]
+        else:
+            raw["model"]["hmm_vol_blend"] = 0.0
 
-    raw["model"]["mc_regime_t_df_low"] = round(best["t_df_low"], 1)
-    raw["model"]["mc_regime_t_df_mid"] = round(best["t_df_mid"], 1)
-    raw["model"]["mc_regime_t_df_high"] = round(best["t_df_high"], 1)
+        raw["model"]["mc_regime_t_df_low"] = round(best["t_df_low"], 1)
+        raw["model"]["mc_regime_t_df_mid"] = round(best["t_df_mid"], 1)
+        raw["model"]["mc_regime_t_df_high"] = round(best["t_df_high"], 1)
+        raw["calibration"]["multi_feature_min_updates"] = best["mf_min_updates"]
+
+        raw["model"]["har_rv"] = best.get("har_rv", False)
+        if best.get("har_rv", False):
+            raw["model"]["har_rv_ridge_alpha"] = round(best.get("har_rv_ridge", 0.01), 4)
+            raw["model"]["har_rv_refit_interval"] = best.get("har_rv_refit", 21)
+        else:
+            raw["model"]["har_rv"] = False
+
+    # Common params (both lean and full)
     raw["model"]["garch_target_persistence"] = round(best["garch_persistence"], 4)
-
     raw["model"]["regime_gated_fixed_pct_by_horizon"] = {
         5: round(best["thr_5"], 4),
         10: round(best["thr_10"], 4),
         20: round(best["thr_20"], 4),
     }
-
     raw["calibration"]["multi_feature_lr"] = round(best["mf_lr"], 6)
     raw["calibration"]["multi_feature_l2"] = round(best["mf_l2"], 6)
-    raw["calibration"]["multi_feature_min_updates"] = best["mf_min_updates"]
-
-    raw["model"]["har_rv"] = best.get("har_rv", False)
-    if best.get("har_rv", False):
-        raw["model"]["har_rv_ridge_alpha"] = round(best.get("har_rv_ridge", 0.01), 4)
-        raw["model"]["har_rv_refit_interval"] = best.get("har_rv_refit", 21)
-    else:
-        raw["model"]["har_rv"] = False
 
     with open(config_path, "w") as f:
         yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
 
-    print(f"Applied best params to {config_path}")
+    mode = "lean (6 params)" if is_lean else "full (14 params)"
+    print(f"Applied best params ({mode}) to {config_path}")
     print(f"Best mean ECE: {study.best_value:.4f}")
     print("Run gate recheck to confirm:")
     print(f"  python scripts/run_gate_recheck.py {config_name}")
@@ -465,10 +534,12 @@ def apply_best(config_name: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bayesian optimization with Optuna")
-    parser.add_argument("config", choices=["cluster", "jump"], help="Config to optimize")
+    parser.add_argument("config", choices=list(CONFIGS.keys()), help="Config to optimize")
     parser.add_argument("--n-trials", type=int, default=15, help="Number of trials")
     parser.add_argument("--show-best", action="store_true", help="Show best results")
     parser.add_argument("--apply", action="store_true", help="Apply best params to config")
+    parser.add_argument("--full", action="store_true",
+                        help="Use full 14-param search (default: lean 6-param)")
     args = parser.parse_args()
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -481,7 +552,7 @@ def main() -> int:
         apply_best(args.config)
         return 0
 
-    run_optimization(args.config, args.n_trials)
+    run_optimization(args.config, args.n_trials, lean=not args.full)
     return 0
 
 

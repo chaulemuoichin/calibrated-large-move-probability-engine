@@ -827,6 +827,26 @@ python scripts/run_bayesian_opt.py cluster --apply           # write best to YAM
 
 Each config (cluster, jump) is optimized independently since they have different data characteristics.
 
+### 13.1 Overfitting Diagnostics
+
+After BO optimization, run the overfitting diagnostic to assess whether results generalize:
+
+```bash
+python scripts/run_overfit_check.py cluster   # or jump, or both
+```
+
+This computes 5 metrics with GREEN/YELLOW/RED thresholds:
+
+| Metric | What it measures | GREEN | YELLOW | RED |
+|--------|-----------------|-------|--------|-----|
+| Generalization gap | Train CV ECE vs full-data ECE | <25% | 25-50% | >50% |
+| Cross-fold CV | ECE stability across 5 CV folds | <0.30 | 0.30-0.50 | >0.50 |
+| Threshold sensitivity | Event rate change at threshold +/-10% | <25% | 25-50% | >50% |
+| Early vs late folds | Temporal stability (expanding window) | <30% | 30-60% | >60% |
+| N_eff / N_params | Sample size adequacy for tuned params | >100x | 50-100x | <50x |
+
+Key insight: the **N_eff / N_params ratio** is the most fundamental constraint. With ~70-120 large-move events per horizon and 12-14 BO parameters, the ratio is only 10-20x, well below the 100x rule of thumb. This means BO has limited statistical budget and must be used conservatively.
+
 ---
 
 ## 14. File Map
@@ -845,4 +865,5 @@ Each config (cluster, jump) is optimized independently since they have different
 | `em_sde/run.py` | CLI entry point |
 | `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
-| `tests/test_framework.py` | 211 unit tests |
+| `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
+| `tests/test_framework.py` | 227 unit tests |

@@ -117,11 +117,21 @@ def run_single_config(name: str, config_path: str) -> None:
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else "both"
 
+    all_configs = {
+        "jump": "configs/exp_suite/exp_jump_regime_gated.yaml",
+        "cluster": "configs/exp_suite/exp_cluster_regime_gated.yaml",
+        "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
+        "aapl": "configs/exp_suite/exp_aapl_regime_gated.yaml",
+        "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
+    }
+
     configs = {}
-    if target in ("jump", "both"):
-        configs["jump"] = "configs/exp_suite/exp_jump_regime_gated.yaml"
-    if target in ("cluster", "both"):
-        configs["cluster"] = "configs/exp_suite/exp_cluster_regime_gated.yaml"
+    if target == "both":
+        configs = {k: v for k, v in all_configs.items() if k in ("jump", "cluster")}
+    elif target == "all":
+        configs = all_configs
+    elif target in all_configs:
+        configs[target] = all_configs[target]
 
     t_all = time.perf_counter()
     for name, path in configs.items():

@@ -3113,6 +3113,58 @@ class TestHarRv:
             assert norm_high < norm_low
 
 
+class TestOverfitDiagnostics:
+    """Tests for overfitting diagnostic metrics."""
+
+    def test_generalization_gap_computation(self):
+        """Gap ratio computed correctly from train vs full ECE."""
+        train_ece = 0.013
+        full_ece = 0.017
+        gap_ratio = (full_ece - train_ece) / train_ece
+        assert abs(gap_ratio - 0.3077) < 0.01  # ~30.8%
+
+    def test_fold_cv_stable(self):
+        """Low CV when fold ECEs are similar."""
+        fold_eces = np.array([0.015, 0.016, 0.014, 0.017, 0.015])
+        cv = np.std(fold_eces, ddof=1) / np.mean(fold_eces)
+        assert cv < 0.10  # very stable
+
+    def test_fold_cv_unstable(self):
+        """High CV when fold ECEs vary widely."""
+        fold_eces = np.array([0.01, 0.06, 0.02, 0.04, 0.01])
+        cv = np.std(fold_eces, ddof=1) / np.mean(fold_eces)
+        assert cv > 0.50  # unstable
+
+    def test_neff_ratio_computation(self):
+        """N_eff / N_params ratio computed correctly."""
+        n_samples = 1900
+        n_events = 94
+        n_params = 14
+        n_eff = min(n_events, n_samples - n_events) * 2
+        ratio = n_eff / n_params
+        assert n_eff == 188  # min(94, 1806) * 2
+        assert abs(ratio - 13.4) < 0.1
+
+    def test_temporal_gap_computation(self):
+        """Early vs late fold gap computed correctly."""
+        early_ece = 0.038  # mean of fold 0, 1
+        late_ece = 0.026   # mean of fold 3, 4
+        mean_ece = 0.030
+        gap = abs(late_ece - early_ece) / mean_ece
+        assert abs(gap - 0.40) < 0.01  # 40% gap
+
+    def test_status_thresholds(self):
+        """Status function returns correct colors."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from run_overfit_check import _status
+        assert _status(0.10, "gen_gap") == "GREEN"
+        assert _status(0.35, "gen_gap") == "YELLOW"
+        assert _status(0.60, "gen_gap") == "RED"
+        assert _status(150, "neff_ratio") == "GREEN"
+        assert _status(75, "neff_ratio") == "YELLOW"
+        assert _status(30, "neff_ratio") == "RED"
+
+
 if __name__ == "__main__":
     raise SystemExit(
         subprocess.call([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"])

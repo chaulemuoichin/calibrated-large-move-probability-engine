@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(python -c:*)",
-      "Bash(python scripts/run_bayesian_opt.py:*)"
+      "Bash(python scripts/run_bayesian_opt.py:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)",
+      "Bash(for t in spy aapl googl)",
+      "Bash(do echo \"=== $t ===\")",
+      "Bash(done)",
+      "Bash(wmic process:*)",
+      "Bash(tasklist:*)",
+      "Bash(python3 -m pytest tests/ -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -u scripts/run_bayesian_opt.py spy --n-trials 12)",
+      "Bash(.venv/Scripts/python.exe -c \":*)",
+      "Bash(taskkill //PID 35600 //F)",
+      "Bash(taskkill //PID 50468 //F)",
+      "Read(//c/Users/Admin/Downloads/calibrated-large-move-probability-engine/**)"
     ]
   }
 }
