@@ -2,7 +2,7 @@
 data:
   source: "yfinance"
   ticker: "TSLA"
-  start: "2010-07-01"
+  start: "2010-06-29"
   end: "2026-02-18"
   fallback_to_synthetic: true
   min_rows: 756

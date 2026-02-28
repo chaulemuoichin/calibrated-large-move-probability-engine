@@ -2,7 +2,7 @@
 data:
   source: "yfinance"
   ticker: "SPY"
-  start: "2005-01-01"
+  start: "1993-02-01"
   end: "2026-02-18"
   fallback_to_synthetic: true
   min_rows: 756

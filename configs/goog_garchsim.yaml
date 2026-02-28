@@ -2,7 +2,7 @@
 data:
   source: "yfinance"
   ticker: "GOOG"
-  start: "2005-01-01"
+  start: "2004-08-19"
   end: "2026-02-18"
   fallback_to_synthetic: true
   min_rows: 756

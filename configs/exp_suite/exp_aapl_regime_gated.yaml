@@ -23,7 +23,7 @@ model:
   garch_in_sim: true
   garch_model_type: gjr
   garch_stationarity_constraint: true
-  garch_target_persistence: 0.9867
+  garch_target_persistence: 0.9769
   jump_enabled: true
   jump_intensity: 2.0
   jump_mean: -0.02
@@ -43,22 +43,22 @@ model:
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
   regime_gated_fixed_pct_by_horizon:
-    5: 0.0769
-    10: 0.0659
-    20: 0.1633
-  hmm_regime: true
+    5: 0.075
+    10: 0.1521
+    20: 0.1901
+  hmm_regime: false
   hmm_n_regimes: 2
-  hmm_vol_blend: 0.4972
-  hmm_refit_interval: 58
+  hmm_vol_blend: 0.0
+  hmm_refit_interval: 63
   har_rv: false
   har_rv_min_window: 252
   har_rv_refit_interval: 21
   har_rv_ridge_alpha: 0.01
   mc_vol_term_structure: true
   mc_regime_t_df: true
-  mc_regime_t_df_low: 7.8
-  mc_regime_t_df_mid: 5.7
-  mc_regime_t_df_high: 3.0
+  mc_regime_t_df_low: 10.0
+  mc_regime_t_df_mid: 5.0
+  mc_regime_t_df_high: 4.0
   store_quantiles: true
 calibration:
   lr: 0.05
@@ -72,9 +72,9 @@ calibration:
   gate_discrimination_window: 200
   regime_conditional: false
   multi_feature: true
-  multi_feature_lr: 0.02402
-  multi_feature_l2: 3.9e-05
-  multi_feature_min_updates: 50
+  multi_feature_lr: 0.003305
+  multi_feature_l2: 2.9e-05
+  multi_feature_min_updates: 63
   multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights:

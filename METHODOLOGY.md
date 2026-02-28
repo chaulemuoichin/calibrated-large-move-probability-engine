@@ -847,6 +847,24 @@ This computes 5 metrics with GREEN/YELLOW/RED thresholds:
 
 Key insight: the **N_eff / N_params ratio** is the most fundamental constraint. With ~70-120 large-move events per horizon and 12-14 BO parameters, the ratio is only 10-20x, well below the 100x rule of thumb. This means BO has limited statistical budget and must be used conservatively.
 
+### 13.2 Minimum Event-Rate Guard
+
+**File:** `scripts/run_bayesian_opt.py`, `objective()` function
+
+**Problem:** The BO optimizer can select thresholds that produce event rates far below the 5-20% target range. When this happens, calibration has too few positive samples to learn from, and BSS degrades because the base-rate estimator becomes competitive. For example, AAPL BO found thresholds producing 0.6% event rate at H=10 — only 24 events in 3,870 samples.
+
+**Solution:** After CV completes in each trial, the objective function checks the mean event rate per horizon. If any horizon falls below 5%, the trial is rejected with penalty score 1.0:
+
+```python
+er_by_horizon = cv_results.groupby("horizon")["event_rate"].mean()
+if float(er_by_horizon.min()) < 0.05:
+    return 1.0  # reject trial
+```
+
+**Why 5%:** This matches the documented target range in `_compute_threshold_ranges()`. Below 5%, the number of positive events becomes too small for the calibration model to learn meaningful corrections. The search bounds from `_compute_threshold_ranges()` target this range but do not enforce it — the optimizer can still pick values at the upper end that produce very few events.
+
+**Diagnostic output:** Rejected trials log which horizons failed and their event rates, and store `rejected_reason` and `min_event_rate` as Optuna user attributes for post-hoc analysis.
+
 ---
 
 ## 14. File Map

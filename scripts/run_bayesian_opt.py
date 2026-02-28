@@ -165,6 +165,19 @@ def objective(trial: optuna.Trial, df, base_config_path: str,
         print(f"  Trial {trial.number} FAILED: {e}")
         return 1.0
 
+    # --- Minimum event-rate guard ---
+    # Reject trials where any horizon's event rate < 5%.
+    # Below this, calibration lacks positive samples and BSS degrades.
+    er_by_horizon = cv_results.groupby("horizon")["event_rate"].mean()
+    min_er = float(er_by_horizon.min())
+    if min_er < 0.05:
+        low = er_by_horizon[er_by_horizon < 0.05]
+        er_str = ", ".join(f"H={int(h)}: {r:.1%}" for h, r in low.items())
+        print(f"  Trial {trial.number} REJECTED: event rate too low ({er_str})")
+        trial.set_user_attr("rejected_reason", "low_event_rate")
+        trial.set_user_attr("min_event_rate", round(min_er, 4))
+        return 1.0
+
     # Compute pooled ECE gates
     gates = apply_promotion_gates_oof(
         oof_df,
