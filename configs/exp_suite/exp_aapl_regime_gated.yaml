@@ -43,9 +43,9 @@ model:
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
   regime_gated_fixed_pct_by_horizon:
-    5: 0.075
-    10: 0.1521
-    20: 0.1901
+    5: 0.0624
+    10: 0.1119
+    20: 0.1473
   hmm_regime: false
   hmm_n_regimes: 2
   hmm_vol_blend: 0.0

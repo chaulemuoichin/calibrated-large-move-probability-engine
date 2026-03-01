@@ -7,7 +7,7 @@
 | Ticker | Data | Rows | BO Mode | Best Trial | Mean ECE | H=5 | H=10 | H=20 | Gate Score |
 |--------|------|------|---------|------------|----------|------|------|------|------------|
 | **SPY** | 2000-2025 | 6,538 | Lean (6p) | #6 of 8 | **0.0117** | 0.0062 | 0.0167 | 0.0121 | **3/3 PASS** |
-| **AAPL** | 2000-2025 | 6,538 | Lean (6p) | #0 of 2 | **0.0065** | 0.0075 | 0.0097 | 0.0022 | **0/3 PASS** (see note) |
+| **AAPL** | 2000-2025 | 6,538 | Lean (6p) | #0 of 2 | **0.0083** | 0.0098 | 0.0158 | 0.0111 | **1/3 PASS** (H=5 only) |
 | **GOOGL** | 2004-2025 | 5,376 | Lean (6p) | #0 of 5 | **0.0094** | 0.0047 | 0.0115 | 0.0122 | 0/3 (ECE passes, BSS/AUC pending) |
 
 **Gate criteria**: ECE <= 0.02, BSS > 0.0, AUC > 0.55 (all must pass per horizon)
@@ -17,7 +17,7 @@
 | Ticker | Before (14-param BO, 3,500 rows) | After (6-param Lean BO, 6,500 rows) | Improvement |
 |--------|----------------------------------|--------------------------------------|-------------|
 | **SPY** | 3/3 PASS (ECE 0.012-0.014) | 3/3 PASS (ECE 0.006-0.017) | Maintained, now with 2x data |
-| **AAPL** | 1/3 PASS (H=10 ECE 0.024 FAIL) | **0/3 PASS** (BSS fails, event rates too low) | Needs BO re-run with event-rate guard |
+| **AAPL** | 1/3 PASS (H=10 ECE 0.024 FAIL) | **1/3 PASS** (H=5 passes; H=10/H=20 BSS fails) | Event-rate guard + adaptive thresholds helped H=5 |
 | **GOOGL** | 1/3 PASS (H=5,20 ECE 0.025 FAIL) | All ECE < 0.013 (BSS/AUC TBD) | ECE: 0.025 -> 0.005-0.012 |
 | **N_eff/N_params** | 12-31x (RED) | Expected 55-110x (YELLOW-GREEN) | ~3x improvement |
 
@@ -45,21 +45,21 @@
 
 **Dataset**: 6,538 daily observations (2000-01-03 to 2025-12-30), annualized vol ~30%
 
-**Lean Bayesian Optimization**: 2 trials (best = Trial #0)
+**Lean Bayesian Optimization**: 2 trials with adaptive event-rate guard (best = Trial #0)
 
 | Horizon | Threshold | ECE (OOF) | BSS (OOF) | AUC (OOF) | Event Rate | Status |
 |---------|-----------|-----------|-----------|-----------|------------|--------|
-| H=5     | 7.50%     | 0.0085    | -0.0002   | 0.633     | 3.6%       | FAIL (BSS) |
-| H=10    | 15.21%    | 0.0116    | -0.0316   | 0.807     | 0.6%       | FAIL (BSS) |
-| H=20    | 19.01%    | 0.0105    | -0.0754   | 0.594     | 1.1%       | FAIL (BSS) |
+| H=5     | 6.24%     | 0.0098    | +0.0036   | 0.637     | 6.6%       | **PASS** |
+| H=10    | 11.19%    | 0.0158    | -0.0431   | 0.598     | 2.4%       | FAIL (BSS) |
+| H=20    | 14.73%    | 0.0111    | -0.0102   | 0.650     | 4.0%       | FAIL (BSS) |
 
 **Best params**: garch_persistence=0.977, mf_lr=0.0033, mf_l2=0.000029
 
-**Gate recheck result: 0/3 PASS.** ECE and AUC pass all horizons, but BSS fails everywhere. Root cause: the BO-tuned thresholds are too aggressive for AAPL, producing event rates far below the 5% minimum (H=10 at 0.6% is especially extreme). With so few events, calibration looks good trivially but the model has no skill vs the base rate.
+**Gate recheck result: 1/3 PASS.** H=5 passes all 3 gates. H=10 and H=20 have excellent ECE and AUC but BSS < 0 — the model is worse than the naive base-rate predictor at longer horizons. Root cause: even with the adaptive event-rate guard, the BO found thresholds producing only 2.4% (H=10) and 4.0% (H=20) event rates in the full CV. The Monte Carlo simulator underestimates AAPL's tail moves at these horizons.
 
-**Overfitting diagnostics: HIGH RISK** (8/15 RED). N_eff/N_params ratios: H=5 47x, H=10 8x, H=20 14x (all RED, need >100x).
+**Overfitting diagnostics: HIGH RISK** (4/15 RED, 6/15 YELLOW, 5/15 GREEN). N_eff/N_params ratios: H=5 86x (YELLOW), H=10 31x (RED), H=20 51x (YELLOW). H=10 generalization gap is 160%.
 
-**Next step**: Re-run BO with the new event-rate guard (auto-rejects trials with <5% event rate on any horizon). This will force the optimizer to find thresholds that produce enough events for meaningful calibration.
+**Next steps**: Run more BO trials to find threshold combinations that produce higher event rates on H=10/H=20, or investigate GARCH model improvements (jump-diffusion, regime-switching) to better capture AAPL's tail behavior.
 
 ### GOOGL (Alphabet Inc.)
 
@@ -241,7 +241,7 @@ python scripts/run_overfit_check.py <ticker>
 | +Data-adaptive BO | 2/6 | Jump thresholds corrected, ECE passes but AUC/BSS fail |
 | +Real tickers (14-param BO) | 5/9 | SPY 3/3, AAPL 1/3, GOOGL 1/3 |
 | +Lean BO + Extended Data | 4/9 | SPY 3/3, AAPL 0/3 (event rate too low), GOOGL 1/3 |
-| **+Event-rate guard (pending)** | **TBD** | **BO now rejects trials with <5% event rate** |
+| +Adaptive event-rate guard | 5/9 | SPY 3/3, AAPL 1/3 (H=5 PASS), GOOGL 1/3 |
 
 ### Key Takeaway
 
