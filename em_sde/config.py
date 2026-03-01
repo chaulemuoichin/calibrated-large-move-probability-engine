@@ -53,7 +53,7 @@ class ModelConfig:
     jump_high_mean: float = -0.04
     jump_high_vol: float = 0.06
     # Threshold mode: controls how the large-move threshold is defined
-    threshold_mode: str = "vol_scaled"  # "vol_scaled" | "fixed_pct" | "anchored_vol" | "regime_gated"
+    threshold_mode: str = "fixed_pct"  # "fixed_pct" | "anchored_vol" | "regime_gated"
     fixed_threshold_pct: float = 0.05  # absolute return threshold (used when threshold_mode="fixed_pct")
     # Regime-gated threshold routing (routes between modes based on vol regime)
     regime_gated_low_mode: str = "fixed_pct"
@@ -69,11 +69,6 @@ class ModelConfig:
     mc_regime_t_df_low: float = 8.0    # thinner tails in low-vol
     mc_regime_t_df_mid: float = 5.0    # default
     mc_regime_t_df_high: float = 4.0   # heavier tails in high-vol
-    # HMM regime detection
-    hmm_regime: bool = False              # Enable HMM-based regime detection
-    hmm_n_regimes: int = 2               # Number of HMM states (2 = low/high vol)
-    hmm_vol_blend: float = 0.5           # Blend weight: 0=pure GARCH, 1=pure HMM sigma
-    hmm_refit_interval: int = 63         # Refit HMM every N days (not every day — too slow)
     # HAR-RV volatility model (replaces GARCH sigma forecast)
     har_rv: bool = False                  # Enable HAR-RV sigma engine
     har_rv_min_window: int = 252          # Minimum returns for HAR-RV fitting
@@ -94,8 +89,7 @@ class CalibrationConfig:
     gate_auc_threshold: float = 0.50
     gate_separation_threshold: float = 0.0
     gate_discrimination_window: int = 200
-    regime_conditional: bool = False  # enable per-vol-regime calibration
-    regime_n_bins: int = 3            # number of vol-regime bins
+    regime_n_bins: int = 3            # number of vol-regime bins (used by RegimeMultiFeatureCalibrator)
     multi_feature: bool = False       # enable multi-feature online logistic calibration
     multi_feature_lr: float = 0.01   # learning rate for multi-feature calibrator
     multi_feature_l2: float = 1e-4   # L2 regularization strength
@@ -115,13 +109,6 @@ class CalibrationConfig:
     promotion_auc_min: float = 0.55
     promotion_ece_max: float = 0.02
     promotion_pooled_gate: bool = False  # use pooled ECE gate (all regimes combined) as primary
-    # Neural calibrator (MLP): replaces multi-feature + histogram stack
-    calibration_method: str = ""         # "online" | "multi_feature" | "neural" | "" (legacy: uses multi_feature flag)
-    neural_hidden_size: int = 8          # MLP hidden layer width
-    neural_lr: float = 0.005             # learning rate (lower than MF due to more params)
-    neural_l2: float = 1e-4              # L2 regularization
-    neural_min_updates: int = 100        # warmup before calibration active
-    neural_regime_conditional: bool = False  # separate MLP per vol regime
 
 
 @dataclass
@@ -186,30 +173,20 @@ def _validate(cfg: PipelineConfig):
         assert abs(sum(cfg.calibration.ensemble_weights) - 1.0) < 1e-6, \
             "ensemble_weights must sum to 1.0"
 
-    if cfg.calibration.regime_conditional:
-        assert cfg.calibration.regime_n_bins >= 2, "regime_n_bins must be >= 2"
-
     if cfg.calibration.multi_feature_regime_conditional:
         assert cfg.calibration.multi_feature, \
             "multi_feature_regime_conditional requires multi_feature=true"
 
     if cfg.calibration.post_cal_method:
-        assert cfg.calibration.post_cal_method in ("histogram", "isotonic", "none"), \
-            f"post_cal_method must be 'histogram', 'isotonic', or 'none', got {cfg.calibration.post_cal_method!r}"
+        assert cfg.calibration.post_cal_method in ("histogram", "none"), \
+            f"post_cal_method must be 'histogram' or 'none', got {cfg.calibration.post_cal_method!r}"
 
-    if cfg.calibration.calibration_method:
-        assert cfg.calibration.calibration_method in ("online", "multi_feature", "neural"), \
-            f"calibration_method must be 'online', 'multi_feature', or 'neural', got {cfg.calibration.calibration_method!r}"
-    if cfg.calibration.neural_regime_conditional:
-        assert cfg.calibration.calibration_method == "neural", \
-            "neural_regime_conditional requires calibration_method='neural'"
-
-    assert cfg.model.threshold_mode in ("vol_scaled", "fixed_pct", "anchored_vol", "regime_gated"), \
-        f"threshold_mode must be 'vol_scaled', 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"
+    assert cfg.model.threshold_mode in ("fixed_pct", "anchored_vol", "regime_gated"), \
+        f"threshold_mode must be 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"
     if cfg.model.threshold_mode == "fixed_pct":
         assert cfg.model.fixed_threshold_pct > 0, "fixed_threshold_pct must be positive"
     if cfg.model.threshold_mode == "regime_gated":
-        _valid_sub = ("vol_scaled", "fixed_pct", "anchored_vol")
+        _valid_sub = ("fixed_pct", "anchored_vol")
         assert cfg.model.regime_gated_low_mode in _valid_sub, \
             f"regime_gated_low_mode must be one of {_valid_sub}"
         assert cfg.model.regime_gated_mid_mode in _valid_sub, \
@@ -217,11 +194,6 @@ def _validate(cfg: PipelineConfig):
         assert cfg.model.regime_gated_high_mode in _valid_sub, \
             f"regime_gated_high_mode must be one of {_valid_sub}"
         assert cfg.model.regime_gated_warmup >= 50, "regime_gated_warmup must be >= 50"
-
-    if cfg.model.hmm_regime:
-        assert cfg.model.hmm_n_regimes >= 2, "hmm_n_regimes must be >= 2"
-        assert 0.0 <= cfg.model.hmm_vol_blend <= 1.0, "hmm_vol_blend must be in [0, 1]"
-        assert cfg.model.hmm_refit_interval >= 1, "hmm_refit_interval must be >= 1"
 
     if cfg.model.har_rv:
         assert cfg.model.har_rv_min_window >= 66, "har_rv_min_window must be >= 66"

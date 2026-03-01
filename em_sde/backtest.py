@@ -25,8 +25,8 @@ import numpy.typing as npt
 import pandas as pd
 from numpy.random import SeedSequence
 
-from .calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult, fit_har_rv, HarRvResult
+from .calibration import OnlineCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
+from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_har_rv, HarRvResult
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -151,7 +151,6 @@ def run_walkforward(
     gate_disc_win = cfg.calibration.gate_discrimination_window
     ensemble_enabled = cfg.calibration.ensemble_enabled
     ensemble_weights = cfg.calibration.ensemble_weights
-    regime_conditional = cfg.calibration.regime_conditional
     regime_n_bins = cfg.calibration.regime_n_bins
     multi_feature = cfg.calibration.multi_feature
     multi_feature_lr = cfg.calibration.multi_feature_lr
@@ -164,22 +163,12 @@ def run_walkforward(
     histogram_prior_strength = cfg.calibration.histogram_prior_strength
     histogram_monotonic = cfg.calibration.histogram_monotonic
     multi_feature_regime_conditional = cfg.calibration.multi_feature_regime_conditional
-    calibration_method = cfg.calibration.calibration_method
-    neural_hidden_size = cfg.calibration.neural_hidden_size
-    neural_lr = cfg.calibration.neural_lr
-    neural_l2 = cfg.calibration.neural_l2
-    neural_min_updates = cfg.calibration.neural_min_updates
-    neural_regime_conditional = cfg.calibration.neural_regime_conditional
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
     store_quantiles = cfg.model.store_quantiles
     garch_stationarity = cfg.model.garch_stationarity_constraint
     garch_target_persistence = cfg.model.garch_target_persistence
     garch_fallback_ewma = cfg.model.garch_fallback_to_ewma
-    hmm_regime = cfg.model.hmm_regime
-    hmm_n_regimes = cfg.model.hmm_n_regimes
-    hmm_vol_blend = cfg.model.hmm_vol_blend
-    hmm_refit_interval = cfg.model.hmm_refit_interval
     har_rv_enabled = cfg.model.har_rv
     har_rv_min_window = cfg.model.har_rv_min_window
     har_rv_refit_interval = cfg.model.har_rv_refit_interval
@@ -200,9 +189,8 @@ def run_walkforward(
     # Seed sequence for reproducible parallel MC
     ss = SeedSequence(base_seed)
 
-    # Calibrators: one per horizon (multi-feature, regime-conditional, or standard)
+    # Calibrators: one per horizon (multi-feature or standard online)
     calibrators_online: Optional[Dict[int, OnlineCalibrator]] = None
-    calibrators_regime: Optional[Dict[int, RegimeCalibrator]] = None
     calibrators_mf: Optional[Dict[int, MultiFeatureCalibrator]] = None
     _mf_kwargs = dict(
         lr=multi_feature_lr,
@@ -221,32 +209,7 @@ def run_walkforward(
         histogram_monotonic=histogram_monotonic,
         post_cal_method=post_cal_method,
     )
-    _neural_kwargs = dict(
-        hidden_size=neural_hidden_size,
-        lr=neural_lr,
-        l2_reg=neural_l2,
-        min_updates=neural_min_updates,
-        safety_gate=safety_gate,
-        gate_window=gate_window,
-        gate_on_discrimination=gate_on_disc,
-        gate_auc_threshold=gate_auc_thr,
-        gate_separation_threshold=gate_sep_thr,
-        gate_discrimination_window=gate_disc_win,
-    )
-    if calibration_method == "neural" and neural_regime_conditional:
-        calibrators_mf = {
-            H: RegimeNeuralCalibrator(
-                n_bins=regime_n_bins,
-                **_neural_kwargs,
-            )
-            for H in horizons
-        }
-    elif calibration_method == "neural":
-        calibrators_mf = {
-            H: NeuralCalibrator(**_neural_kwargs)
-            for H in horizons
-        }
-    elif multi_feature and multi_feature_regime_conditional:
+    if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
             H: RegimeMultiFeatureCalibrator(
                 n_bins=regime_n_bins,
@@ -257,28 +220,6 @@ def run_walkforward(
     elif multi_feature:
         calibrators_mf = {
             H: MultiFeatureCalibrator(**_mf_kwargs)
-            for H in horizons
-        }
-    elif regime_conditional:
-        calibrators_regime = {
-            H: RegimeCalibrator(
-                n_bins=regime_n_bins,
-                lr=lr,
-                adaptive_lr=adaptive_lr,
-                min_updates=min_updates,
-                safety_gate=safety_gate,
-                gate_window=gate_window,
-                gate_on_discrimination=gate_on_disc,
-                gate_auc_threshold=gate_auc_thr,
-                gate_separation_threshold=gate_sep_thr,
-                gate_discrimination_window=gate_disc_win,
-                histogram_post_cal=histogram_post_cal,
-                histogram_n_bins=histogram_n_bins,
-                histogram_min_samples=histogram_min_samples,
-                histogram_prior_strength=histogram_prior_strength,
-                histogram_monotonic=histogram_monotonic,
-                post_cal_method=post_cal_method,
-            )
             for H in horizons
         }
     else:
@@ -327,10 +268,6 @@ def run_walkforward(
     # Auxiliary feature tracking for multi-feature calibration
     sigma_history: Deque[float] = deque(maxlen=300)  # rolling sigma history
 
-    # HMM regime detection state
-    hmm_result: Optional[HmmRegimeResult] = None
-    last_hmm_fit: int = -999  # last index where HMM was fitted
-
     # HAR-RV volatility model state
     har_rv_result: Optional[HarRvResult] = None
     last_har_rv_fit: int = -999  # last index where HAR-RV was fitted
@@ -347,11 +284,6 @@ def run_walkforward(
         if calibrators_mf is not None:
             _resolve_predictions_mf(
                 idx, prices, horizons, queues, calibrators_mf,
-                resolved_labels, results_list,
-            )
-        elif calibrators_regime is not None:
-            _resolve_predictions_regime(
-                idx, prices, horizons, queues, calibrators_regime,
                 resolved_labels, results_list,
             )
         else:
@@ -406,22 +338,6 @@ def run_walkforward(
         row["sigma_source"] = garch_result.source
         row["garch_projected"] = projected
 
-        # === HMM regime detection (refit every hmm_refit_interval days) ===
-        if hmm_regime:
-            if hmm_result is None or (idx - last_hmm_fit) >= hmm_refit_interval:
-                hmm_result = fit_hmm_regime(
-                    available_returns, window=garch_window, min_window=garch_min,
-                    n_regimes=hmm_n_regimes,
-                )
-                last_hmm_fit = idx
-
-            if hmm_result is not None:
-                sigma_1d = hmm_adjusted_sigma(sigma_1d, hmm_result, blend_weight=hmm_vol_blend)
-                row["hmm_prob_high"] = hmm_result.regime_prob_high
-                row["hmm_sigma_low"] = hmm_result.sigma_low
-                row["hmm_sigma_high"] = hmm_result.sigma_high
-                row["sigma_hmm_adj"] = sigma_1d
-
         # === HAR-RV sigma override (refit every har_rv_refit_interval days) ===
         if har_rv_enabled:
             if har_rv_result is None or (idx - last_har_rv_fit) >= har_rv_refit_interval:
@@ -458,10 +374,7 @@ def run_walkforward(
         row["vol_ratio"] = vol_ratio
         row["vol_of_vol"] = vol_of_vol
 
-        # Feed vol to regime calibrators (standard and regime-MF)
-        if calibrators_regime is not None:
-            for H in horizons:
-                calibrators_regime[H].observe_vol(sigma_1d)
+        # Feed vol to regime-MF calibrators
         if calibrators_mf is not None:
             for H in horizons:
                 cal = calibrators_mf[H]
@@ -471,17 +384,7 @@ def run_walkforward(
         # === Step 3: Compute thresholds ===
         thresholds = {}
         if regime_router is not None:
-            # HMM-aware regime routing: use filtered probabilities for soft boundaries
-            if hmm_regime and hmm_result is not None:
-                p_high = hmm_result.regime_prob_high
-                if p_high > 0.7:
-                    effective_mode = regime_router._high_mode
-                elif p_high < 0.3:
-                    effective_mode = regime_router._low_mode
-                else:
-                    effective_mode = regime_router._mid_mode
-            else:
-                effective_mode = regime_router.get_threshold_mode(sigma_1d)
+            effective_mode = regime_router.get_threshold_mode(sigma_1d)
             row["threshold_regime"] = effective_mode
         else:
             effective_mode = threshold_mode
@@ -494,8 +397,8 @@ def run_walkforward(
                 # Use expanding-window unconditional vol (changes slowly)
                 sigma_uncond = float(np.std(all_returns[:idx])) if idx > garch_min else sigma_1d
                 thr = k * sigma_uncond * np.sqrt(H)
-            else:  # vol_scaled (legacy)
-                thr = k * sigma_1d * np.sqrt(H)
+            else:
+                raise ValueError(f"Unknown threshold mode: {effective_mode!r}")
             thresholds[H] = thr
             row[f"thr_{H}"] = thr
 
@@ -553,24 +456,14 @@ def run_walkforward(
 
         # WS3: Regime-conditional t_df
         if mc_regime_t_df and len(sigma_history) >= 50:
-            if hmm_regime and hmm_result is not None:
-                # Use HMM filtered probabilities for smoother regime routing
-                p_high = hmm_result.regime_prob_high
-                if p_high > 0.7:
-                    step_t_df = mc_regime_t_df_high
-                elif p_high < 0.3:
-                    step_t_df = mc_regime_t_df_low
-                else:
-                    step_t_df = mc_regime_t_df_mid
+            vol_arr = np.sort(np.array(list(sigma_history)))
+            vol_pctile = np.searchsorted(vol_arr, sigma_1d) / len(vol_arr)
+            if vol_pctile < 0.25:
+                step_t_df = mc_regime_t_df_low
+            elif vol_pctile > 0.75:
+                step_t_df = mc_regime_t_df_high
             else:
-                vol_arr = np.sort(np.array(list(sigma_history)))
-                vol_pctile = np.searchsorted(vol_arr, sigma_1d) / len(vol_arr)
-                if vol_pctile < 0.25:
-                    step_t_df = mc_regime_t_df_low
-                elif vol_pctile > 0.75:
-                    step_t_df = mc_regime_t_df_high
-                else:
-                    step_t_df = mc_regime_t_df_mid
+                step_t_df = mc_regime_t_df_mid
         else:
             step_t_df = t_df
 
@@ -614,9 +507,6 @@ def run_walkforward(
                 p_cal = calibrators_mf[H].calibrate(
                     p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
                 state = calibrators_mf[H].state()
-            elif calibrators_regime is not None:
-                p_cal = calibrators_regime[H].calibrate(p_raw, sigma_1d)
-                state = calibrators_regime[H].state()
             else:
                 assert calibrators_online is not None
                 p_cal = calibrators_online[H].calibrate(p_raw)
@@ -682,11 +572,6 @@ def run_walkforward(
         if calibrators_mf is not None:
             _resolve_predictions_mf(
                 idx_final, prices, horizons, queues, calibrators_mf,
-                resolved_labels, results_list,
-            )
-        elif calibrators_regime is not None:
-            _resolve_predictions_regime(
-                idx_final, prices, horizons, queues, calibrators_regime,
                 resolved_labels, results_list,
             )
         else:
@@ -763,34 +648,6 @@ def _resolve_predictions_online(
                 y = 1.0 if abs(realized_ret) >= pred.threshold else 0.0
 
                 calibrators[H].update(pred.p_raw, y)
-                resolved_labels[H].append(y)
-
-                if pred.row_idx < len(results_list):
-                    results_list[pred.row_idx][f"y_{H}"] = y
-                    results_list[pred.row_idx][f"realized_return_{H}"] = realized_ret
-
-
-def _resolve_predictions_regime(
-    current_idx: int,
-    prices: npt.NDArray[np.float64],
-    horizons: List[int],
-    queues: Dict[int, Deque[PendingPrediction]],
-    calibrators: Dict[int, RegimeCalibrator],
-    resolved_labels: Dict[int, Deque[float]],
-    results_list: List[Dict[str, Any]],
-) -> None:
-    """Resolve pending predictions for regime-conditional calibrators."""
-    n = len(prices)
-    for H in horizons:
-        while queues[H] and (current_idx >= queues[H][0].price_idx + H):
-            pred = queues[H].popleft()
-            resolve_idx = pred.price_idx + H
-
-            if resolve_idx < n:
-                realized_ret = float(prices[resolve_idx] / prices[pred.price_idx] - 1.0)
-                y = 1.0 if abs(realized_ret) >= pred.threshold else 0.0
-
-                calibrators[H].update(pred.p_raw, y, pred.sigma_1d)
                 resolved_labels[H].append(y)
 
                 if pred.row_idx < len(results_list):

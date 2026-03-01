@@ -166,40 +166,6 @@ For GARCH(1,1), $\phi=\alpha+\beta$. For GJR-GARCH(1,1), $\phi=\alpha+\beta+\fra
 
 **File:** `em_sde/garch.py` (`garch_term_structure_vol`)
 
-### HMM Regime Detection (`hmm_regime`)
-
-When `hmm_regime: true`, a 2-state Hidden Markov Model (Markov-switching variance) is fitted on the return series to detect low-vol and high-vol regimes probabilistically. This addresses the core `p_raw` bias: single-regime GARCH persistence (~0.97) can keep $\sigma_{\mathrm{forecast}}$ high in high-vol periods even as realized volatility mean-reverts faster, causing MC paths to be too wide and `p_raw` to be systematically biased upward.
-
-**Model**: `statsmodels.tsa.regime_switching.MarkovRegression` with `switching_variance=True`. Each regime $k$ has its own variance $\sigma_k^2$. The model provides:
-
-1. **Filtered probabilities**: $P(S_t = k \mid y_{1:t})$ (walk-forward safe, causal)
-2. **Per-regime unconditional volatility**: $\sigma_{\mathrm{low}}, \sigma_{\mathrm{high}}$ (sorted by variance)
-3. **Transition matrix**: $P(S_{t+1} = j \mid S_t = i)$
-
-**Regime-weighted sigma blending**:
-
-$$\sigma_{\mathrm{HMM}} = P(\mathrm{high})\,\sigma_{\mathrm{high}} + P(\mathrm{low})\,\sigma_{\mathrm{low}}$$
-$$\sigma_{\mathrm{adj}} = (1 - w)\,\sigma_{\mathrm{GARCH}} + w\,\sigma_{\mathrm{HMM}}$$
-
-where $w$ = `hmm_vol_blend` (default 0.5). This preserves GARCH's short-term forecast accuracy while incorporating the HMM regime-appropriate unconditional level.
-
-**Refit interval**: HMM is refitted every `hmm_refit_interval` days (default 20) to limit computational overhead. Between refits, the cached filtered probability of the last fitted observation is used.
-
-**Integration points**:
-
-- **Sigma forecast**: Blended sigma replaces raw GARCH sigma for MC initial condition
-- **Regime router**: $P(\mathrm{high}) > 0.7$ -> high-vol mode, $P(\mathrm{high}) < 0.3$ -> low-vol mode (soft boundaries with hysteresis)
-- **Regime t_df**: HMM probabilities route Student-$t$ degrees of freedom instead of vol percentiles
-
-**Config fields** (in `model` section):
-
-- `hmm_regime: true` — enable HMM regime detection
-- `hmm_n_regimes: 2` — number of HMM states
-- `hmm_vol_blend: 0.5` — blend weight (0 = pure GARCH, 1 = pure HMM)
-- `hmm_refit_interval: 20` — refit every N days
-
-**File:** `em_sde/garch.py` (`fit_hmm_regime`, `hmm_adjusted_sigma`, `HmmRegimeResult`)
-
 ### HAR-RV Volatility Model (`har_rv`)
 
 When `har_rv: true`, a Heterogeneous AutoRegressive Realized Variance model (Corsi, 2009) replaces GARCH as the primary sigma engine. This directly addresses the root cause of `p_raw` bias: GARCH persistence (~0.97) keeps sigma elevated after vol spikes, but HAR-RV uses actual realized variance which mean-reverts at the correct speed.
@@ -248,12 +214,11 @@ This is the key advantage over GARCH: each forecast horizon gets its own optimiz
 
 Before we can estimate the probability of a "large move," we need to define what that means. The threshold is the minimum absolute return that counts as a large move.
 
-### Four Threshold Modes
+### Three Threshold Modes
 
 | Mode | Formula | When to use |
 |------|---------|-------------|
 | `fixed_pct` | $\tau = c$ (e.g., $c=5\%$) | Best for genuine discrimination — the goalpost doesn't move |
-| `vol_scaled` | $\tau = k\,\sigma_{1d}\sqrt{H}$ | Legacy mode — threshold moves with vol, making AUC ~0.50 |
 | `anchored_vol` | $\tau = k\,\sigma_{\mathrm{unconditional}}\sqrt{H}$ | Slowly-moving goalpost using historical average vol |
 | `regime_gated` | Routes between above modes based on current vol percentile | Adaptive: uses different strategy in calm vs volatile markets |
 
@@ -277,7 +242,6 @@ This is **two-sided**: both large up-moves and large down-moves count.
 
 ### Where to look for problems
 
-- `vol_scaled` makes the threshold track current vol, so high-vol periods automatically get higher thresholds. This is circular — the model is essentially asking "will vol stay high?" rather than "will a large move happen?"
 - `fixed_pct` can produce very different event rates across regimes. A 5% threshold might fire 30% of the time during a crash but 1% during calm markets. The calibrator has to handle this imbalance.
 - `regime_gated` has a 252-day warmup. During warmup it uses the mid-vol mode, which might not be optimal.
 - `regime_gated_fixed_pct_by_horizon` allows per-horizon threshold overrides (e.g., lower threshold at H=5 to ensure evaluable event counts in low-vol regimes). Default: uses the global `fixed_threshold_pct` for all horizons.
@@ -439,24 +403,6 @@ Updated via SGD with L2 regularization (prevents overfitting) and gradient clipp
 
 When `multi_feature_regime_conditional=true`, the system maintains one `MultiFeatureCalibrator` per volatility regime bin (low/mid/high vol). Regime assignment uses the same rolling sigma_1d percentile approach as `RegimeCalibrator` (walk-forward safe). Each regime-specific calibrator learns its own weight vector independently, so calibration adapts to the distinct probability-outcome relationship within each vol environment. Enabled via config flag; default off for backward compatibility.
 
-### Neural Calibrator (`calibration_method: "neural"`)
-
-Replaces the linear Multi-Feature Calibrator + Histogram post-calibration stack with a single-hidden-layer MLP that can capture nonlinear feature interactions:
-
-$$p_{\mathrm{cal},t} = \sigma\!\left(W_2^\top\,\mathrm{ReLU}\!\left(W_1^\top x_t + b_1\right) + b_2\right)$$
-
-where $x_t$ is the same 6-feature vector as the Multi-Feature Calibrator.
-
-Architecture: Input (6) → Hidden (8 neurons, ReLU) → Output (1, sigmoid). Total 65 parameters.
-
-**Identity initialization**: Neurons 0 and 1 form a ReLU pair that passes `logit(p_raw)` through exactly: `ReLU(logit(p)) - ReLU(-logit(p)) = logit(p)` → `sigmoid(logit(p)) = p`. Before any updates, the network outputs `p_raw` unchanged.
-
-**Learning**: Online SGD with backpropagation, adaptive learning rate `lr / √(1 + n)`, L2 regularization on weights, gradient clipping (max norm 10). Same safety gate and discrimination guardrail as Multi-Feature Calibrator.
-
-**Why it helps**: The linear calibrator maps `sigmoid(w·x)` — it cannot learn that high σ combined with high vol_ratio predicts a different bias than either feature alone. The hidden layer captures these interactions via `ReLU(W1·x)`, where each hidden neuron represents a nonlinear feature combination.
-
-When `neural_regime_conditional: true`, separate MLPs are maintained per vol regime (same percentile-based routing as `RegimeMultiFeatureCalibrator`).
-
 ### Safety Gate (Brier-based)
 
 If calibration makes things worse, stop doing it:
@@ -504,32 +450,6 @@ Bayesian shrinkage dampens the correction when bin sample counts are low. At 15 
 Monotonic enforcement via the Pool Adjacent Violators (PAV) algorithm ensures that higher raw predictions always map to higher corrected predictions. When adjacent bin corrections would violate this ordering, PAV pools them to their average. This provides two benefits: it guarantees AUC cannot be damaged by histogram corrections, and it reduces variance by pooling noisy adjacent bins. Enabled by default via `histogram_post_calibration: true` and `histogram_monotonic: true` in the calibration config.
 
 **File:** `em_sde/calibration.py` (`HistogramCalibrator`)
-
-### Isotonic Post-Calibration (alternative)
-
-When `post_cal_method: "isotonic"` is set, the histogram post-calibrator is replaced with online isotonic regression. Instead of additive bias corrections with Bayesian shrinkage, isotonic regression directly maps predicted probabilities to observed conditional means, enforced to be monotone non-decreasing via the Pool Adjacent Violators (PAV) algorithm.
-
-```
-For each of N equal-width bins over [0, 1]:
-    Track running mean(y) for samples in that bin.
-
-When enough bins have min_samples_per_bin observations:
-    Apply PAV to the vector of bin-level mean(y) values.
-    This produces a monotone non-decreasing step function.
-
-At prediction time:
-    Linearly interpolate on (bin_centers, fitted_values) to get p_isotonic.
-    Bins below min_samples use identity (bin center) as their value before PAV.
-```
-
-Key differences from histogram:
-- **No shrinkage parameter**: directly uses observed means (PAV provides implicit regularization through pooling)
-- **Stronger correction**: replaces predictions with observed rates rather than applying damped additive corrections
-- **Linear interpolation**: smooth output between bin centers (vs. step-function correction)
-
-Configured via `post_cal_method` in calibration config. Values: `"histogram"` (default, backward-compatible), `"isotonic"`, `"none"`.
-
-**File:** `em_sde/calibration.py` (`IsotonicCalibrator`)
 
 ### Where to look for problems
 
@@ -802,16 +722,18 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 **File:** `scripts/run_bayesian_opt.py`
 
-The system includes an Optuna-based Bayesian optimization script for jointly tuning hyperparameters. This addresses the problem of manual tuning reaching its limit — e.g., HMM blend weight being horizon-conflicted (short horizons need low blend, long horizons need high blend).
+The system includes an Optuna-based Bayesian optimization script for jointly tuning hyperparameters.
 
-### Search Space (14 parameters)
+### Search Space
 
-- **HMM**: `hmm_regime` (on/off), `hmm_vol_blend` [0, 0.6], `hmm_refit_interval` [21, 126]
-- **HAR-RV**: `har_rv` (on/off), `har_rv_ridge` [0.001, 0.1], `har_rv_refit` [5, 63]
-- **Student-t df**: `t_df_low` [5, 15], `t_df_mid` [3, 8], `t_df_high` [2.5, 6]
-- **Thresholds**: per-horizon `thr_5`, `thr_10`, `thr_20` (ranges around current values)
+**Lean mode (default, 6 params)** — recommended for anti-overfitting:
+- **Thresholds**: per-horizon `thr_5`, `thr_10`, `thr_20` (data-adaptive ranges from return percentiles)
 - **Calibration**: `multi_feature_lr` [0.002, 0.05], `multi_feature_l2` [1e-5, 1e-2]
 - **GARCH**: `garch_target_persistence` [0.95, 0.995]
+
+**Full mode (`--full`, 10 params)** — adds:
+- **HAR-RV**: `har_rv` (on/off), `har_rv_ridge` [0.001, 0.1], `har_rv_refit` [5, 63]
+- **Student-t df**: `t_df_low` [5, 15], `t_df_mid` [3, 8], `t_df_high` [2.5, 6]
 
 ### Objective
 
@@ -893,10 +815,10 @@ if float(er_by_horizon.min()) < min_er_target:
 | File | What it does |
 |------|-------------|
 | `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
-| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HMM regime detection, HAR-RV volatility model |
+| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HAR-RV volatility model (inactive) |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
-| `em_sde/calibration.py` | Online/multi-feature/regime/regime-MF/neural calibrators, histogram post-calibration, safety gates |
-| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, HMM sigma blending |
+| `em_sde/calibration.py` | Online/multi-feature/regime-MF calibrators, histogram post-calibration, safety gates |
+| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing |
 | `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
 | `em_sde/config.py` | YAML config loading and validation |
@@ -905,4 +827,4 @@ if float(er_by_horizon.min()) < min_er_target:
 | `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
 | `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
-| `tests/test_framework.py` | 227 unit tests |
+| `tests/test_framework.py` | 191 unit tests |

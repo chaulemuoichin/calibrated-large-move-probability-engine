@@ -24,7 +24,7 @@ model:
   jump_intensity: 2.0
   jump_mean: -0.02
   jump_vol: 0.04
-  threshold_mode: "vol_scaled"
+  threshold_mode: "fixed_pct"
   fixed_threshold_pct: 0.05
   store_quantiles: true
 

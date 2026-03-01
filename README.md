@@ -3,7 +3,7 @@
 A system that estimates the probability of large price moves over the next 1-4 weeks, and keeps correcting itself as real outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-191%20passing-brightgreen)
 
 ## Why This Exists 
 
@@ -88,6 +88,7 @@ All settings live in YAML files under `configs/`. Key choices:
 **What counts as a "large move"?**
 
 - `fixed_pct`: a fixed return threshold (e.g., 5%) — recommended
+- `anchored_vol`: slowly-moving threshold using historical average volatility
 - `regime_gated`: automatically switches strategy based on current volatility
 
 **How to model volatility?**
@@ -97,9 +98,10 @@ All settings live in YAML files under `configs/`. Key choices:
 
 **Optional features:**
 
-- Jump-diffusion for crash-prone stocks
-- Multi-feature calibration for richer probability correction
+- Jump-diffusion for crash-prone stocks (e.g., TSLA)
+- Multi-feature calibration with 6 features + L2 regularization
 - Fat-tailed innovations (Student-t)
+- Regime-gated thresholds for adaptive behavior across vol regimes
 
 ### Preset Configs
 
@@ -108,7 +110,6 @@ All settings live in YAML files under `configs/`. Key choices:
 | `spy_fixed.yaml` | SPY with fixed 5% threshold (recommended starting point) |
 | `goog_fixed.yaml` | GOOG with fixed 5% threshold |
 | `tsla_fixed.yaml` | TSLA with fixed 5% threshold + jumps (volatile stock) |
-| `spy.yaml` | SPY legacy vol-scaled baseline (for comparison) |
 
 ## For Collaborators
 
@@ -120,7 +121,7 @@ All settings live in YAML files under `configs/`. Key choices:
 python -m pytest tests/ -v
 ```
 
-201 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
+191 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
 
 **Runner commands (from repo root):**
 
@@ -129,18 +130,15 @@ python -m pytest tests/ -v
 python -u scripts/run_full_institutional.py
 
 # Quick checks
-python scripts/run_quick_validation.py
 python scripts/run_stress_suite.py
-python scripts/run_single_timing.py
+
+# Bayesian optimization (lean mode, 6 params)
+python scripts/run_bayesian_opt.py spy --n-trials 12
+python scripts/run_bayesian_opt.py spy --apply
 
 # CV / gate diagnostics
-# Primary governance path (OOF row-level; pooled gate by default in this script)
-python -u scripts/run_gate_recheck.py cluster
-python -u scripts/run_gate_recheck.py jump
-python -u scripts/run_remaining_cv.py
-
-# Legacy compatibility wrapper (optional)
-python scripts/legacy/calibrated_large_move_probability_engine.py --help
+python -u scripts/run_gate_recheck.py spy
+python scripts/run_overfit_check.py spy
 ```
 
 **Project layout:**
@@ -148,31 +146,30 @@ python scripts/legacy/calibrated_large_move_probability_engine.py --help
 ```text
 .gitignore
 README.md
-METHODOLOGY.md
+CLAUDE.md              Project rules and current state (for AI sessions)
+METHODOLOGY.md         Full technical methodology
+RESULTS.md             Honest results with gate pass/fail status
 requirements.txt
-data/                Versioned data assets (if used)
-em_sde/              Core library
-  data_layer.py        Data loading, caching, quality checks
-  garch.py             Volatility estimation (GARCH/GJR)
-  monte_carlo.py       Price simulation (MC paths)
-  calibration.py       Probability calibration (online learning)
-  backtest.py          Walk-forward engine (no lookahead)
-  evaluation.py        Scoring metrics (Brier, AUC, ECE, ...)
-  model_selection.py   Cross-validation, model comparison
-  config.py            YAML config system
-  output.py            Results output and charts
-  run.py               CLI entry point
-configs/             YAML configuration presets
-scripts/             Operational runners
-  run_quick_validation.py
-  run_stress_suite.py
-  run_gate_recheck.py
-  run_remaining_cv.py
-  run_full_institutional.py
-  run_single_timing.py
-  legacy/
-    calibrated_large_move_probability_engine.py
-tests/               201 unit tests
+data/                  Versioned data assets (CSV price data)
+em_sde/                Core library
+  data_layer.py          Data loading, caching, quality checks
+  garch.py               Volatility estimation (GARCH/GJR, HAR-RV)
+  monte_carlo.py         Price simulation (MC paths, jumps, fat tails)
+  calibration.py         Probability calibration (multi-feature + histogram)
+  backtest.py            Walk-forward engine (no lookahead)
+  evaluation.py          Scoring metrics (Brier, AUC, ECE, ...)
+  model_selection.py     Cross-validation, promotion gates
+  config.py              YAML config system
+  output.py              Results output and charts
+  run.py                 CLI entry point
+configs/               YAML configuration presets
+scripts/               Operational runners
+  run_bayesian_opt.py    Optuna hyperparameter optimization
+  run_gate_recheck.py    5-fold CV gate validation
+  run_overfit_check.py   Overfitting diagnostics
+  run_full_institutional.py  Full validation battery
+  run_stress_suite.py    Stress testing
+tests/                 191 unit tests
 ```
 
 ## Known Limitations

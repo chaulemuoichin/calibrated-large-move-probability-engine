@@ -26,8 +26,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from em_sde.monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
-from em_sde.calibration import OnlineCalibrator, RegimeCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
-from em_sde.garch import fit_hmm_regime, hmm_adjusted_sigma, HmmRegimeResult, fit_har_rv, HarRvResult, compute_realized_variance
+from em_sde.calibration import OnlineCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
+from em_sde.garch import fit_har_rv, HarRvResult, compute_realized_variance
 from em_sde.evaluation import (
     brier_score, log_loss, auc_roc, separation, compute_metrics,
     brier_skill_score, effective_sample_size, crps_from_quantiles,
@@ -38,7 +38,7 @@ from em_sde.config import PipelineConfig, DataConfig, ModelConfig, CalibrationCo
 from em_sde.garch import fit_garch, GarchResult, project_to_stationary, garch_term_structure_vol
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
-from em_sde.calibration import HistogramCalibrator, IsotonicCalibrator, NeuralCalibrator, RegimeNeuralCalibrator
+from em_sde.calibration import HistogramCalibrator
 from em_sde.model_selection import apply_promotion_gates, apply_promotion_gates_oof
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
@@ -964,57 +964,6 @@ class TestSeparationMetric:
 
 
 # ============================================================
-# Test: Regime Calibrator
-# ============================================================
-
-class TestRegimeCalibrator:
-    """Verify regime-conditional calibration."""
-
-    def test_assigns_different_regimes(self):
-        """Different vol levels should map to different regime bins."""
-        cal = RegimeCalibrator(n_bins=3, lr=0.05, min_updates=0)
-        # Fill vol history with known distribution
-        for v in np.linspace(0.005, 0.03, 100):
-            cal.observe_vol(v)
-
-        # Low vol should be regime 0
-        assert cal._get_regime(0.006) == 0
-        # High vol should be regime 2
-        assert cal._get_regime(0.029) == 2
-
-    def test_updates_correct_regime_calibrator(self):
-        """Updates should go to the regime-specific calibrator."""
-        cal = RegimeCalibrator(n_bins=3, lr=0.1, adaptive_lr=False, min_updates=0)
-        # Fill vol history
-        for v in np.linspace(0.005, 0.03, 100):
-            cal.observe_vol(v)
-
-        # Update in high-vol regime
-        high_vol = 0.029
-        cal.update(0.05, 1.0, high_vol)
-        # Only regime 2 calibrator should have updates
-        assert cal.calibrators[2].n_updates == 1
-        assert cal.calibrators[0].n_updates == 0
-        assert cal.calibrators[1].n_updates == 0
-
-    def test_warmup_uses_default_bin(self):
-        """During warmup, all assignments should go to bin 0."""
-        cal = RegimeCalibrator(n_bins=3, lr=0.05, min_updates=0)
-        # Only 10 observations (below warmup=50)
-        for v in np.linspace(0.005, 0.03, 10):
-            cal.observe_vol(v)
-
-        # Even a high vol should map to bin 0 during warmup
-        assert cal._get_regime(0.03) == 0
-
-    def test_config_defaults(self):
-        """Default CalibrationConfig should have regime_conditional disabled."""
-        cfg = CalibrationConfig()
-        assert cfg.regime_conditional is False
-        assert cfg.regime_n_bins == 3
-
-
-# ============================================================
 # Test: Fixed Threshold Mode (Phase 1)
 # ============================================================
 
@@ -1035,31 +984,10 @@ class TestFixedThreshold:
         assert p_high > p_low + 0.05, \
             f"Expected p_high >> p_low with fixed threshold, got {p_high:.4f} vs {p_low:.4f}"
 
-    def test_vol_scaled_produces_constant_p_raw(self):
-        """With vol_scaled threshold, p_raw is nearly constant across regimes."""
-        k = 2.0
-        H = 10
-
-        # Low vol
-        sigma_low = 0.005
-        thr_low = k * sigma_low * np.sqrt(H)
-        terminal_low = simulate_gbm_terminal(100.0, sigma_low, H, 50000, 0.0, 42)
-        p_low, _ = p_and_se(terminal_low, 100.0, thr_low)
-
-        # High vol
-        sigma_high = 0.025
-        thr_high = k * sigma_high * np.sqrt(H)
-        terminal_high = simulate_gbm_terminal(100.0, sigma_high, H, 50000, 0.0, 42)
-        p_high, _ = p_and_se(terminal_high, 100.0, thr_high)
-
-        # Vol-scaled: both should be ~4.55% (mathematical constant for k=2)
-        assert abs(p_high - p_low) < 0.02, \
-            f"Vol-scaled should produce similar p_raw, got {p_high:.4f} vs {p_low:.4f}"
-
     def test_config_defaults_backward_compatible(self):
-        """Default config should use vol_scaled (legacy behavior)."""
+        """Default config should use fixed_pct threshold mode."""
         cfg = ModelConfig()
-        assert cfg.threshold_mode == "vol_scaled"
+        assert cfg.threshold_mode == "fixed_pct"
         assert cfg.fixed_threshold_pct == 0.05
 
     def test_config_validation_threshold_mode(self):
@@ -1379,7 +1307,7 @@ class TestNewConfigDefaults:
 
     def test_threshold_mode_default(self):
         cfg = ModelConfig()
-        assert cfg.threshold_mode == "vol_scaled"
+        assert cfg.threshold_mode == "fixed_pct"
         assert cfg.fixed_threshold_pct == 0.05
         assert cfg.store_quantiles is False
 
@@ -1959,12 +1887,12 @@ class TestRegimeGatedThreshold:
         from em_sde.backtest import RegimeRouter
         router = RegimeRouter(
             warmup=100, low_mode="fixed_pct",
-            mid_mode="vol_scaled", high_mode="anchored_vol",
+            mid_mode="fixed_pct", high_mode="anchored_vol",
         )
         for v in np.linspace(0.005, 0.030, 300):
             router.observe(v)
         assert router.get_threshold_mode(0.006) == "fixed_pct"
-        assert router.get_threshold_mode(0.015) == "vol_scaled"
+        assert router.get_threshold_mode(0.015) == "fixed_pct"
         assert router.get_threshold_mode(0.029) == "anchored_vol"
 
     def test_regime_gated_config_validation(self):
@@ -1977,7 +1905,7 @@ class TestRegimeGatedThreshold:
 
     def test_regime_gated_backward_compatible(self):
         cfg = ModelConfig()
-        assert cfg.threshold_mode == "vol_scaled"
+        assert cfg.threshold_mode == "fixed_pct"
 
     def test_regime_gated_is_warmed_up_property(self):
         from em_sde.backtest import RegimeRouter
@@ -2301,107 +2229,6 @@ class TestHistogramCalibrator:
                 f"Monotonic violation: calibrate({test_inputs[i]})={outputs[i]:.4f} > "
                 f"calibrate({test_inputs[i+1]})={outputs[i+1]:.4f}"
             )
-
-
-class TestIsotonicCalibrator:
-    """Tests for IsotonicCalibrator (isotonic regression post-calibration)."""
-
-    def test_no_correction_before_min_samples(self):
-        """Before min_samples_per_bin, return input unchanged."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=15)
-        for _ in range(10):
-            ic.update(0.10, 0.0)
-        # Not enough samples → identity
-        assert abs(ic.calibrate(0.10) - 0.10) < 0.02
-
-    def test_correction_reduces_bias(self):
-        """Systematic over-prediction should be corrected downward."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=10)
-        # Feed predictions of 0.20 with actual event rate ~6%
-        for _ in range(50):
-            ic.update(0.20, 0.0)
-        for _ in range(3):
-            ic.update(0.20, 1.0)
-        corrected = ic.calibrate(0.20)
-        assert corrected < 0.20, f"Expected correction downward, got {corrected}"
-
-    def test_monotonic_output(self):
-        """Output must be monotone non-decreasing."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
-        rng = np.random.default_rng(42)
-        # Feed varied data
-        for _ in range(200):
-            p = float(rng.uniform(0.0, 0.5))
-            y = float(rng.random() < 0.15)
-            ic.update(p, y)
-        test_inputs = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65]
-        outputs = [ic.calibrate(p) for p in test_inputs]
-        for i in range(len(outputs) - 1):
-            assert outputs[i] <= outputs[i + 1] + 1e-12, (
-                f"Monotonic violation: calibrate({test_inputs[i]})={outputs[i]:.4f} > "
-                f"calibrate({test_inputs[i+1]})={outputs[i+1]:.4f}"
-            )
-
-    def test_well_calibrated_minimal_adjustment(self):
-        """Well-calibrated data should have near-identity mapping."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=10)
-        rng = np.random.default_rng(42)
-        # Feed perfectly calibrated data: p ≈ true event rate
-        for _ in range(500):
-            p = float(rng.uniform(0.05, 0.40))
-            y = float(rng.random() < p)
-            ic.update(p, y)
-        # Check that correction is small
-        assert abs(ic.calibrate(0.20) - 0.20) < 0.05
-
-    def test_interpolation_smooth(self):
-        """Output should interpolate smoothly between bin centers."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
-        rng = np.random.default_rng(42)
-        for _ in range(200):
-            p = float(rng.uniform(0.0, 0.5))
-            y = float(rng.random() < 0.10)
-            ic.update(p, y)
-        # Values between bin centers should be between neighbors
-        p1 = ic.calibrate(0.10)
-        p2 = ic.calibrate(0.15)
-        p_mid = ic.calibrate(0.125)
-        assert min(p1, p2) - 1e-12 <= p_mid <= max(p1, p2) + 1e-12
-
-    def test_output_bounds(self):
-        """Output must be in [0, 1]."""
-        ic = IsotonicCalibrator(n_bins=10, min_samples_per_bin=5)
-        rng = np.random.default_rng(42)
-        for _ in range(100):
-            ic.update(float(rng.uniform(0, 1)), float(rng.random() < 0.2))
-        for p in [0.0, 0.01, 0.5, 0.99, 1.0]:
-            out = ic.calibrate(p)
-            assert 0.0 <= out <= 1.0, f"Out of bounds: calibrate({p})={out}"
-
-    def test_online_calibrator_with_isotonic(self):
-        """OnlineCalibrator with post_cal_method='isotonic' produces valid output."""
-        cal = OnlineCalibrator(lr=0.05, min_updates=5, post_cal_method="isotonic",
-                               histogram_n_bins=10, histogram_min_samples=5)
-        rng = np.random.default_rng(42)
-        for _ in range(100):
-            p_raw = float(rng.uniform(0.01, 0.50))
-            y = float(rng.random() < 0.10)
-            p_cal = cal.calibrate(p_raw)
-            assert 0.0 <= p_cal <= 1.0
-            cal.update(p_raw, y)
-
-    def test_mf_calibrator_with_isotonic(self):
-        """MultiFeatureCalibrator with post_cal_method='isotonic' produces valid output."""
-        cal = MultiFeatureCalibrator(lr=0.01, min_updates=5, post_cal_method="isotonic",
-                                     histogram_n_bins=10, histogram_min_samples=5)
-        rng = np.random.default_rng(42)
-        for _ in range(100):
-            p_raw = float(rng.uniform(0.01, 0.50))
-            sigma = float(rng.uniform(0.01, 0.03))
-            y = float(rng.random() < 0.10)
-            p_cal = cal.calibrate(p_raw, sigma, 0.001, 1.0, 0.005)
-            assert 0.0 <= p_cal <= 1.0
-            cal.update(p_raw, y, sigma, 0.001, 1.0, 0.005)
 
 
 class TestPromotionGatesOOF:
@@ -2753,259 +2580,6 @@ class TestRegimeTdfConfig:
         """promotion_pooled_gate field exists and defaults to False."""
         cfg = PipelineConfig()
         assert cfg.calibration.promotion_pooled_gate is False
-
-
-class TestNeuralCalibrator:
-    """Tests for neural MLP calibrator."""
-
-    def test_identity_at_init(self):
-        """Before updates, calibrate should return approximately p_raw."""
-        nc = NeuralCalibrator(hidden_size=8, min_updates=0)
-        # With small Xavier init scaled by 0.1, the MLP should be near-identity
-        for p in [0.1, 0.3, 0.5, 0.7, 0.9]:
-            p_cal = nc.calibrate(p, 0.02, 0.0, 1.0, 0.005)
-            # Tolerance is loose because small random weights add noise
-            assert abs(p_cal - p) < 0.25, f"p_raw={p}, p_cal={p_cal}"
-
-    def test_warmup_returns_raw(self):
-        """During warmup, calibrate returns p_raw exactly."""
-        nc = NeuralCalibrator(min_updates=50)
-        assert nc.calibrate(0.3, 0.02, 0.0, 1.0, 0.005) == 0.3
-        # Do a few updates, still below min_updates
-        for _ in range(10):
-            nc.update(0.3, 1.0, 0.02, 0.0, 1.0, 0.005)
-        assert nc.calibrate(0.3, 0.02, 0.0, 1.0, 0.005) == 0.3
-
-    def test_learns_upward_correction(self):
-        """When p_raw is systematically too low, MLP learns to push up."""
-        nc = NeuralCalibrator(hidden_size=8, lr=0.02, min_updates=10, safety_gate=False)
-        rng = np.random.RandomState(42)
-        # Feed biased data: p_raw=0.2 but true rate is 0.5
-        for _ in range(200):
-            y = float(rng.random() < 0.5)
-            nc.update(0.2, y, 0.02, 0.0, 1.0, 0.005)
-        p_cal = nc.calibrate(0.2, 0.02, 0.0, 1.0, 0.005)
-        assert p_cal > 0.2, f"Expected upward correction, got {p_cal}"
-
-    def test_learns_downward_correction(self):
-        """When p_raw is systematically too high, MLP learns to push down."""
-        nc = NeuralCalibrator(hidden_size=8, lr=0.02, min_updates=10, safety_gate=False)
-        rng = np.random.RandomState(42)
-        # Feed biased data: p_raw=0.8 but true rate is 0.3
-        for _ in range(200):
-            y = float(rng.random() < 0.3)
-            nc.update(0.8, y, 0.02, 0.0, 1.0, 0.005)
-        p_cal = nc.calibrate(0.8, 0.02, 0.0, 1.0, 0.005)
-        assert p_cal < 0.8, f"Expected downward correction, got {p_cal}"
-
-    def test_output_bounded(self):
-        """Output is always in (0, 1) via sigmoid."""
-        nc = NeuralCalibrator(hidden_size=8, min_updates=0, safety_gate=False)
-        for _ in range(50):
-            nc.update(0.01, 1.0, 0.05, 0.01, 2.0, 0.01)
-        for p in [0.001, 0.01, 0.5, 0.99, 0.999]:
-            p_cal = nc.calibrate(p, 0.05, 0.01, 2.0, 0.01)
-            assert 0 < p_cal < 1, f"p_cal={p_cal} out of bounds"
-
-    def test_safety_gate_fallback(self):
-        """When safety gate activates, returns p_raw."""
-        nc = NeuralCalibrator(hidden_size=8, min_updates=0, safety_gate=True, gate_window=10)
-        # Feed adversarial data to trigger gate: calibrate makes things worse
-        rng = np.random.RandomState(42)
-        for _ in range(50):
-            p_raw = rng.random() * 0.3
-            y = float(rng.random() < p_raw)
-            nc.update(p_raw, y, 0.02, 0.0, 1.0, 0.005)
-        # After gate triggers, should return raw
-        if nc._gate_active:
-            p_cal = nc.calibrate(0.15, 0.02, 0.0, 1.0, 0.005)
-            assert p_cal == 0.15
-
-    def test_gradient_clipping(self):
-        """Weights stay bounded even with extreme inputs."""
-        nc = NeuralCalibrator(hidden_size=8, lr=0.1, min_updates=0, safety_gate=False)
-        # Extreme updates
-        for _ in range(100):
-            nc.update(0.001, 1.0, 0.10, 0.05, 5.0, 0.05)
-        # Weights should not explode
-        assert np.max(np.abs(nc.W1)) < 100, "W1 exploded"
-        assert np.max(np.abs(nc.W2)) < 100, "W2 exploded"
-
-    def test_same_interface_as_mf(self):
-        """NeuralCalibrator has same calibrate/update signature as MultiFeatureCalibrator."""
-        nc = NeuralCalibrator()
-        mf = MultiFeatureCalibrator()
-        # Both accept same args
-        p1 = nc.calibrate(0.3, 0.02, 0.001, 1.0, 0.005)
-        p2 = mf.calibrate(0.3, 0.02, 0.001, 1.0, 0.005)
-        assert isinstance(p1, float)
-        assert isinstance(p2, float)
-        nc.update(0.3, 1.0, 0.02, 0.001, 1.0, 0.005)
-        mf.update(0.3, 1.0, 0.02, 0.001, 1.0, 0.005)
-
-    def test_regime_neural_creates_separate_mlps(self):
-        """RegimeNeuralCalibrator creates n_bins separate NeuralCalibrators."""
-        rnc = RegimeNeuralCalibrator(n_bins=3, hidden_size=4)
-        assert len(rnc.calibrators) == 3
-        assert all(isinstance(c, NeuralCalibrator) for c in rnc.calibrators)
-        assert all(c.hidden_size == 4 for c in rnc.calibrators)
-
-    def test_regime_neural_routes_by_vol(self):
-        """RegimeNeuralCalibrator routes to different MLPs by vol percentile."""
-        rnc = RegimeNeuralCalibrator(n_bins=3, hidden_size=4, min_updates=0, safety_gate=False)
-        # Feed vol history to establish percentiles
-        for sigma in np.linspace(0.01, 0.05, 100):
-            rnc.observe_vol(sigma)
-        # Low vol → regime 0
-        regime_low = rnc._get_regime(0.015)
-        assert regime_low == 0
-        # High vol → regime 2
-        regime_high = rnc._get_regime(0.045)
-        assert regime_high == 2
-
-    def test_config_fields_exist(self):
-        """Neural calibrator config fields exist with correct defaults."""
-        cfg = PipelineConfig()
-        assert cfg.calibration.calibration_method == ""
-        assert cfg.calibration.neural_hidden_size == 8
-        assert cfg.calibration.neural_lr == 0.005
-        assert cfg.calibration.neural_l2 == 1e-4
-        assert cfg.calibration.neural_min_updates == 100
-        assert cfg.calibration.neural_regime_conditional is False
-
-    def test_config_validation_bad_method(self):
-        """Invalid calibration_method is rejected."""
-        from em_sde.config import PipelineConfig, _validate
-        cfg = PipelineConfig()
-        cfg.calibration.calibration_method = "bad"
-        try:
-            _validate(cfg)
-            assert False, "Should have raised"
-        except AssertionError:
-            pass
-
-    def test_n_parameters(self):
-        """Verify parameter count: 6*8 + 8 + 8 + 1 = 65 for hidden_size=8."""
-        nc = NeuralCalibrator(hidden_size=8)
-        n_params = nc.W1.size + nc.b1.size + nc.W2.size + 1  # +1 for b2 scalar
-        assert n_params == 65
-
-
-class TestHmmRegime:
-    """Tests for HMM regime detection and sigma blending."""
-
-    def _make_regime_returns(self, seed=42):
-        """Generate synthetic 2-regime returns: low-vol then high-vol."""
-        rng = np.random.RandomState(seed)
-        # 400 days low-vol (sigma~0.8%), then 400 days high-vol (sigma~2.5%)
-        low_vol = rng.normal(0, 0.008, 400)
-        high_vol = rng.normal(0, 0.025, 400)
-        return np.concatenate([low_vol, high_vol])
-
-    def test_fit_hmm_regime_returns_result(self):
-        """HMM fit should return a valid HmmRegimeResult on 2-regime data."""
-        returns = self._make_regime_returns()
-        result = fit_hmm_regime(returns, window=756, min_window=252)
-        # May return None if fitting fails, but with clear 2-regime data should succeed
-        if result is not None:
-            assert isinstance(result, HmmRegimeResult)
-            assert 0.0 <= result.regime_prob_high <= 1.0
-            assert result.sigma_low > 0
-            assert result.sigma_high > 0
-            assert result.sigma_low < result.sigma_high
-            assert result.transition_matrix.shape == (2, 2)
-
-    def test_fit_hmm_regime_insufficient_data(self):
-        """HMM should return None with insufficient data."""
-        returns = np.random.randn(100) * 0.01
-        result = fit_hmm_regime(returns, window=756, min_window=252)
-        assert result is None
-
-    def test_fit_hmm_prob_high_in_high_vol(self):
-        """After a high-vol period, P(high) should be elevated."""
-        returns = self._make_regime_returns()
-        result = fit_hmm_regime(returns, window=756, min_window=252)
-        if result is not None:
-            # Last observation is in high-vol regime
-            assert result.regime_prob_high > 0.5
-
-    def test_hmm_adjusted_sigma_none_passthrough(self):
-        """When hmm_result is None, sigma should pass through unchanged."""
-        sigma = 0.015
-        assert hmm_adjusted_sigma(sigma, None) == sigma
-
-    def test_hmm_adjusted_sigma_blend(self):
-        """Blended sigma should be between GARCH and HMM."""
-        garch_sigma = 0.03
-        hmm_result = HmmRegimeResult(
-            regime_prob_high=0.8,
-            sigma_low=0.01,
-            sigma_high=0.025,
-            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
-        )
-        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.5)
-        # sigma_hmm = 0.8 * 0.025 + 0.2 * 0.01 = 0.022
-        # sigma_adj = 0.5 * 0.03 + 0.5 * 0.022 = 0.026
-        assert abs(sigma_adj - 0.026) < 1e-6
-
-    def test_hmm_adjusted_sigma_pure_garch(self):
-        """blend_weight=0 should give pure GARCH sigma."""
-        garch_sigma = 0.03
-        hmm_result = HmmRegimeResult(
-            regime_prob_high=0.8,
-            sigma_low=0.01,
-            sigma_high=0.025,
-            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
-        )
-        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.0)
-        assert abs(sigma_adj - garch_sigma) < 1e-10
-
-    def test_hmm_adjusted_sigma_pure_hmm(self):
-        """blend_weight=1 should give pure HMM sigma."""
-        garch_sigma = 0.03
-        hmm_result = HmmRegimeResult(
-            regime_prob_high=0.8,
-            sigma_low=0.01,
-            sigma_high=0.025,
-            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
-        )
-        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=1.0)
-        expected_hmm = 0.8 * 0.025 + 0.2 * 0.01  # 0.022
-        assert abs(sigma_adj - expected_hmm) < 1e-6
-
-    def test_hmm_adjusted_sigma_lowers_in_high_vol(self):
-        """HMM blending should pull sigma down when GARCH overshoots."""
-        # GARCH says 3% but HMM says we're in a 2.5% regime
-        garch_sigma = 0.03
-        hmm_result = HmmRegimeResult(
-            regime_prob_high=0.9,
-            sigma_low=0.008,
-            sigma_high=0.025,
-            transition_matrix=np.array([[0.95, 0.05], [0.1, 0.9]]),
-        )
-        sigma_adj = hmm_adjusted_sigma(garch_sigma, hmm_result, blend_weight=0.5)
-        assert sigma_adj < garch_sigma
-
-    def test_config_hmm_fields_exist(self):
-        """ModelConfig should have HMM fields with correct defaults."""
-        from em_sde.config import ModelConfig
-        mc = ModelConfig()
-        assert mc.hmm_regime is False
-        assert mc.hmm_n_regimes == 2
-        assert mc.hmm_vol_blend == 0.5
-        assert mc.hmm_refit_interval == 63
-
-    def test_config_hmm_validation(self):
-        """Validation should catch invalid HMM config."""
-        from em_sde.config import PipelineConfig, _validate
-        cfg = PipelineConfig()
-        cfg.model.hmm_regime = True
-        cfg.model.hmm_vol_blend = 1.5  # invalid: > 1
-        try:
-            _validate(cfg)
-            assert False, "Should have raised AssertionError"
-        except AssertionError:
-            pass
 
 
 class TestHarRv:
