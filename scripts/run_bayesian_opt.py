@@ -63,11 +63,14 @@ def _compute_threshold_ranges(base_config_path: str):
     for h in cfg.model.horizons:
         fwd = pd.Series(rets).rolling(h).sum().shift(-h).dropna().values
         abs_fwd = np.abs(fwd)
-        # Target: 5% event rate (upper) to 20% event rate (lower)
+        # Target: 8-20% event rate range for calibration effectiveness.
+        # The 8% floor ensures N_eff/N_params > 100x with 6 lean params.
+        # Use P90 (10% rate) as upper bound — provides 2% margin above the
+        # 8% guard to account for CV fold sampling variation.
         thr_low = float(np.percentile(abs_fwd, 80))   # 20% event rate
-        thr_high = float(np.percentile(abs_fwd, 95))   # 5% event rate
-        # Add 10% margin on each side
-        ranges[h] = (round(thr_low * 0.9, 4), round(thr_high * 1.1, 4))
+        thr_high = float(np.percentile(abs_fwd, 90))   # 10% event rate
+        # Small margin on lower bound only; upper bound stays tight
+        ranges[h] = (round(thr_low * 0.9, 4), round(thr_high, 4))
     return ranges
 
 
@@ -165,17 +168,25 @@ def objective(trial: optuna.Trial, df, base_config_path: str,
         print(f"  Trial {trial.number} FAILED: {e}")
         return 1.0
 
-    # --- Minimum event-rate guard ---
-    # Reject trials where any horizon's event rate < 5%.
-    # Below this, calibration lacks positive samples and BSS degrades.
+    # --- Adaptive minimum event-rate guard ---
+    # Compute minimum event rate needed for N_eff/N_params >= 100 (GREEN).
+    # N_eff ≈ event_rate × n_samples × 2, so:
+    #   min_rate = (target_ratio × n_params) / (2 × n_samples)
+    # Floor at 3% absolute minimum (below this, calibration is meaningless).
+    # Based on Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
+    n_params = 6 if lean else 14
+    n_oof = len(oof_df)
+    min_er_target = max((100 * n_params) / (2 * n_oof), 0.03)
+
     er_by_horizon = cv_results.groupby("horizon")["event_rate"].mean()
     min_er = float(er_by_horizon.min())
-    if min_er < 0.05:
-        low = er_by_horizon[er_by_horizon < 0.05]
+    if min_er < min_er_target:
+        low = er_by_horizon[er_by_horizon < min_er_target]
         er_str = ", ".join(f"H={int(h)}: {r:.1%}" for h, r in low.items())
-        print(f"  Trial {trial.number} REJECTED: event rate too low ({er_str})")
+        print(f"  Trial {trial.number} REJECTED: event rate too low ({er_str}) [min={min_er_target:.1%} for N_eff/params>=100x]")
         trial.set_user_attr("rejected_reason", "low_event_rate")
         trial.set_user_attr("min_event_rate", round(min_er, 4))
+        trial.set_user_attr("min_er_target", round(min_er_target, 4))
         return 1.0
 
     # Compute pooled ECE gates

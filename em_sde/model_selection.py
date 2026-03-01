@@ -244,9 +244,9 @@ def _bootstrap_ece_ci(
 def apply_promotion_gates_oof(
     oof_df: pd.DataFrame,
     gates: dict = None,
-    min_samples: int = 30,
-    min_events: int = 5,
-    min_nonevents: int = 5,
+    min_samples: int = 100,
+    min_events: int = 30,
+    min_nonevents: int = 30,
     pooled_gate: bool = False,
 ) -> pd.DataFrame:
     """

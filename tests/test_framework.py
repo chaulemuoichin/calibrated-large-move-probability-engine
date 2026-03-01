@@ -2425,7 +2425,7 @@ class TestPromotionGatesOOF:
     def test_oof_gates_passing(self):
         """Well-calibrated OOF predictions should pass gates."""
         oof = self._make_oof(n=500, event_rate=0.10, bias=0.0)
-        report = apply_promotion_gates_oof(oof)
+        report = apply_promotion_gates_oof(oof, min_samples=30, min_events=5, min_nonevents=5)
         assert len(report) > 0
         assert "all_gates_passed" in report.columns
         assert "promotion_status" in report.columns
@@ -2438,7 +2438,7 @@ class TestPromotionGatesOOF:
     def test_oof_gates_has_ci(self):
         """OOF gate report includes bootstrap CI for ECE."""
         oof = self._make_oof(n=300)
-        report = apply_promotion_gates_oof(oof)
+        report = apply_promotion_gates_oof(oof, min_samples=30, min_events=5, min_nonevents=5)
         ece_rows = report[(report["metric"] == "ece_cal") & (report["status"] == "evaluated")]
         assert len(ece_rows) > 0
         for _, row in ece_rows.iterrows():
@@ -2544,7 +2544,7 @@ class TestPromotionGatesOOF:
             "y": y,
             "sigma_1d": sigma,
         })
-        report = apply_promotion_gates_oof(oof, min_nonevents=5)
+        report = apply_promotion_gates_oof(oof, min_samples=30, min_events=5, min_nonevents=5)
         # All rows are events → nonevents=0 → insufficient
         assert all(report["status"] == "insufficient_data")
         assert all(report["insufficient_reason"] == "too_few_nonevents")

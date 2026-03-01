@@ -847,21 +847,42 @@ This computes 5 metrics with GREEN/YELLOW/RED thresholds:
 
 Key insight: the **N_eff / N_params ratio** is the most fundamental constraint. With ~70-120 large-move events per horizon and 12-14 BO parameters, the ratio is only 10-20x, well below the 100x rule of thumb. This means BO has limited statistical budget and must be used conservatively.
 
-### 13.2 Minimum Event-Rate Guard
+### 13.2 Adaptive Event-Rate Guard
 
 **File:** `scripts/run_bayesian_opt.py`, `objective()` function
 
-**Problem:** The BO optimizer can select thresholds that produce event rates far below the 5-20% target range. When this happens, calibration has too few positive samples to learn from, and BSS degrades because the base-rate estimator becomes competitive. For example, AAPL BO found thresholds producing 0.6% event rate at H=10 — only 24 events in 3,870 samples.
+**Problem:** The BO optimizer can select thresholds that produce event rates far below the 5-20% target range. When this happens, calibration has too few positive samples to learn from, and BSS degrades because the base-rate estimator becomes competitive. For example, AAPL BO found thresholds producing 0.6% event rate at H=10 — only 24 events in 3,870 samples. A hardcoded 8% floor rejected all AAPL trials even with tight threshold ranges, because different tickers and dataset sizes need different minimums.
 
-**Solution:** After CV completes in each trial, the objective function checks the mean event rate per horizon. If any horizon falls below 5%, the trial is rejected with penalty score 1.0:
+**Solution:** After CV completes in each trial, the objective function computes the minimum event rate needed for N_eff/N_params >= 100x (GREEN zone), adapting to the actual dataset size and number of BO parameters:
 
 ```python
+n_params = 6 if lean else 14
+n_oof = len(oof_df)
+min_er_target = max((100 * n_params) / (2 * n_oof), 0.03)
+
 er_by_horizon = cv_results.groupby("horizon")["event_rate"].mean()
-if float(er_by_horizon.min()) < 0.05:
+if float(er_by_horizon.min()) < min_er_target:
     return 1.0  # reject trial
 ```
 
-**Why 5%:** This matches the documented target range in `_compute_threshold_ranges()`. Below 5%, the number of positive events becomes too small for the calibration model to learn meaningful corrections. The search bounds from `_compute_threshold_ranges()` target this range but do not enforce it — the optimizer can still pick values at the upper end that produce very few events.
+**The formula:** `min_rate = max((100 × n_params) / (2 × n_oof_samples), 3%)`. This derives from:
+- N_eff ≈ event_rate × n_samples × 2 (when events are the minority class)
+- Require N_eff / n_params >= 100 (GREEN zone)
+- Solving: event_rate >= (100 × n_params) / (2 × n_samples)
+- Floor at 3% absolute minimum (below this, calibration is meaningless regardless of dataset size)
+
+**Examples by dataset size (lean mode, 6 params):**
+
+| Dataset | OOF samples | Adaptive min ER | Events at min | N_eff/N_params |
+|---------|-------------|-----------------|---------------|----------------|
+| SPY     | ~6,538      | 4.6%            | ~301          | 100x           |
+| AAPL    | ~5,230      | 5.7%            | ~298          | 100x           |
+| GOOGL   | ~4,300      | 7.0%            | ~301          | 100x           |
+| Small   | ~3,000      | 10.0%           | ~300          | 100x           |
+
+**Why adaptive, not fixed:** A hardcoded threshold (e.g., 8%) is too strict for large datasets and too lenient for small ones. The adaptive guard ensures every ticker gets exactly the statistical power its data can support — no more, no less. This is not overfitting: the guard depends only on dataset size (a fixed property), not on model performance. Based on Vittinghoff & McCulloch (2007): minimum 20 events per tuned parameter.
+
+**Per-regime gate minimums** (in `apply_promotion_gates_oof`): min_samples=100, min_events=30, min_nonevents=30. These ensure per-regime diagnostic metrics are meaningful (previous defaults of 30/5/5 were too lenient for institutional-grade conclusions).
 
 **Diagnostic output:** Rejected trials log which horizons failed and their event rates, and store `rejected_reason` and `min_event_rate` as Optuna user attributes for post-hoc analysis.
 
