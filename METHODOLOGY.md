@@ -22,6 +22,7 @@ If something here does not match the code, the code wins and this document needs
 12. [Known Limitations and Assumptions](#12-known-limitations-and-assumptions)
 13. [Bayesian Hyperparameter Optimization](#13-bayesian-hyperparameter-optimization)
 14. [File Map](#14-file-map)
+15. [References](#15-references)
 
 ---
 
