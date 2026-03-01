@@ -97,7 +97,7 @@ The goal is to answer: **how volatile is this stock right now?** The answer is a
 
 ### GARCH(1,1)
 
-The standard model. Volatility tomorrow depends on today's volatility and today's surprise:
+The standard model ([Bollerslev, 1986](https://doi.org/10.1016/0304-4076(86)90063-1) | [Wikipedia](https://en.wikipedia.org/wiki/Autoregressive_conditional_heteroskedasticity#GARCH)). Volatility tomorrow depends on today's volatility and today's surprise:
 
 $$\sigma_{t+1}^{2} = \omega + \alpha \epsilon_t^{2} + \beta \sigma_t^{2}$$
 
@@ -112,7 +112,7 @@ $$\sigma_{\mathrm{long\_run}} = \sqrt{\frac{\omega}{1-\alpha-\beta}}$$
 
 ### GJR-GARCH (Leverage Effect)
 
-An extension that lets negative surprises (drops) have more impact than positive ones:
+An extension ([Glosten, Jagannathan & Runkle, 1993](https://doi.org/10.1111/j.1540-6261.1993.tb05128.x) | [Wikipedia](https://en.wikipedia.org/wiki/GJR-GARCH_model)) that lets negative surprises (drops) have more impact than positive ones:
 
 $$\sigma_{t+1}^{2} = \omega + \left(\alpha + \gamma I_{\epsilon_t<0}\right)\epsilon_t^2 + \beta \sigma_t^2$$
 
@@ -122,7 +122,7 @@ Stationarity condition: $\alpha + \beta + \gamma/2 < 1$.
 
 ### EWMA Fallback
 
-If GARCH fitting fails (optimizer doesn't converge), the system falls back to Exponentially Weighted Moving Average volatility with a 252-day span:
+If GARCH fitting fails (optimizer doesn't converge), the system falls back to [Exponentially Weighted Moving Average](https://en.wikipedia.org/wiki/Moving_average#Exponentially_weighted_moving_variance_and_standard_deviation) volatility ([RiskMetrics, J.P. Morgan 1996](https://en.wikipedia.org/wiki/RiskMetrics)) with a 252-day span:
 
 $$\sigma_t^2 = \sum_{j=1}^{m} w_j r_{t-j}^2,\quad \sum_{j=1}^{m} w_j = 1$$
 
@@ -168,7 +168,7 @@ For GARCH(1,1), $\phi=\alpha+\beta$. For GJR-GARCH(1,1), $\phi=\alpha+\beta+\fra
 
 ### HAR-RV Volatility Model (`har_rv`)
 
-When `har_rv: true`, a Heterogeneous AutoRegressive Realized Variance model (Corsi, 2009) replaces GARCH as the primary sigma engine. This directly addresses the root cause of `p_raw` bias: GARCH persistence (~0.97) keeps sigma elevated after vol spikes, but HAR-RV uses actual realized variance which mean-reverts at the correct speed.
+When `har_rv: true`, a Heterogeneous AutoRegressive Realized Variance model ([Corsi, 2009](https://doi.org/10.1093/jjfinec/nbp001) | [Wikipedia](https://en.wikipedia.org/wiki/Heterogeneous_autoregressive_model)) replaces GARCH as the primary sigma engine. This directly addresses the root cause of `p_raw` bias: GARCH persistence (~0.97) keeps sigma elevated after vol spikes, but HAR-RV uses actual realized variance which mean-reverts at the correct speed.
 
 **Model**: Three separate ridge regressions, one per forecast horizon:
 
@@ -256,7 +256,7 @@ We generate thousands of possible future price paths (default: 100,000) and look
 
 ### Constant-Volatility GBM
 
-The simplest model. Each daily step:
+The simplest model ([Geometric Brownian Motion](https://en.wikipedia.org/wiki/Geometric_Brownian_motion) | [Euler–Maruyama method](https://en.wikipedia.org/wiki/Euler%E2%80%93Maruyama_method)). Each daily step:
 
 $$\log P_{t+1} = \log P_t + \left(\mu-\frac{1}{2}\sigma^2\right)\Delta t + \sigma\sqrt{\Delta t}\,Z_t$$
 
@@ -283,7 +283,7 @@ This means each simulated future has its own volatility story — some paths see
 
 ### Jump-Diffusion (Merton Model)
 
-Adds rare, sudden jumps on top of the diffusion:
+Adds rare, sudden jumps on top of the diffusion ([Merton, 1976](https://doi.org/10.1016/0304-405X(76)90022-2) | [Wikipedia](https://en.wikipedia.org/wiki/Jump_diffusion#In_economics_and_finance)):
 
 On any given day, there is a small probability of a jump:
 
@@ -309,7 +309,7 @@ $$\sigma_{J,t} = \sigma_{J,\mathrm{low}} + t\left(\sigma_{J,\mathrm{high}}-\sigm
 
 In calm markets (low `t`): fewer, smaller jumps. In stressed markets (high `t`): more frequent, larger jumps.
 
-### Fat Tails (Student-t)
+### Fat Tails ([Student-t](https://en.wikipedia.org/wiki/Student%27s_t-distribution))
 
 Instead of drawing `Z` from a standard normal, draw from a Student-t distribution and rescale to unit variance:
 
@@ -371,7 +371,7 @@ Raw Monte Carlo probabilities are systematically biased. Calibration learns a co
 
 ### Online Platt Scaling (Basic Calibrator)
 
-The simplest calibrator maps raw to calibrated via a logistic function:
+The simplest calibrator ([Platt, 1999](https://www.researchgate.net/publication/2594015_Probabilistic_Outputs_for_Support_Vector_Machines) | [Wikipedia](https://en.wikipedia.org/wiki/Platt_scaling)) maps raw to calibrated via a logistic function:
 
 $$p_{\mathrm{cal}}=\sigma\!\left(a+b\,\mathrm{logit}(p_{\mathrm{raw}})\right)$$
 
@@ -425,7 +425,7 @@ This prevents the calibrator from actively inverting the signal during regime ch
 
 ### Histogram Post-Calibration (P0-2)
 
-After the Platt/logistic mapping, an optional second pass corrects residual bin-level bias:
+After the Platt/logistic mapping, an optional second pass corrects residual bin-level bias using [histogram binning calibration](https://en.wikipedia.org/wiki/Calibration_(statistics)#Calibration_in_classification) with [Bayesian shrinkage](https://en.wikipedia.org/wiki/Shrinkage_(statistics)) and [Pool Adjacent Violators (PAV)](https://en.wikipedia.org/wiki/Isotonic_regression) for monotonicity:
 
 ```
 For each of 10 equal-width bins over [0, 1]:
@@ -528,16 +528,16 @@ After the backtest, we measure how good the predictions were.
 
 | Metric | Formula | What it tells you |
 |--------|---------|-------------------|
-| **Brier Score** | $\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2$ | Average squared error. Lower = better. Range [0, 1]. |
+| **[Brier Score](https://en.wikipedia.org/wiki/Brier_score)** ([Brier, 1950](https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2)) | $\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2$ | Average squared error. Lower = better. Range [0, 1]. |
 | **Brier Skill Score** | $\mathrm{BSS}=1-\frac{\frac{1}{N}\sum_{i=1}^{N}(p_i-y_i)^2}{\bar{y}(1-\bar{y})}$ | How much better than always predicting the event rate. BSS > 0 = useful. |
-| **Log Loss** | $-\frac{1}{N}\sum_{i=1}^{N}\left[y_i\log(p_i)+(1-y_i)\log(1-p_i)\right]$ | Penalizes confident wrong predictions heavily. Lower = better. |
-| **ECE** | $\sum_{k=1}^{K}\frac{n_k}{N}\lvert\hat{p}_k-\hat{y}_k\rvert$ | Measures systematic over/under-confidence. Lower = better. |
+| **[Log Loss](https://en.wikipedia.org/wiki/Cross-entropy#Cross-entropy_loss_function_and_logistic_regression)** | $-\frac{1}{N}\sum_{i=1}^{N}\left[y_i\log(p_i)+(1-y_i)\log(1-p_i)\right]$ | Penalizes confident wrong predictions heavily. Lower = better. |
+| **[ECE](https://en.wikipedia.org/wiki/Calibration_(statistics))** ([Naeini et al., 2015](https://people.cs.pitt.edu/~milos/research/2015/AAAI_Calibration.pdf)) | $\sum_{k=1}^{K}\frac{n_k}{N}\lvert\hat{p}_k-\hat{y}_k\rvert$ | Measures systematic over/under-confidence. Lower = better. |
 
 ### Secondary: Discrimination Quality
 
 | Metric | Formula | What it tells you |
 |--------|---------|-------------------|
-| **AUC-ROC** | $\int \mathrm{TPR}\,d(\mathrm{FPR})$ | Can the model rank events above non-events? 0.5 = random. 1.0 = perfect. |
+| **[AUC-ROC](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve)** | $\int \mathrm{TPR}\,d(\mathrm{FPR})$ | Can the model rank events above non-events? 0.5 = random. 1.0 = perfect. |
 | **Separation** | $\mathbb{E}[p\mid y=1]-\mathbb{E}[p\mid y=0]$ | Average probability gap between events and non-events. |
 
 ### Sample Size Correction
@@ -572,7 +572,7 @@ After the backtest, we measure how good the predictions were.
 
 ### Expanding-Window Cross-Validation
 
-Splits the data into folds:
+Uses [walk-forward validation](https://en.wikipedia.org/wiki/Walk_forward_optimization) (expanding window variant of [cross-validation](https://en.wikipedia.org/wiki/Cross-validation_(statistics))) to respect temporal ordering. Splits the data into folds:
 
 ```
 Fold 1:  Train on [0% - 40%],  Test on [40% - 52%]
@@ -722,7 +722,7 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 **File:** `scripts/run_bayesian_opt.py`
 
-The system includes an Optuna-based Bayesian optimization script for jointly tuning hyperparameters.
+The system includes an [Optuna](https://optuna.org/)-based [Bayesian optimization](https://en.wikipedia.org/wiki/Bayesian_optimization) script using the [TPE (Tree-structured Parzen Estimator)](https://papers.nips.cc/paper/2011/hash/86e8f7ab32cfd12577bc2619bc635690-Abstract.html) sampler ([Bergstra et al., 2011](https://papers.nips.cc/paper/2011/hash/86e8f7ab32cfd12577bc2619bc635690-Abstract.html)) for jointly tuning hyperparameters.
 
 ### Search Space
 
@@ -802,7 +802,7 @@ if float(er_by_horizon.min()) < min_er_target:
 | GOOGL   | ~4,300      | 7.0%            | ~301          | 100x           |
 | Small   | ~3,000      | 10.0%           | ~300          | 100x           |
 
-**Why adaptive, not fixed:** A hardcoded threshold (e.g., 8%) is too strict for large datasets and too lenient for small ones. The adaptive guard ensures every ticker gets exactly the statistical power its data can support — no more, no less. This is not overfitting: the guard depends only on dataset size (a fixed property), not on model performance. Based on Vittinghoff & McCulloch (2007): minimum 20 events per tuned parameter.
+**Why adaptive, not fixed:** A hardcoded threshold (e.g., 8%) is too strict for large datasets and too lenient for small ones. The adaptive guard ensures every ticker gets exactly the statistical power its data can support — no more, no less. This is not overfitting: the guard depends only on dataset size (a fixed property), not on model performance. Based on [Vittinghoff & McCulloch (2007)](https://doi.org/10.1002/sim.2691): minimum 20 events per tuned parameter.
 
 **Per-regime gate minimums** (in `apply_promotion_gates_oof`): min_samples=100, min_events=30, min_nonevents=30. These ensure per-regime diagnostic metrics are meaningful (previous defaults of 30/5/5 were too lenient for institutional-grade conclusions).
 
@@ -828,3 +828,20 @@ if float(er_by_horizon.min()) < min_er_target:
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
 | `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
 | `tests/test_framework.py` | 191 unit tests |
+
+---
+
+## 15. References
+
+| Method | Paper | Link |
+|--------|-------|------|
+| GARCH(1,1) | Bollerslev, T. (1986). "Generalized autoregressive conditional heteroskedasticity." *J. Econometrics* 31(3), 307-327. | [DOI](https://doi.org/10.1016/0304-4076(86)90063-1) |
+| GJR-GARCH | Glosten, L., Jagannathan, R. & Runkle, D. (1993). "On the relation between the expected value and the volatility of the nominal excess return on stocks." *J. Finance* 48(5), 1779-1801. | [DOI](https://doi.org/10.1111/j.1540-6261.1993.tb05128.x) |
+| HAR-RV | Corsi, F. (2009). "A simple approximate long-memory model of realized volatility." *J. Financial Econometrics* 7(2), 174-196. | [DOI](https://doi.org/10.1093/jjfinec/nbp001) |
+| Jump-diffusion | Merton, R. (1976). "Option pricing when underlying stock returns are discontinuous." *J. Financial Economics* 3(1-2), 125-144. | [DOI](https://doi.org/10.1016/0304-405X(76)90022-2) |
+| Platt scaling | Platt, J. (1999). "Probabilistic outputs for support vector machines." *Advances in Large Margin Classifiers*, 61-74. | [Paper](https://www.researchgate.net/publication/2594015_Probabilistic_Outputs_for_Support_Vector_Machines) |
+| ECE | Naeini, M.P., Cooper, G.F. & Hauskrecht, M. (2015). "Obtaining well calibrated probabilities using Bayesian binning." *AAAI 2015*. | [Paper](https://people.cs.pitt.edu/~milos/research/2015/AAAI_Calibration.pdf) |
+| Brier score | Brier, G.W. (1950). "Verification of forecasts expressed in terms of probability." *Monthly Weather Review* 78(1), 1-3. | [DOI](https://doi.org/10.1175/1520-0493(1950)078<0001:VOFEIT>2.0.CO;2) |
+| TPE sampler | Bergstra, J., Bardenet, R., Bengio, Y. & Kégl, B. (2011). "Algorithms for hyper-parameter optimization." *NeurIPS 2011*. | [Paper](https://papers.nips.cc/paper/2011/hash/86e8f7ab32cfd12577bc2619bc635690-Abstract.html) |
+| Events per parameter | Vittinghoff, E. & McCulloch, C.E. (2007). "Relaxing the rule of ten events per variable in logistic and Cox regression." *Am J Epidemiology* 165(6), 710-718. | [DOI](https://doi.org/10.1002/sim.2691) |
+| Isotonic regression (PAV) | Barlow, R.E. et al. (1972). *Statistical Inference Under Order Restrictions*. Wiley. | [Wikipedia](https://en.wikipedia.org/wiki/Isotonic_regression) |
