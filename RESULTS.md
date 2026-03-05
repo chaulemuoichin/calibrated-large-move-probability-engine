@@ -8,7 +8,7 @@
 |--------|------|------|---------|------------|----------|------|------|------|------------|
 | **SPY** | 2000-2025 | 6,538 | Lean (6p) | #6 of 8 | **0.0117** | 0.0062 | 0.0167 | 0.0121 | **3/3 PASS** |
 | **AAPL** | 2000-2025 | 6,538 | Lean (6p) | #0 of 2 | **0.0083** | 0.0098 | 0.0158 | 0.0111 | **1/3 PASS** (H=5 only) |
-| **GOOGL** | 2004-2025 | 5,376 | Lean (6p) | #0 of 5 | **0.0094** | 0.0047 | 0.0115 | 0.0122 | 0/3 (ECE passes, BSS/AUC pending) |
+| **GOOGL** | 2004-2025 | 5,376 | Lean (6p) | #0 of 2 | **0.0197** | 0.0273 | 0.0197 | 0.0122 | **2/3 PASS** (H=10, H=20) |
 
 **Gate criteria**: ECE <= 0.02, BSS > 0.0, AUC > 0.55 (all must pass per horizon)
 
@@ -18,7 +18,7 @@
 |--------|----------------------------------|--------------------------------------|-------------|
 | **SPY** | 3/3 PASS (ECE 0.012-0.014) | 3/3 PASS (ECE 0.006-0.017) | Maintained, now with 2x data |
 | **AAPL** | 1/3 PASS (H=10 ECE 0.024 FAIL) | **1/3 PASS** (H=5 passes; H=10/H=20 BSS fails) | Event-rate guard + adaptive thresholds helped H=5 |
-| **GOOGL** | 1/3 PASS (H=5,20 ECE 0.025 FAIL) | All ECE < 0.013 (BSS/AUC TBD) | ECE: 0.025 -> 0.005-0.012 |
+| **GOOGL** | 1/3 PASS (H=5,20 ECE 0.025 FAIL) | **2/3 PASS** (H=10, H=20 all gates pass) | BSS positive everywhere, H=5 ECE borderline |
 | **N_eff/N_params** | 12-31x (RED) | Expected 55-110x (YELLOW-GREEN) | ~3x improvement |
 
 ---
@@ -65,17 +65,21 @@
 
 **Dataset**: 5,376 daily observations (2004-08-19 to 2025-12-30), annualized vol ~28%
 
-**Lean Bayesian Optimization**: 5 trials, best = Trial #0
+**Lean Bayesian Optimization**: 2 trials with adaptive event-rate guard (best = Trial #0)
 
-| Horizon | Threshold | ECE (OOF) | Pass/3 | Status |
-|---------|-----------|-----------|--------|--------|
-| H=5     | 6.30%     | 0.0047    | —      | ECE PASS |
-| H=10    | 12.91%    | 0.0115    | —      | ECE PASS |
-| H=20    | 16.53%    | 0.0122    | —      | ECE PASS |
+| Horizon | Threshold | ECE (OOF) | BSS (OOF) | AUC (OOF) | Event Rate | Status |
+|---------|-----------|-----------|-----------|-----------|------------|--------|
+| H=5     | 5.22%     | 0.0273    | +0.0099   | 0.626     | 9.4%       | FAIL (ECE) |
+| H=10    | 9.24%     | 0.0197    | +0.0168   | 0.661     | 5.9%       | **PASS** |
+| H=20    | 12.65%    | 0.0122    | +0.0138   | 0.642     | 6.9%       | **PASS** |
 
 **Best params**: garch_persistence=0.977, mf_lr=0.0033, mf_l2=0.000029
 
-**Key insight**: GOOGL's ECE improved dramatically (0.025 -> 0.005-0.012), but the 0/3 gate pass suggests BSS or AUC are marginal. This is expected — GOOGL has the shortest history (IPO 2004, vs 2000 for SPY/AAPL), so N_eff is lower. Full gate recheck after applying params will confirm the BSS/AUC picture.
+**Gate recheck result: 2/3 PASS.** H=10 and H=20 pass all 3 gates with positive BSS (real forecasting skill). H=5 barely fails ECE (0.027 vs 0.02 gate) — BSS and AUC are fine. More BO trials may find a better H=5 threshold.
+
+**Overfitting diagnostics: MODERATE RISK** (3/15 GREEN, 10/15 YELLOW, 2/15 RED). N_eff/N_params ratios: H=5 101x (GREEN), H=10 62x (YELLOW), H=20 72x (YELLOW).
+
+**Next steps**: Run 2-4 more BO trials to find better H=5 threshold.
 
 ---
 
@@ -241,7 +245,7 @@ python scripts/run_overfit_check.py <ticker>
 | +Data-adaptive BO | 2/6 | Jump thresholds corrected, ECE passes but AUC/BSS fail |
 | +Real tickers (14-param BO) | 5/9 | SPY 3/3, AAPL 1/3, GOOGL 1/3 |
 | +Lean BO + Extended Data | 4/9 | SPY 3/3, AAPL 0/3 (event rate too low), GOOGL 1/3 |
-| +Adaptive event-rate guard | 5/9 | SPY 3/3, AAPL 1/3 (H=5 PASS), GOOGL 1/3 |
+| +Adaptive event-rate guard | 6/9 | SPY 3/3, AAPL 1/3 (H=5 PASS), GOOGL 2/3 (H=10,H=20 PASS) |
 
 ### Key Takeaway
 
