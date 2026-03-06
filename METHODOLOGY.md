@@ -324,27 +324,19 @@ When `mc_regime_t_df: true`, the Student-t degrees of freedom for MC innovations
 
 Defaults: low_vol t_df=8.0, mid_vol t_df=5.0, high_vol t_df=4.0. Configured via `mc_regime_t_df_low`, `mc_regime_t_df_mid`, `mc_regime_t_df_high`.
 
-### Filtered Historical Simulation (FHS)
+### Filtered Historical Simulation (FHS) — disabled
 
-When `fhs_enabled: true`, instead of drawing innovations Z from a parametric distribution (Gaussian or Student-t), we resample from the **standardized residuals** of the GARCH fit ([Barone-Adesi, Giannopoulos & Vosper, 1999](https://doi.org/10.1016/S0378-4266(98)00091-4)):
+> **Status: disabled by default.** Tested and found to degrade results at longer horizons. Kept in codebase behind `fhs_enabled` flag for reference.
 
-$$z_t = \frac{\epsilon_t}{\hat{\sigma}_t}$$
+FHS resamples standardized residuals $z_t = \epsilon_t / \hat{\sigma}_t$ from the GARCH fit instead of drawing from a parametric distribution ([Barone-Adesi et al., 1999](https://doi.org/10.1016/S0378-4266(98)00091-4)). In theory this captures the true innovation distribution without distributional assumptions.
 
-where $\epsilon_t$ are the GARCH residuals and $\hat{\sigma}_t$ is the fitted conditional volatility. These standardized residuals capture the **actual** innovation distribution — including any asymmetry, fat tails, or other features that a parametric distribution misses.
+In practice, ~750 residuals from a rolling GARCH window contain fewer tail events than a Student-t(5) distribution. This truncates the simulated tail mass, reducing discrimination for large moves. The effect compounds over multi-step horizons (H=10, H=20). Additionally, stationarity projection drops the residuals, causing inconsistent fallback between FHS and parametric across time — the calibrator cannot learn a stable mapping when the input distribution switches unpredictably.
 
-At simulation time:
+### GARCH Ensemble — disabled
 
-$$Z_{\mathrm{step}} = z_{\mathrm{sampled}},\quad z_{\mathrm{sampled}} \sim \mathrm{Uniform}\{z_1, z_2, \ldots, z_T\}$$
+> **Status: disabled by default.** Tested and found to degrade results due to sigma/dynamics mismatch. Kept behind `garch_ensemble` flag for reference.
 
-This eliminates model misspecification from assuming a particular parametric form. Falls back to parametric when fewer than 100 standardized residuals are available.
-
-### GARCH Ensemble (garch_ensemble)
-
-When `garch_ensemble: true`, three GARCH variants are fitted — GARCH(1,1), GJR-GARCH(1,1), and EGARCH(1,1) — and their sigma_1d forecasts are **equal-weight averaged** ([Ranjan & Gneiting, 2010](https://doi.org/10.1111/j.1467-9868.2009.00726.x)):
-
-$$\hat{\sigma}_{1d}^{\mathrm{ens}} = \frac{1}{K}\sum_{k=1}^{K}\hat{\sigma}_{1d}^{(k)}$$
-
-The GARCH dynamics for simulation use the GJR model's parameters (omega, alpha, beta, gamma). The averaged sigma provides a more robust starting variance that reduces model risk. Standardized residuals are pooled across all successful models.
+The ensemble averages sigma_1d from GARCH(1,1), GJR-GARCH, and EGARCH ([Ranjan & Gneiting, 2010](https://doi.org/10.1111/j.1467-9868.2009.00726.x)). However, simulation dynamics still use GJR parameters (omega, alpha, beta, gamma), which mean-revert to GJR's unconditional variance — not the ensemble average. This mismatch grows with horizon length, systematically biasing multi-step simulations.
 
 ### Where to look for problems
 
@@ -412,7 +404,7 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 ### Multi-Feature Calibrator
 
-Uses 6 features (or 7 with earnings calendar) instead of just `logit(p_raw)`:
+Uses 6 features instead of just `logit(p_raw)` (7 features when earnings calendar is active for the horizon):
 
 $$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t},\ (\mathrm{earn}_t)\right]$$
 
@@ -424,11 +416,13 @@ Updated via SGD with L2 regularization (prevents overfitting) and gradient clipp
 
 ### Earnings Calendar Feature (earnings_calendar)
 
-When `earnings_calendar: true`, an additional feature `earnings_proximity` is added to the multi-feature calibrator. This addresses a key reason why single-stock calibration is harder than index calibration: earnings announcements produce much larger moves than non-earnings days ([Dubinsky, Johannes, Kaeck & Seeger, 2019](https://doi.org/10.1093/rfs/hhy018) | [Savor & Wilson, 2016](https://doi.org/10.1111/jofi.12351)).
+When `earnings_calendar: true`, an earnings proximity feature is added to the multi-feature calibrator **for short horizons only (H ≤ 5)**. Earnings announcements produce significantly larger moves than non-earnings days ([Dubinsky et al., 2019](https://doi.org/10.1093/rfs/hhy018) | [Savor & Wilson, 2016](https://doi.org/10.1111/jofi.12351)), making this a strong calibration signal at weekly timescales.
 
 $$\mathrm{earn}_t = \max\!\left(0,\, 1 - \frac{|\mathrm{days\_to\_nearest\_earnings}|}{20}\right)$$
 
-The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days from any earnings date. This allows the calibrator to learn separate intercepts for earnings vs non-earnings windows. Walk-forward safe because earnings dates are publicly announced weeks before the event. Data sourced from yfinance.
+The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days away. At longer horizons (H=10, H=20), prediction windows almost always overlap with an earnings date, so the feature becomes uninformative noise. The horizon restriction is enforced automatically in the backtest engine.
+
+Walk-forward safe: earnings dates are publicly announced weeks in advance. Data sourced from yfinance with local CSV caching (30-day expiry).
 
 ### Regime-Conditional Multi-Feature Calibration
 

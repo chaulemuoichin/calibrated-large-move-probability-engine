@@ -1,46 +1,34 @@
 # Calibrated Large-Move Probability Engine
 
-A system that estimates the probability of large price moves over the next 1-4 weeks, and keeps correcting itself as real outcomes arrive.
+Estimates the probability of large stock price moves over 1-4 week horizons, with online self-correction as outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-209%20passing-brightgreen)
 
-## Why This Exists 
+## Why This Exists
 
-You are an investor. You think a stock is undervalued. You want to buy.
-The painful question is simple: **is today already a good entry?**
+You want to buy a stock. The hard question: **is today a good entry?**
 
 ```text
-if price goes up after you buy
--> good for you
-
-if price goes down hard right after you buy
--> you doubt yourself
-  -> bad exit & realized loss
-    -> rushed next decision
-      -> another loss
-        -> either posting "market is rigged" on Reddit or repeating the loop
+price drops hard right after you buy
+  -> you doubt yourself -> bad exit -> rushed next trade -> another loss
 ```
 
-This project breaks that loop. Instead of guessing, it gives you a number:
+This system replaces guesswork with a number:
 
 > "There is a 12% chance the price moves more than 5% in the next two weeks."
 
-If that number is trustworthy (and the system works hard to make it trustworthy), you can make a calmer decision — buy now, wait, or scale in gradually.
+If that number is trustworthy, you can size positions, hedge, or wait with confidence.
 
-## How It Works (for full version visit [METHODOLOGY.md](https://github.com/chaulemuoichin/calibrated-large-move-probability-engine/blob/main/METHODOLOGY.md)) 
+## How It Works
 
-1. **Read the recent past.** The system looks at recent price behavior to understand how calm or jumpy the market has been.
+Full methodology: [METHODOLOGY.md](METHODOLOGY.md)
 
-2. **Imagine many possible futures.** Instead of making one guess about where the price will go, it generates thousands of realistic future price paths based on current conditions.
-
-3. **Count the bad outcomes.** Out of all those imagined futures, how many had a price move large enough to matter? That fraction is the raw probability.
-
-4. **Learn from past mistakes.** As real outcomes arrive (did the big move actually happen?), the system checks whether its earlier estimates were too high or too low, and adjusts.
-
-5. **Output a calibrated probability.** The final number accounts for both current market conditions and the system's track record of accuracy.
-
-The result is a clear, actionable probability you can use to inform your timing decisions.
+1. **Estimate current volatility.** Fit a GARCH/GJR model to recent returns to measure how jumpy the market is right now.
+2. **Simulate many futures.** Generate thousands of Monte Carlo price paths using current vol conditions.
+3. **Count large moves.** What fraction of simulated paths exceed the threshold? That's the raw probability.
+4. **Calibrate against history.** Compare past predictions to actual outcomes and adjust systematically.
+5. **Output a calibrated probability.** The final number reflects both current conditions and the model's track record.
 
 ## Quick Start
 
@@ -54,115 +42,78 @@ pip install -r requirements.txt
 # Run a backtest
 python -m em_sde.run --config configs/spy_fixed.yaml --run-id my_first_run
 
-# Compare two model configs
+# Compare two configs with cross-validation
 python -m em_sde.run --compare configs/spy_fixed.yaml configs/spy.yaml --cv-folds 5
-# Note: --compare currently uses fold-level legacy gates.
 ```
 
-Output goes to `outputs/<run_id>/` and includes a results CSV, summary JSON, and charts.
+Output goes to `outputs/<run_id>/`: results CSV, summary JSON, and charts.
 
-## What You Get
+## Output
 
-Each run produces:
-
-| Output | What it is |
-| ------ | ---------- |
-| `results.csv` | Daily predictions with raw and calibrated probabilities, realized labels, volatility |
-| `summary.json` | All evaluation metrics (accuracy, discrimination, calibration quality) |
-| `reliability.csv` | Calibration curve data for plotting |
-| `charts/` | Probability time series, reliability diagram, volatility regime, rolling accuracy |
+| File | Contents |
+| ---- | -------- |
+| `results.csv` | Daily predictions: raw/calibrated probabilities, realized labels, volatility |
+| `summary.json` | Evaluation metrics (Brier, AUC, ECE) |
+| `reliability.csv` | Calibration curve data |
+| `charts/` | Probability time series, reliability diagram, vol regime, rolling accuracy |
 
 ### Key Metrics
 
-| Metric | What it tells you | Good value |
-| ------ | ----------------- | ---------- |
-| **Brier Score** | Overall accuracy of probabilities | Lower is better |
-| **Brier Skill Score (BSS)** | How much better than always guessing the average | > 0 means useful |
-| **AUC** | Can the model tell events from non-events? | >= 0.55 for promotion (> 0.5 beats random) |
-| **ECE** | Are the probabilities well-calibrated across the board? | < 0.02 |
+| Metric | Meaning | Target |
+| ------ | ------- | ------ |
+| **Brier Skill Score** | Improvement over naive base-rate predictor | > 0 |
+| **AUC** | Can the model rank event days above non-event days? | >= 0.55 |
+| **ECE** | Are predicted probabilities accurate across all levels? | < 0.02 |
 
 ## Configuration
 
-All settings live in YAML files under `configs/`. Key choices:
+Settings live in YAML files under `configs/`.
 
-**What counts as a "large move"?**
+**Threshold mode** (what counts as a "large move"):
 
-- `fixed_pct`: a fixed return threshold (e.g., 5%) — recommended
-- `anchored_vol`: slowly-moving threshold using historical average volatility
-- `regime_gated`: automatically switches strategy based on current volatility
+- `fixed_pct` — fixed return threshold (e.g., 5%). Recommended.
+- `anchored_vol` — slowly-moving threshold tied to historical average vol.
+- `regime_gated` — switches between modes based on current vol regime.
 
-**How to model volatility?**
+**Volatility model:**
 
-- `garch` or `gjr` (GJR captures the fact that drops amplify future volatility more than rallies)
-- GARCH-in-simulation for path-level volatility dynamics
+- `garch` or `gjr` (GJR captures leverage effect: drops amplify future vol more than rallies)
+- GARCH-in-simulation for path-level vol dynamics
 
 **Optional features:**
 
-- Jump-diffusion for crash-prone stocks (e.g., TSLA)
-- Multi-feature calibration with 6 features + L2 regularization
-- Fat-tailed innovations (Student-t) or Filtered Historical Simulation (FHS)
-- GARCH ensemble (GARCH + GJR + EGARCH averaged)
-- Earnings calendar proximity feature for single-stock calibration
-- Regime-gated thresholds for adaptive behavior across vol regimes
+- Jump-diffusion (Merton) for crash-prone stocks
+- Multi-feature calibration (6 features + L2 regularization)
+- Student-t fat-tailed innovations with regime-conditional degrees of freedom
+- Earnings calendar proximity for single-stock short-horizon calibration
+- Regime-gated threshold routing
 
 ### Preset Configs
 
 | Config | Description |
 | ------ | ----------- |
-| `spy_fixed.yaml` | SPY with fixed 5% threshold (recommended starting point) |
-| `goog_fixed.yaml` | GOOG with fixed 5% threshold |
-| `tsla_fixed.yaml` | TSLA with fixed 5% threshold + jumps (volatile stock) |
+| `spy_fixed.yaml` | SPY, fixed 5% threshold (recommended starting point) |
+| `goog_fixed.yaml` | GOOGL, fixed 5% threshold |
+| `tsla_fixed.yaml` | TSLA, fixed 5% threshold + jump-diffusion |
 
-## For Collaborators
-
-**Want to understand the full methodology?** Read [METHODOLOGY.md](METHODOLOGY.md). It explains every step from raw data to final probability, with the math, the assumptions, and the places where things can go wrong. It is specifically written so you can spot issues without reading the source code.
-
-**Want to run tests?**
-
-```bash
-python -m pytest tests/ -v
-```
-
-209 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
-
-**Runner commands (from repo root):**
-
-```bash
-# Full institutional battery
-python -u scripts/run_full_institutional.py
-
-# Quick checks
-python scripts/run_stress_suite.py
-
-# Bayesian optimization (lean mode, 6 params)
-python scripts/run_bayesian_opt.py spy --n-trials 12
-python scripts/run_bayesian_opt.py spy --apply
-
-# CV / gate diagnostics
-python -u scripts/run_gate_recheck.py spy
-python scripts/run_overfit_check.py spy
-```
-
-**Project layout:**
+## Project Structure
 
 ```text
-.gitignore
-README.md
-CLAUDE.md              Project rules and current state (for AI sessions)
-METHODOLOGY.md         Full technical methodology
-RESULTS.md             Honest results with gate pass/fail status
+README.md              This file
+METHODOLOGY.md         Full technical methodology with math
+RESULTS.md             Validation results with pass/fail status
 requirements.txt
-data/                  Versioned data assets (CSV price data)
+data/                  Price data (CSV)
 em_sde/                Core library
   data_layer.py          Data loading, caching, quality checks
-  garch.py               Volatility estimation (GARCH/GJR, HAR-RV)
-  monte_carlo.py         Price simulation (MC paths, jumps, fat tails)
+  garch.py               Volatility estimation (GARCH/GJR)
+  monte_carlo.py         Monte Carlo simulation (paths, jumps, fat tails)
   calibration.py         Probability calibration (multi-feature + histogram)
   backtest.py            Walk-forward engine (no lookahead)
-  evaluation.py          Scoring metrics (Brier, AUC, ECE, ...)
+  evaluation.py          Scoring (Brier, AUC, ECE, VaR, CRPS)
   model_selection.py     Cross-validation, promotion gates
   config.py              YAML config system
-  output.py              Results output and charts
+  output.py              Results and charts
   run.py                 CLI entry point
 configs/               YAML configuration presets
 scripts/               Operational runners
@@ -174,12 +125,35 @@ scripts/               Operational runners
 tests/                 209 unit tests
 ```
 
+## Running Tests
+
+```bash
+python -m pytest tests/ -v
+```
+
+## Validation & Optimization
+
+```bash
+# Bayesian optimization (lean mode, 6 params)
+python scripts/run_bayesian_opt.py spy --n-trials 12
+python scripts/run_bayesian_opt.py spy --apply
+
+# 5-fold CV gate validation
+python -u scripts/run_gate_recheck.py spy
+
+# Overfitting diagnostics
+python scripts/run_overfit_check.py spy
+
+# Full institutional battery
+python -u scripts/run_full_institutional.py
+```
+
 ## Known Limitations
 
-1. Uses close-to-close returns only (no intraday data).
-2. No transaction costs or market impact modeling — this is a probability tool, not a trading simulator.
-3. Calibration needs ~100 resolved outcomes to activate. Early predictions are uncalibrated.
-4. Overlapping prediction windows create correlated samples. Always check effective sample size (`N_eff`), not raw count.
+1. Close-to-close returns only (no intraday data).
+2. No transaction costs or market impact — this is a probability tool, not a trading system.
+3. Calibration requires ~100 resolved outcomes to activate. Early predictions are uncalibrated.
+4. Overlapping prediction windows create correlated samples. Always check effective sample size (N_eff), not raw count.
 
 ## Disclaimer
 
