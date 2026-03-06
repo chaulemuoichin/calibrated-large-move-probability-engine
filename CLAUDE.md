@@ -44,7 +44,7 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 
 | Script | Purpose |
 |--------|---------|
-| `run_bayesian_opt.py` | Optuna TPE hyperparameter optimization. Lean mode (6 params) or full (14 params). `--apply` writes best to YAML. |
+| `run_bayesian_opt.py` | Optuna TPE hyperparameter optimization. Lean mode (6 params) or full (14 params). `--apply` writes best to YAML. Studies are versioned by feature flags — changing config flags auto-starts a fresh study. |
 | `run_gate_recheck.py` | Re-run promotion gates with OOF row-level evaluation |
 | `run_overfit_check.py` | 5-metric overfitting diagnostics (gen gap, CV stability, threshold sensitivity, temporal stability, N_eff/N_params) |
 | `run_full_institutional.py` | Full validation battery |
