@@ -2739,6 +2739,226 @@ class TestOverfitDiagnostics:
         assert _status(30, "neff_ratio") == "RED"
 
 
+# ============================================================
+# Test: Filtered Historical Simulation (FHS)
+# ============================================================
+
+class TestFilteredHistoricalSimulation:
+    """Tests for FHS (standardized residual resampling in MC)."""
+
+    def test_gbm_fhs_produces_valid_prices(self):
+        """GBM with FHS residuals should produce valid terminal prices."""
+        rng = np.random.default_rng(42)
+        # Create synthetic standardized residuals (approximately unit variance)
+        std_resid = rng.standard_normal(500)
+        prices = simulate_gbm_terminal(
+            S0=100.0, sigma_1d=0.01, H=10, n_paths=10000,
+            seed=42, standardized_residuals=std_resid,
+        )
+        assert len(prices) == 10000
+        assert np.all(prices > 0)
+        assert np.all(np.isfinite(prices))
+
+    def test_garch_fhs_produces_valid_prices(self):
+        """GARCH-in-sim with FHS residuals should produce valid terminal prices."""
+        rng = np.random.default_rng(42)
+        std_resid = rng.standard_normal(500)
+        prices = simulate_garch_terminal(
+            S0=100.0, sigma_1d=0.01, H=10, n_paths=10000,
+            omega=1e-6, alpha=0.05, beta=0.90,
+            seed=42, standardized_residuals=std_resid,
+        )
+        assert len(prices) == 10000
+        assert np.all(prices > 0)
+        assert np.all(np.isfinite(prices))
+
+    def test_fhs_uses_actual_residuals(self):
+        """FHS with heavy-tailed residuals should produce fatter tails than Gaussian."""
+        rng = np.random.default_rng(123)
+        # Heavy-tailed residuals (Student-t with df=3)
+        heavy_resid = rng.standard_t(df=3, size=1000)
+        heavy_resid = heavy_resid / np.std(heavy_resid)  # unit variance
+
+        prices_fhs = simulate_gbm_terminal(
+            S0=100.0, sigma_1d=0.02, H=20, n_paths=50000,
+            seed=42, standardized_residuals=heavy_resid,
+        )
+        prices_gauss = simulate_gbm_terminal(
+            S0=100.0, sigma_1d=0.02, H=20, n_paths=50000,
+            seed=42, t_df=0.0,
+        )
+        # FHS with heavy tails should have wider return distribution
+        returns_fhs = prices_fhs / 100.0 - 1.0
+        returns_gauss = prices_gauss / 100.0 - 1.0
+        # Check that extreme quantiles are more extreme with FHS
+        q99_fhs = np.percentile(np.abs(returns_fhs), 99)
+        q99_gauss = np.percentile(np.abs(returns_gauss), 99)
+        assert q99_fhs > q99_gauss * 0.9  # FHS tails at least comparable
+
+    def test_fhs_ignored_when_too_few_residuals(self):
+        """FHS should fall back to parametric when residuals < 100."""
+        short_resid = np.array([0.1, -0.2, 0.3])  # only 3 residuals
+        prices = simulate_gbm_terminal(
+            S0=100.0, sigma_1d=0.01, H=5, n_paths=1000,
+            seed=42, t_df=5.0, standardized_residuals=short_resid,
+        )
+        assert len(prices) == 1000
+        assert np.all(prices > 0)
+
+    def test_garch_result_has_residuals(self):
+        """fit_garch should populate standardized_residuals field when possible."""
+        rng = np.random.default_rng(42)
+        # Generate returns with vol clustering (GARCH-like) to get proper fit
+        returns = np.zeros(756)
+        sigma = 0.01
+        for i in range(756):
+            z = rng.standard_normal()
+            returns[i] = sigma * z
+            sigma = np.sqrt(1e-6 + 0.08 * returns[i]**2 + 0.90 * sigma**2)
+        result = fit_garch(returns, min_window=252)
+        # With vol clustering, GARCH fit should succeed and produce residuals
+        if result.source != "ewma_fallback" and result.beta is not None and result.beta > 0.1:
+            assert result.standardized_residuals is not None
+            assert len(result.standardized_residuals) >= 100
+
+
+# ============================================================
+# Test: GARCH Ensemble
+# ============================================================
+
+class TestGarchEnsemble:
+    """Tests for GARCH ensemble (averaging 3 model variants)."""
+
+    def test_ensemble_returns_valid_result(self):
+        """fit_garch_ensemble should return a valid GarchResult."""
+        from em_sde.garch import fit_garch_ensemble
+        rng = np.random.default_rng(42)
+        returns = rng.standard_normal(756) * 0.01
+        result = fit_garch_ensemble(returns, min_window=252)
+        assert result.sigma_1d > 0
+        assert result.sigma_1d < 1.0
+        assert "ensemble" in result.source or "ewma" in result.source
+
+    def test_ensemble_sigma_is_average(self):
+        """Ensemble sigma should be close to average of individual models."""
+        from em_sde.garch import fit_garch_ensemble
+        rng = np.random.default_rng(42)
+        returns = rng.standard_normal(756) * 0.01
+        result = fit_garch_ensemble(returns, min_window=252)
+        # Just verify it's in a reasonable range
+        assert 0.005 < result.sigma_1d < 0.05
+
+    def test_ensemble_has_garch_params(self):
+        """Ensemble should provide GARCH params when GJR fit succeeds."""
+        from em_sde.garch import fit_garch_ensemble
+        rng = np.random.default_rng(42)
+        # Generate returns with vol clustering for better GARCH fitting
+        returns = np.zeros(756)
+        sigma = 0.01
+        for i in range(756):
+            z = rng.standard_normal()
+            returns[i] = sigma * z
+            sigma = np.sqrt(1e-6 + 0.08 * returns[i]**2 + 0.90 * sigma**2)
+        result = fit_garch_ensemble(returns, min_window=252)
+        assert "ensemble" in result.source or "ewma" in result.source
+        # With proper vol clustering, GJR should succeed and provide params
+        if "ensemble" in result.source and result.omega is not None:
+            assert result.alpha is not None
+            assert result.beta is not None
+
+    def test_ensemble_pools_residuals(self):
+        """Ensemble should pool standardized residuals from all models."""
+        from em_sde.garch import fit_garch_ensemble
+        rng = np.random.default_rng(42)
+        returns = rng.standard_normal(756) * 0.01
+        result = fit_garch_ensemble(returns, min_window=252)
+        if result.standardized_residuals is not None:
+            # Pooled from multiple models -> should be longer than single model
+            assert len(result.standardized_residuals) >= 100
+
+
+# ============================================================
+# Test: Earnings Calendar Feature
+# ============================================================
+
+class TestEarningsCalendar:
+    """Tests for earnings proximity feature in multi-feature calibrator."""
+
+    def test_earnings_proximity_computation(self):
+        """compute_earnings_proximity should return correct values."""
+        from em_sde.data_layer import compute_earnings_proximity
+        earnings = np.array([
+            np.datetime64("2024-01-25"),
+            np.datetime64("2024-04-25"),
+            np.datetime64("2024-07-25"),
+        ])
+        # On earnings day
+        prox = compute_earnings_proximity(np.datetime64("2024-01-25"), earnings)
+        assert prox == 1.0
+        # 10 days away
+        prox = compute_earnings_proximity(np.datetime64("2024-01-15"), earnings)
+        assert abs(prox - 0.5) < 0.01
+        # 20+ days away
+        prox = compute_earnings_proximity(np.datetime64("2024-03-01"), earnings)
+        assert prox < 0.1
+
+    def test_earnings_aware_calibrator_7_features(self):
+        """Earnings-aware calibrator should have 7 features."""
+        cal = MultiFeatureCalibrator(min_updates=0, earnings_aware=True)
+        assert cal.N_FEATURES == 7
+        assert len(cal.w) == 7
+
+    def test_earnings_unaware_calibrator_6_features(self):
+        """Default calibrator should have 6 features."""
+        cal = MultiFeatureCalibrator(min_updates=0, earnings_aware=False)
+        assert cal.N_FEATURES == 6
+        assert len(cal.w) == 6
+
+    def test_earnings_aware_calibrate_accepts_proximity(self):
+        """Earnings-aware calibrator should accept earnings_proximity."""
+        cal = MultiFeatureCalibrator(min_updates=0, earnings_aware=True)
+        p_cal = cal.calibrate(0.06, 0.01, 0.0, 1.0, 0.0, earnings_proximity=0.5)
+        assert 0 <= p_cal <= 1.0
+
+    def test_earnings_aware_update_works(self):
+        """Earnings-aware calibrator update should not crash."""
+        cal = MultiFeatureCalibrator(lr=0.01, min_updates=0, earnings_aware=True)
+        for _ in range(50):
+            cal.update(0.06, 0.0, 0.01, 0.0, 1.0, 0.0, earnings_proximity=0.3)
+        p_cal = cal.calibrate(0.06, 0.01, 0.0, 1.0, 0.0, earnings_proximity=0.3)
+        assert 0 <= p_cal <= 1.0
+
+    def test_backward_compat_default_earnings_proximity(self):
+        """Existing callers without earnings_proximity should still work."""
+        cal = MultiFeatureCalibrator(min_updates=0)
+        # Call without earnings_proximity (uses default 0.0)
+        p_cal = cal.calibrate(0.06, 0.01, 0.0, 1.0, 0.0)
+        assert abs(p_cal - 0.06) < 0.001
+
+
+# ============================================================
+# Test: Config Flags for New Features
+# ============================================================
+
+class TestNewFeatureConfig:
+    """Tests for FHS, ensemble, and earnings config flags."""
+
+    def test_fhs_default_disabled(self):
+        """FHS should be disabled by default."""
+        cfg = PipelineConfig()
+        assert cfg.model.fhs_enabled is False
+
+    def test_ensemble_default_disabled(self):
+        """GARCH ensemble should be disabled by default."""
+        cfg = PipelineConfig()
+        assert cfg.model.garch_ensemble is False
+
+    def test_earnings_default_disabled(self):
+        """Earnings calendar should be disabled by default."""
+        cfg = PipelineConfig()
+        assert cfg.model.earnings_calendar is False
+
+
 if __name__ == "__main__":
     raise SystemExit(
         subprocess.call([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"])

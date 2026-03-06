@@ -39,6 +39,7 @@ def simulate_gbm_terminal(
     mu_year: float = 0.0,
     seed: Optional[int] = None,
     t_df: float = 0.0,
+    standardized_residuals: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Simulate terminal prices via Euler-Maruyama GBM in log-space.
@@ -74,12 +75,15 @@ def simulate_gbm_terminal(
     vol = sigma_year * np.sqrt(dt)
 
     use_t = t_df > 0 and np.isfinite(t_df) and t_df > 2.0
+    use_fhs = standardized_residuals is not None and len(standardized_residuals) >= 100
 
     # Simulate in log-space, only track current state (memory efficient)
     log_price = np.full(n_paths, np.log(S0))
 
     for _ in range(H):
-        if use_t:
+        if use_fhs:
+            Z = rng.choice(standardized_residuals, size=n_paths, replace=True)
+        elif use_t:
             # Student-t scaled to unit variance: Var(t/sqrt((nu-2)/nu)) = 1
             Z = rng.standard_t(df=t_df, size=n_paths) * np.sqrt((t_df - 2.0) / t_df)
         else:
@@ -104,6 +108,7 @@ def simulate_garch_terminal(
     jump_intensity: float = 0.0,
     jump_mean: float = 0.0,
     jump_vol: float = 0.0,
+    standardized_residuals: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Simulate terminal prices with GARCH(1,1) vol dynamics within each path.
@@ -158,6 +163,7 @@ def simulate_garch_terminal(
     sigma2 = np.full(n_paths, sigma_1d ** 2)
 
     use_t = t_df > 0 and np.isfinite(t_df) and t_df > 2.0
+    use_fhs = standardized_residuals is not None and len(standardized_residuals) >= 100
     use_jumps = jump_intensity > 0.0
     lambda_dt = jump_intensity * dt  # jump probability per step
 
@@ -178,7 +184,9 @@ def simulate_garch_terminal(
         vol = sigma_year_step * np.sqrt(dt)  # = sigma_step
 
         # Innovation
-        if use_t:
+        if use_fhs:
+            Z = rng.choice(standardized_residuals, size=n_paths, replace=True)
+        elif use_t:
             Z = rng.standard_t(df=t_df, size=n_paths) * np.sqrt((t_df - 2.0) / t_df)
         else:
             Z = rng.standard_normal(n_paths)

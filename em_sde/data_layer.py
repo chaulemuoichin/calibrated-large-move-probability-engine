@@ -445,6 +445,77 @@ def _kurtosis(x: np.ndarray) -> float:
     return excess - 3.0  # excess kurtosis
 
 
+def load_earnings_dates(ticker: str) -> Optional[np.ndarray]:
+    """
+    Load historical earnings announcement dates for a ticker.
+
+    Returns an array of datetime64 dates sorted chronologically,
+    or None if unavailable. Walk-forward safe: earnings dates are
+    publicly announced weeks before the event.
+
+    Parameters
+    ----------
+    ticker : str
+        Stock ticker symbol (e.g., "AAPL", "GOOGL").
+
+    Returns
+    -------
+    earnings_dates : np.ndarray of datetime64 or None
+    """
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+        # get_earnings_dates returns future and past dates
+        ed = tk.get_earnings_dates(limit=100)
+        if ed is None or len(ed) == 0:
+            logger.debug("No earnings dates found for %s", ticker)
+            return None
+        dates = pd.to_datetime(ed.index)
+        if dates.tz is not None:
+            dates = dates.tz_localize(None)
+        dates = np.sort(dates.values.astype("datetime64[D]"))
+        logger.info("Loaded %d earnings dates for %s", len(dates), ticker)
+        return dates
+    except Exception as e:
+        logger.debug("Failed to load earnings dates for %s: %s", ticker, e)
+        return None
+
+
+from typing import Optional
+
+
+def compute_earnings_proximity(
+    current_date: np.datetime64,
+    earnings_dates: np.ndarray,
+    max_days: int = 20,
+) -> float:
+    """
+    Compute proximity to nearest earnings date.
+
+    Returns a value in [0, 1] where 1.0 = on earnings day,
+    0.0 = 20+ trading days from nearest earnings.
+    Walk-forward safe: uses all known earnings dates (past and scheduled).
+
+    Parameters
+    ----------
+    current_date : np.datetime64
+        The current date.
+    earnings_dates : np.ndarray
+        Array of earnings dates (datetime64[D]).
+    max_days : int
+        Number of calendar days at which proximity drops to 0.
+
+    Returns
+    -------
+    proximity : float
+        Value in [0, 1].
+    """
+    current = np.datetime64(current_date, "D")
+    diffs = np.abs((earnings_dates - current).astype(int))
+    min_diff = int(np.min(diffs))
+    return max(0.0, 1.0 - min_diff / max_days)
+
+
 def _cache_load(ticker: str, max_age_days: int):
     """Load cached data if fresh enough."""
     cache_path = CACHE_DIR / f"{ticker}.parquet"

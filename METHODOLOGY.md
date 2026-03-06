@@ -324,6 +324,28 @@ When `mc_regime_t_df: true`, the Student-t degrees of freedom for MC innovations
 
 Defaults: low_vol t_df=8.0, mid_vol t_df=5.0, high_vol t_df=4.0. Configured via `mc_regime_t_df_low`, `mc_regime_t_df_mid`, `mc_regime_t_df_high`.
 
+### Filtered Historical Simulation (FHS)
+
+When `fhs_enabled: true`, instead of drawing innovations Z from a parametric distribution (Gaussian or Student-t), we resample from the **standardized residuals** of the GARCH fit ([Barone-Adesi, Giannopoulos & Vosper, 1999](https://doi.org/10.1016/S0378-4266(98)00091-4)):
+
+$$z_t = \frac{\epsilon_t}{\hat{\sigma}_t}$$
+
+where $\epsilon_t$ are the GARCH residuals and $\hat{\sigma}_t$ is the fitted conditional volatility. These standardized residuals capture the **actual** innovation distribution — including any asymmetry, fat tails, or other features that a parametric distribution misses.
+
+At simulation time:
+
+$$Z_{\mathrm{step}} = z_{\mathrm{sampled}},\quad z_{\mathrm{sampled}} \sim \mathrm{Uniform}\{z_1, z_2, \ldots, z_T\}$$
+
+This eliminates model misspecification from assuming a particular parametric form. Falls back to parametric when fewer than 100 standardized residuals are available.
+
+### GARCH Ensemble (garch_ensemble)
+
+When `garch_ensemble: true`, three GARCH variants are fitted — GARCH(1,1), GJR-GARCH(1,1), and EGARCH(1,1) — and their sigma_1d forecasts are **equal-weight averaged** ([Ranjan & Gneiting, 2010](https://doi.org/10.1111/j.1467-9868.2009.00726.x)):
+
+$$\hat{\sigma}_{1d}^{\mathrm{ens}} = \frac{1}{K}\sum_{k=1}^{K}\hat{\sigma}_{1d}^{(k)}$$
+
+The GARCH dynamics for simulation use the GJR model's parameters (omega, alpha, beta, gamma). The averaged sigma provides a more robust starting variance that reduces model risk. Standardized residuals are pooled across all successful models.
+
 ### Where to look for problems
 
 - **Path count**: 100K paths give Monte Carlo standard error ~0.001 for p=0.05. Reducing to 1K (for speed) gives SE ~0.007 — still usable for ranking but noisy for absolute levels.
@@ -390,15 +412,23 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 ### Multi-Feature Calibrator
 
-Uses 6 features instead of just `logit(p_raw)`:
+Uses 6 features (or 7 with earnings calendar) instead of just `logit(p_raw)`:
 
-$$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t}\right]$$
+$$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t},\ (\mathrm{earn}_t)\right]$$
 
-Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, and $v_{ov,t}$ corresponds to `vol_of_vol_t`.
+Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, $v_{ov,t}$ corresponds to `vol_of_vol_t`, and $\mathrm{earn}_t$ is the earnings proximity feature (optional, 0-1 scale).
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
 Updated via SGD with L2 regularization (prevents overfitting) and gradient clipping (prevents explosions). Requires 100 outcomes before activating.
+
+### Earnings Calendar Feature (earnings_calendar)
+
+When `earnings_calendar: true`, an additional feature `earnings_proximity` is added to the multi-feature calibrator. This addresses a key reason why single-stock calibration is harder than index calibration: earnings announcements produce much larger moves than non-earnings days ([Dubinsky, Johannes, Kaeck & Seeger, 2019](https://doi.org/10.1093/rfs/hhy018) | [Savor & Wilson, 2016](https://doi.org/10.1111/jofi.12351)).
+
+$$\mathrm{earn}_t = \max\!\left(0,\, 1 - \frac{|\mathrm{days\_to\_nearest\_earnings}|}{20}\right)$$
+
+The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days from any earnings date. This allows the calibrator to learn separate intercepts for earnings vs non-earnings windows. Walk-forward safe because earnings dates are publicly announced weeks before the event. Data sourced from yfinance.
 
 ### Regime-Conditional Multi-Feature Calibration
 
@@ -846,3 +876,8 @@ if float(er_by_horizon.min()) < min_er_target:
 | TPE sampler | Bergstra, J., Bardenet, R., Bengio, Y. & Kégl, B. (2011). "Algorithms for hyper-parameter optimization." *NeurIPS 2011*. | [Paper](https://papers.nips.cc/paper/2011/hash/86e8f7ab32cfd12577bc2619bc635690-Abstract.html) |
 | Events per parameter | Vittinghoff, E. & McCulloch, C.E. (2007). "Relaxing the rule of ten events per variable in logistic and Cox regression." *Am J Epidemiology* 165(6), 710-718. | [DOI](https://doi.org/10.1002/sim.2691) |
 | Isotonic regression (PAV) | Barlow, R.E. et al. (1972). *Statistical Inference Under Order Restrictions*. Wiley. | [Wikipedia](https://en.wikipedia.org/wiki/Isotonic_regression) |
+| Filtered Historical Sim | Barone-Adesi, G., Giannopoulos, K. & Vosper, L. (1999). "VaR without correlations for portfolios of derivative securities." *J. Futures Markets* 19(5), 583-602. | [DOI](https://doi.org/10.1016/S0378-4266(98)00091-4) |
+| Model averaging | Ranjan, R. & Gneiting, T. (2010). "Combining probability forecasts." *JRSS-B* 72(1), 71-91. | [DOI](https://doi.org/10.1111/j.1467-9868.2009.00726.x) |
+| EGARCH | Nelson, D.B. (1991). "Conditional heteroskedasticity in asset returns." *Econometrica* 59(2), 347-370. | [DOI](https://doi.org/10.2307/2938260) |
+| Earnings and tails | Dubinsky, A., Johannes, M., Kaeck, A. & Seeger, N. (2019). "Option pricing of earnings announcement risks." *RFS* 32(2), 646-687. | [DOI](https://doi.org/10.1093/rfs/hhy018) |
+| Earnings and risk | Savor, P. & Wilson, M. (2016). "Earnings announcements and systematic risk." *J. Finance* 71(1), 83-138. | [DOI](https://doi.org/10.1111/jofi.12351) |

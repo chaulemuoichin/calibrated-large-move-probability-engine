@@ -33,6 +33,7 @@ class GarchResult:
     beta: Optional[float] = None     # GARCH persistence
     gamma: Optional[float] = None    # GJR asymmetry term (None for symmetric GARCH)
     diagnostics: Optional[dict] = None  # stationarity, half-life, unconditional vol
+    standardized_residuals: Optional[np.ndarray] = None  # FHS: z_t = resid_t / sigma_t
 
 
 def _to_float(value: object) -> float:
@@ -130,6 +131,22 @@ def fit_garch(
                 omega_dec, alpha_val, beta_val, gamma_val, model_type,
             )
 
+            # Extract standardized residuals for FHS
+            try:
+                cond_vol = res.conditional_volatility
+                resid = res.resid
+                if cond_vol is not None and resid is not None:
+                    std_resid = np.asarray(resid, dtype=np.float64) / np.asarray(cond_vol, dtype=np.float64)
+                    std_resid = std_resid[np.isfinite(std_resid)]
+                    if len(std_resid) >= 100:
+                        standardized_residuals = std_resid
+                    else:
+                        standardized_residuals = None
+                else:
+                    standardized_residuals = None
+            except Exception:
+                standardized_residuals = None
+
             return GarchResult(
                 sigma_1d=sigma_1d,
                 source=source,
@@ -138,6 +155,7 @@ def fit_garch(
                 beta=beta_val,
                 gamma=gamma_val,
                 diagnostics=diagnostics,
+                standardized_residuals=standardized_residuals,
             )
 
     except Exception as e:
@@ -578,3 +596,156 @@ def fit_har_rv(
     except Exception as e:
         logger.debug("HAR-RV fit failed: %s", e)
         return None
+
+
+def fit_garch_ensemble(
+    returns: NDArray[np.float64],
+    window: int = 756,
+    min_window: int = 252,
+) -> GarchResult:
+    """
+    Fit an ensemble of GARCH variants and average their sigma_1d forecasts.
+
+    Fits GARCH(1,1), GJR-GARCH(1,1), and EGARCH(1,1), then returns a
+    GarchResult with the equal-weight averaged sigma_1d. The GARCH params
+    (omega, alpha, beta, gamma) are from the GJR fit for use in GARCH-in-sim.
+
+    Parameters
+    ----------
+    returns : np.ndarray
+        Daily simple returns (decimal form).
+    window : int
+        Rolling window size.
+    min_window : int
+        Minimum returns required.
+
+    Returns
+    -------
+    GarchResult
+        Averaged sigma_1d with GJR params for simulation dynamics.
+    """
+    n = len(returns)
+    if n < min_window:
+        raise ValueError(f"Need >= {min_window} returns, got {n}")
+
+    data = np.asarray(returns[-window:] if n > window else returns, dtype=np.float64)
+    data_pct = data * 100.0
+
+    sigmas = []
+    gjr_result = None
+    all_std_resid = []
+
+    try:
+        from arch import arch_model
+
+        # Model 1: GARCH(1,1)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                am1 = arch_model(data_pct, vol="GARCH", p=1, q=1, mean="Zero", rescale=False)
+                res1 = am1.fit(disp="off", show_warning=False)
+                fcast1 = res1.forecast(horizon=1)
+                var1 = _to_float(fcast1.variance.iloc[-1, 0])
+                if var1 > 0 and np.isfinite(var1):
+                    sig1 = _to_float(np.sqrt(np.float64(var1)) / np.float64(100.0))
+                    if 0 < sig1 <= 1.0:
+                        sigmas.append(sig1)
+                        sr = (res1.resid / res1.conditional_volatility)
+                        sr = np.asarray(sr, dtype=np.float64)
+                        sr = sr[np.isfinite(sr)]
+                        if len(sr) >= 100:
+                            all_std_resid.append(sr)
+        except Exception as e:
+            logger.debug("Ensemble GARCH(1,1) failed: %s", e)
+
+        # Model 2: GJR-GARCH(1,1) — also provides params for sim
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                am2 = arch_model(data_pct, vol="GARCH", p=1, o=1, q=1, mean="Zero", rescale=False)
+                res2 = am2.fit(disp="off", show_warning=False)
+                fcast2 = res2.forecast(horizon=1)
+                var2 = _to_float(fcast2.variance.iloc[-1, 0])
+                if var2 > 0 and np.isfinite(var2):
+                    sig2 = _to_float(np.sqrt(np.float64(var2)) / np.float64(100.0))
+                    if 0 < sig2 <= 1.0:
+                        sigmas.append(sig2)
+                        sr = (res2.resid / res2.conditional_volatility)
+                        sr = np.asarray(sr, dtype=np.float64)
+                        sr = sr[np.isfinite(sr)]
+                        if len(sr) >= 100:
+                            all_std_resid.append(sr)
+                        # Extract GJR params for simulation
+                        gjr_result = GarchResult(
+                            sigma_1d=sig2,
+                            source="gjr_garch",
+                            omega=_to_float(res2.params["omega"]) / 10000.0,
+                            alpha=_to_float(res2.params["alpha[1]"]),
+                            beta=_to_float(res2.params["beta[1]"]),
+                            gamma=_to_float(res2.params.get("gamma[1]", 0.0)),
+                            diagnostics=garch_diagnostics(
+                                _to_float(res2.params["omega"]) / 10000.0,
+                                _to_float(res2.params["alpha[1]"]),
+                                _to_float(res2.params["beta[1]"]),
+                                _to_float(res2.params.get("gamma[1]", 0.0)),
+                                "gjr",
+                            ),
+                        )
+        except Exception as e:
+            logger.debug("Ensemble GJR-GARCH failed: %s", e)
+
+        # Model 3: EGARCH(1,1)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                am3 = arch_model(data_pct, vol="EGARCH", p=1, o=1, q=1, mean="Zero", rescale=False)
+                res3 = am3.fit(disp="off", show_warning=False)
+                fcast3 = res3.forecast(horizon=1)
+                var3 = _to_float(fcast3.variance.iloc[-1, 0])
+                if var3 > 0 and np.isfinite(var3):
+                    sig3 = _to_float(np.sqrt(np.float64(var3)) / np.float64(100.0))
+                    if 0 < sig3 <= 1.0:
+                        sigmas.append(sig3)
+                        sr = (res3.resid / res3.conditional_volatility)
+                        sr = np.asarray(sr, dtype=np.float64)
+                        sr = sr[np.isfinite(sr)]
+                        if len(sr) >= 100:
+                            all_std_resid.append(sr)
+        except Exception as e:
+            logger.debug("Ensemble EGARCH failed: %s", e)
+
+    except ImportError:
+        pass
+
+    if not sigmas:
+        # All models failed — fall back to EWMA
+        sigma_1d = ewma_volatility(data)
+        return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback")
+
+    avg_sigma = float(np.mean(sigmas))
+
+    # Pool standardized residuals from all successful models
+    if all_std_resid:
+        pooled_resid = np.concatenate(all_std_resid)
+    else:
+        pooled_resid = None
+
+    # Use GJR params if available, otherwise fall back to single-model fit
+    if gjr_result is not None:
+        return GarchResult(
+            sigma_1d=avg_sigma,
+            source=f"ensemble_{len(sigmas)}",
+            omega=gjr_result.omega,
+            alpha=gjr_result.alpha,
+            beta=gjr_result.beta,
+            gamma=gjr_result.gamma,
+            diagnostics=gjr_result.diagnostics,
+            standardized_residuals=pooled_resid,
+        )
+
+    # No GJR — return averaged sigma without sim params
+    return GarchResult(
+        sigma_1d=avg_sigma,
+        source=f"ensemble_{len(sigmas)}",
+        standardized_residuals=pooled_resid,
+    )

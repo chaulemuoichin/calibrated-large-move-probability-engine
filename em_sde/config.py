@@ -75,6 +75,12 @@ class ModelConfig:
     har_rv_refit_interval: int = 21       # Refit HAR-RV every N trading days
     har_rv_ridge_alpha: float = 0.01      # Ridge regularization strength
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
+    # Filtered Historical Simulation: use GARCH standardized residuals instead of parametric t
+    fhs_enabled: bool = False
+    # GARCH ensemble: average sigma from GARCH(1,1) + GJR-GARCH + EGARCH
+    garch_ensemble: bool = False
+    # Earnings calendar: add earnings proximity feature to multi-feature calibrator
+    earnings_calendar: bool = False
 
 
 @dataclass

@@ -401,21 +401,23 @@ class RegimeMultiFeatureCalibrator:
 
     def calibrate(self, p_raw: float, sigma_1d: float,
                   delta_sigma: float, vol_ratio: float,
-                  vol_of_vol: float) -> float:
+                  vol_of_vol: float,
+                  earnings_proximity: float = 0.0) -> float:
         """Apply regime-specific multi-feature calibration."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         return self.calibrators[regime].calibrate(
-            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
                delta_sigma: float, vol_ratio: float,
-               vol_of_vol: float) -> None:
+               vol_of_vol: float,
+               earnings_proximity: float = 0.0) -> None:
         """Update the regime-specific multi-feature calibrator."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         self.calibrators[regime].update(
-            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
 
     def state(self) -> Dict:
         """Return state of the currently active regime calibrator."""
@@ -456,8 +458,6 @@ class MultiFeatureCalibrator:
         - Identity initialization: w[1]=1 so it starts as sigmoid(logit(p_raw))=p_raw
     """
 
-    N_FEATURES = 6
-
     def __init__(self, lr: float = 0.01, l2_reg: float = 1e-4,
                  min_updates: int = 100, safety_gate: bool = True,
                  gate_window: int = 200,
@@ -470,7 +470,10 @@ class MultiFeatureCalibrator:
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
                  histogram_monotonic: bool = True,
-                 post_cal_method: str = ""):
+                 post_cal_method: str = "",
+                 earnings_aware: bool = False):
+        self.earnings_aware = earnings_aware
+        self.N_FEATURES = 7 if earnings_aware else 6
         self.w = np.zeros(self.N_FEATURES)
         self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
@@ -510,31 +513,37 @@ class MultiFeatureCalibrator:
 
     def _build_features(self, p_raw: float, sigma_1d: float,
                         delta_sigma: float, vol_ratio: float,
-                        vol_of_vol: float) -> np.ndarray:
+                        vol_of_vol: float,
+                        earnings_proximity: float = 0.0) -> np.ndarray:
         """Build feature vector from raw inputs."""
-        return np.array([
+        features = [
             1.0,                     # intercept
             logit(p_raw),            # logit of MC probability
             sigma_1d * 100.0,        # daily vol (scaled for gradient stability)
             delta_sigma * 100.0,     # 20d vol change (scaled)
             vol_ratio,               # realized_vol / forecast_vol
             vol_of_vol * 100.0,      # rolling std of sigma (scaled)
-        ])
+        ]
+        if self.earnings_aware:
+            features.append(earnings_proximity)  # 0=far from earnings, 1=earnings day
+        return np.array(features)
 
     def _compute_cal(self, p_raw: float, sigma_1d: float,
                      delta_sigma: float, vol_ratio: float,
-                     vol_of_vol: float) -> float:
+                     vol_of_vol: float,
+                     earnings_proximity: float = 0.0) -> float:
         """Apply the logistic mapping (internal, ignoring gate)."""
         if self.n_updates < self.min_updates:
             return p_raw
-        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
         return sigmoid(float(self.w @ x))
 
     def calibrate(self, p_raw: float, sigma_1d: float,
                   delta_sigma: float, vol_ratio: float,
-                  vol_of_vol: float) -> float:
+                  vol_of_vol: float,
+                  earnings_proximity: float = 0.0) -> float:
         """Apply calibration. Falls back to raw if safety gate triggers."""
-        p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
         if self.safety_gate and self._gate_active:
             return p_raw
         if self.gate_on_discrimination and self._discrimination_gate_active:
@@ -545,9 +554,10 @@ class MultiFeatureCalibrator:
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
                delta_sigma: float, vol_ratio: float,
-               vol_of_vol: float) -> None:
+               vol_of_vol: float,
+               earnings_proximity: float = 0.0) -> None:
         """Update weights via SGD on label resolution."""
-        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
         p_cal = sigmoid(float(self.w @ x))
         error = y - p_cal
 

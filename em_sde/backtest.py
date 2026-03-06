@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
-from .garch import fit_garch, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_har_rv, HarRvResult
+from .garch import fit_garch, fit_garch_ensemble, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_har_rv, HarRvResult
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -46,6 +46,7 @@ class PendingPrediction:
     delta_sigma: float = 0.0   # 20d sigma change
     vol_ratio: float = 1.0     # realized_vol / forecast_vol
     vol_of_vol: float = 0.0    # rolling std of sigma
+    earnings_proximity: float = 0.0  # proximity to nearest earnings date
 
 
 @dataclass
@@ -174,6 +175,9 @@ def run_walkforward(
     har_rv_refit_interval = cfg.model.har_rv_refit_interval
     har_rv_ridge_alpha = cfg.model.har_rv_ridge_alpha
     fixed_pct_by_horizon = cfg.model.regime_gated_fixed_pct_by_horizon or {}
+    fhs_enabled = cfg.model.fhs_enabled
+    garch_ensemble_enabled = cfg.model.garch_ensemble
+    earnings_calendar_enabled = cfg.model.earnings_calendar
 
     # Regime-gated threshold router
     regime_router: Optional[RegimeRouter] = None
@@ -188,6 +192,15 @@ def run_walkforward(
 
     # Seed sequence for reproducible parallel MC
     ss = SeedSequence(base_seed)
+
+    # Load earnings dates if enabled
+    earnings_dates = None
+    if earnings_calendar_enabled:
+        from .data_layer import load_earnings_dates, compute_earnings_proximity
+        earnings_dates = load_earnings_dates(cfg.data.ticker)
+        if earnings_dates is None:
+            logger.warning("Earnings calendar enabled but no dates found for %s", cfg.data.ticker)
+            earnings_calendar_enabled = False
 
     # Calibrators: one per horizon (multi-feature or standard online)
     calibrators_online: Optional[Dict[int, OnlineCalibrator]] = None
@@ -208,6 +221,7 @@ def run_walkforward(
         histogram_prior_strength=histogram_prior_strength,
         histogram_monotonic=histogram_monotonic,
         post_cal_method=post_cal_method,
+        earnings_aware=earnings_calendar_enabled,
     )
     if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
@@ -302,10 +316,15 @@ def run_walkforward(
         # === Step 2: Fit GARCH on returns up to idx ===
         # returns[0..idx-1] are known at date idx
         available_returns = all_returns[:idx]
-        garch_result = fit_garch(
-            available_returns, window=garch_window, min_window=garch_min,
-            model_type=garch_model_type if garch_in_sim else "garch",
-        )
+        if garch_ensemble_enabled:
+            garch_result = fit_garch_ensemble(
+                available_returns, window=garch_window, min_window=garch_min,
+            )
+        else:
+            garch_result = fit_garch(
+                available_returns, window=garch_window, min_window=garch_min,
+                model_type=garch_model_type if garch_in_sim else "garch",
+            )
         # Apply stationarity projection if needed
         projected = False
         if (garch_stationarity and garch_in_sim
@@ -373,6 +392,14 @@ def run_walkforward(
         row["delta_sigma"] = delta_sigma
         row["vol_ratio"] = vol_ratio
         row["vol_of_vol"] = vol_of_vol
+
+        # Earnings proximity feature
+        if earnings_calendar_enabled and earnings_dates is not None:
+            current_date = np.datetime64(dates[idx], "D")
+            earnings_prox = compute_earnings_proximity(current_date, earnings_dates)
+            row["earnings_proximity"] = earnings_prox
+        else:
+            earnings_prox = 0.0
 
         # Feed vol to regime-MF calibrators
         if calibrators_mf is not None:
@@ -467,6 +494,9 @@ def run_walkforward(
         else:
             step_t_df = t_df
 
+        # FHS: pass standardized residuals to MC simulation
+        fhs_residuals = garch_result.standardized_residuals if fhs_enabled else None
+
         mc_results = {}
         with ThreadPoolExecutor(max_workers=len(horizons)) as executor:
             futures = {}
@@ -487,6 +517,7 @@ def run_walkforward(
                     jump_mean=step_jump_mean,
                     jump_vol=step_jump_vol,
                     return_quantiles=store_quantiles,
+                    standardized_residuals=fhs_residuals,
                 )
             for H in horizons:
                 mc_results[H] = futures[H].result()
@@ -505,7 +536,7 @@ def run_walkforward(
                 p_raw, se = mc_result
             if calibrators_mf is not None:
                 p_cal = calibrators_mf[H].calibrate(
-                    p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
+                    p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_prox)
                 state = calibrators_mf[H].state()
             else:
                 assert calibrators_online is not None
@@ -540,6 +571,7 @@ def run_walkforward(
                 delta_sigma=delta_sigma,
                 vol_ratio=vol_ratio,
                 vol_of_vol=vol_of_vol,
+                earnings_proximity=earnings_prox,
             ))
 
         # === Step 7: Ensemble (optional) ===
@@ -609,6 +641,7 @@ def _simulate_horizon(
     jump_mean: float = 0.0,
     jump_vol: float = 0.0,
     return_quantiles: bool = False,
+    standardized_residuals: Optional[np.ndarray] = None,
 ):
     """Simulate and compute move probability for one horizon.
 
@@ -621,9 +654,11 @@ def _simulate_horizon(
             omega=float(omega), alpha=float(alpha), beta=float(beta), gamma=gamma,
             mu_year=mu_year, seed=seed, t_df=t_df,
             jump_intensity=jump_intensity, jump_mean=jump_mean, jump_vol=jump_vol,
+            standardized_residuals=standardized_residuals,
         )
     else:
-        terminal = simulate_gbm_terminal(S0, sigma_1d, H, n_paths, mu_year, seed, t_df=t_df)
+        terminal = simulate_gbm_terminal(S0, sigma_1d, H, n_paths, mu_year, seed, t_df=t_df,
+                                          standardized_residuals=standardized_residuals)
     return compute_move_probability(terminal, S0, threshold, return_quantiles=return_quantiles)
 
 
@@ -678,6 +713,7 @@ def _resolve_predictions_mf(
                 calibrators[H].update(
                     pred.p_raw, y, pred.sigma_1d,
                     pred.delta_sigma, pred.vol_ratio, pred.vol_of_vol,
+                    pred.earnings_proximity,
                 )
                 resolved_labels[H].append(y)
 

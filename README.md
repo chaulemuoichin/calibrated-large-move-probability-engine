@@ -3,7 +3,7 @@
 A system that estimates the probability of large price moves over the next 1-4 weeks, and keeps correcting itself as real outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-191%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-209%20passing-brightgreen)
 
 ## Why This Exists 
 
@@ -100,7 +100,9 @@ All settings live in YAML files under `configs/`. Key choices:
 
 - Jump-diffusion for crash-prone stocks (e.g., TSLA)
 - Multi-feature calibration with 6 features + L2 regularization
-- Fat-tailed innovations (Student-t)
+- Fat-tailed innovations (Student-t) or Filtered Historical Simulation (FHS)
+- GARCH ensemble (GARCH + GJR + EGARCH averaged)
+- Earnings calendar proximity feature for single-stock calibration
 - Regime-gated thresholds for adaptive behavior across vol regimes
 
 ### Preset Configs
@@ -121,7 +123,7 @@ All settings live in YAML files under `configs/`. Key choices:
 python -m pytest tests/ -v
 ```
 
-191 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
+209 tests covering the full pipeline: simulation math, calibration logic, no-lookahead guarantees, evaluation metrics, and more.
 
 **Runner commands (from repo root):**
 
@@ -169,7 +171,7 @@ scripts/               Operational runners
   run_overfit_check.py   Overfitting diagnostics
   run_full_institutional.py  Full validation battery
   run_stress_suite.py    Stress testing
-tests/                 191 unit tests
+tests/                 209 unit tests
 ```
 
 ## Known Limitations
