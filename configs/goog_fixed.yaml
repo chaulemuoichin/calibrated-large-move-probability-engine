@@ -22,6 +22,9 @@ model:
   t_df: 5.0
   garch_in_sim: true
   garch_model_type: "gjr"
+  fhs_enabled: true
+  garch_ensemble: true
+  earnings_calendar: true
   threshold_mode: "fixed_pct"
   fixed_threshold_pct: 0.05
 

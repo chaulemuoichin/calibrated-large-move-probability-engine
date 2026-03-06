@@ -205,7 +205,7 @@ def run_walkforward(
     # Calibrators: one per horizon (multi-feature or standard online)
     calibrators_online: Optional[Dict[int, OnlineCalibrator]] = None
     calibrators_mf: Optional[Dict[int, MultiFeatureCalibrator]] = None
-    _mf_kwargs = dict(
+    _mf_kwargs_base = dict(
         lr=multi_feature_lr,
         l2_reg=multi_feature_l2,
         min_updates=multi_feature_min_updates,
@@ -221,19 +221,22 @@ def run_walkforward(
         histogram_prior_strength=histogram_prior_strength,
         histogram_monotonic=histogram_monotonic,
         post_cal_method=post_cal_method,
-        earnings_aware=earnings_calendar_enabled,
     )
     if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
             H: RegimeMultiFeatureCalibrator(
                 n_bins=regime_n_bins,
-                **_mf_kwargs,
+                earnings_aware=earnings_calendar_enabled and H <= 5,
+                **_mf_kwargs_base,
             )
             for H in horizons
         }
     elif multi_feature:
         calibrators_mf = {
-            H: MultiFeatureCalibrator(**_mf_kwargs)
+            H: MultiFeatureCalibrator(
+                earnings_aware=earnings_calendar_enabled and H <= 5,
+                **_mf_kwargs_base,
+            )
             for H in horizons
         }
     else:

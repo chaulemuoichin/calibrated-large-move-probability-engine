@@ -96,9 +96,11 @@ These were tried, tested, and proven to not work for our use case. Do not add th
 
 **What works (the proven stack):**
 - **Volatility**: GARCH(1,1)/GJR with EWMA fallback + stationarity projection
-- **Simulation**: GARCH-in-sim Monte Carlo with Student-t fat tails
-- **Calibration**: Multi-feature linear (6 features + L2) with histogram post-calibration
+- **Simulation**: GARCH-in-sim Monte Carlo with Student-t fat tails (regime-conditional df)
+- **Calibration**: Multi-feature linear (6 features + L2) with histogram post-calibration. Earnings calendar (7th feature) for H≤5 on single stocks.
 - **Thresholds**: `fixed_pct` or `regime_gated` (routes to fixed_pct/anchored_vol by vol regime)
+
+**Earnings Calendar** (`earnings_calendar: true`): Adds earnings proximity feature (0-1 scale) to multi-feature calibrator. **Only active for H≤5** — at longer horizons the signal becomes noise and adds a parameter without improving discrimination. Horizon-conditional gating is automatic in `backtest.py`. (Dubinsky et al., 2019; Savor & Wilson, 2016)
 
 ## Common Commands
 

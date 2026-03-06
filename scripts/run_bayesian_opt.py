@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
+import hashlib
 import warnings
 import logging
 import argparse
@@ -29,6 +30,8 @@ warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from typing import Optional
 
 import optuna
 from optuna.samplers import TPESampler
@@ -317,16 +320,40 @@ def holdout_evaluate(
     return {"holdout_ece": holdout_ece, "holdout_mean_ece": mean_ece}
 
 
+def _study_version_key(config_path: Path, lean: bool) -> str:
+    """Compute a short hash of feature flags + search mode to version BO studies.
+
+    Changing feature flags (fhs, ensemble, earnings) or lean/full mode
+    invalidates prior trials, so the study name must change to avoid
+    contamination from stale results.
+    """
+    cfg = load_config(str(config_path))
+    flags = (
+        f"lean={lean},"
+        f"fhs={cfg.model.fhs_enabled},"
+        f"ens={cfg.model.garch_ensemble},"
+        f"earn={cfg.model.earnings_calendar},"
+        f"garch_type={cfg.model.garch_model_type},"
+        f"regime_tdf={cfg.model.mc_regime_t_df}"
+    )
+    return hashlib.md5(flags.encode()).hexdigest()[:8]
+
+
 def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
                      lean: bool = True) -> optuna.Study:
     """Run Bayesian optimization for a single config with holdout validation."""
     config_path = CONFIGS[config_name]
-    db_path = OUT_DIR / f"optuna_{config_name}.db"
     mode = "lean (6 params)" if lean else "full (14 params)"
+
+    # Version key ensures feature flag changes start a fresh study
+    ver = _study_version_key(config_path, lean)
+    db_path = OUT_DIR / f"optuna_{config_name}.db"
+    study_name = f"ece_opt_{config_name}_v{ver}"
 
     print(f"\n{'='*60}")
     print(f"Bayesian Optimization: {config_name} [{mode}]")
     print(f"Config: {config_path}")
+    print(f"Study: {study_name}")
     print(f"Trials: {n_trials}")
     print(f"Holdout: last {holdout_pct:.0%} of data")
     print(f"Storage: {db_path}")
@@ -347,7 +374,7 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
     print()
 
     study = optuna.create_study(
-        study_name=f"ece_opt_{config_name}",
+        study_name=study_name,
         direction="minimize",
         sampler=TPESampler(seed=42, n_startup_trials=min(5, n_trials)),
         storage=f"sqlite:///{db_path}",
@@ -446,6 +473,22 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
     return study
 
 
+def _find_study_name(config_name: str, db_path: Path) -> Optional[str]:
+    """Find the most recent versioned study for a config, falling back to legacy name."""
+    storage_url = f"sqlite:///{db_path}"
+    try:
+        summaries = optuna.study.get_all_study_summaries(storage=storage_url)
+    except Exception:
+        return None
+    # Prefer versioned studies (ece_opt_{config}_v{hash}), pick the one with most trials
+    candidates = [s for s in summaries if s.study_name.startswith(f"ece_opt_{config_name}")]
+    if not candidates:
+        return None
+    # Sort by number of trials descending, then by name (versioned > legacy)
+    candidates.sort(key=lambda s: s.n_trials, reverse=True)
+    return candidates[0].study_name
+
+
 def show_best(config_name: str) -> None:
     """Show best results from a previous optimization run."""
     db_path = OUT_DIR / f"optuna_{config_name}.db"
@@ -453,13 +496,23 @@ def show_best(config_name: str) -> None:
         print(f"No study found at {db_path}")
         return
 
+    study_name = _find_study_name(config_name, db_path)
+    if study_name is None:
+        print(f"No studies found in {db_path}")
+        return
+
     study = optuna.load_study(
-        study_name=f"ece_opt_{config_name}",
+        study_name=study_name,
         storage=f"sqlite:///{db_path}",
     )
 
+    completed = [t for t in study.trials if t.value is not None]
+    if not completed:
+        print(f"Study '{study_name}' has {len(study.trials)} trials but none completed successfully.")
+        return
+
     print(f"\n{'='*60}")
-    print(f"Study: {config_name} ({len(study.trials)} trials)")
+    print(f"Study: {study_name} ({len(study.trials)} trials)")
     print(f"Best trial: #{study.best_trial.number}")
     print(f"Best mean ECE: {study.best_value:.4f}")
     print(f"\nBest params:")
@@ -474,7 +527,7 @@ def show_best(config_name: str) -> None:
 
     # Show top 5 trials
     print("Top 5 trials:")
-    trials_sorted = sorted(study.trials, key=lambda t: t.value if t.value is not None else 999)
+    trials_sorted = sorted(completed, key=lambda t: t.value)
     for t in trials_sorted[:5]:
         n_pass = t.user_attrs.get("n_horizons_pass", "?")
         elapsed = t.user_attrs.get("elapsed_min", "?")
@@ -489,10 +542,20 @@ def apply_best(config_name: str) -> None:
         print(f"No study found at {db_path}")
         return
 
+    study_name = _find_study_name(config_name, db_path)
+    if study_name is None:
+        print(f"No studies found in {db_path}")
+        return
+
     study = optuna.load_study(
-        study_name=f"ece_opt_{config_name}",
+        study_name=study_name,
         storage=f"sqlite:///{db_path}",
     )
+
+    completed = [t for t in study.trials if t.value is not None]
+    if not completed:
+        print(f"Study '{study_name}' has {len(study.trials)} trials but none completed successfully.")
+        return
 
     config_path = CONFIGS[config_name]
     with open(config_path) as f:

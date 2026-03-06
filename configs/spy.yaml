@@ -20,6 +20,8 @@ model:
   mc_boost_threshold: 0.02
   seed: 42
   t_df: 5.0
+  fhs_enabled: true
+  garch_ensemble: true
 
 calibration:
   lr: 0.05

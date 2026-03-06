@@ -11,7 +11,7 @@ import warnings
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -444,6 +444,15 @@ def _kurtosis(x: np.ndarray) -> float:
     excess = (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * m4 - 3 * (n - 1)) + 3
     return excess - 3.0  # excess kurtosis
 
+def _earnings_cache_path(ticker: str) -> Path:
+    """Return local cache path for normalized earnings dates."""
+    return CACHE_DIR / "earnings" / f"{ticker.upper()}_dates.csv"
+
+
+_earnings_mem_cache: Dict[str, Optional[np.ndarray]] = {}
+
+_EARNINGS_CACHE_MAX_AGE_DAYS = 30
+
 
 def load_earnings_dates(ticker: str) -> Optional[np.ndarray]:
     """
@@ -452,6 +461,9 @@ def load_earnings_dates(ticker: str) -> Optional[np.ndarray]:
     Returns an array of datetime64 dates sorted chronologically,
     or None if unavailable. Walk-forward safe: earnings dates are
     publicly announced weeks before the event.
+
+    Caches successful results in memory. Does NOT cache None (failures)
+    so transient errors can be retried.
 
     Parameters
     ----------
@@ -462,26 +474,58 @@ def load_earnings_dates(ticker: str) -> Optional[np.ndarray]:
     -------
     earnings_dates : np.ndarray of datetime64 or None
     """
+    key = ticker.upper()
+    if key in _earnings_mem_cache:
+        return _earnings_mem_cache[key]
+
+    cache_path = _earnings_cache_path(ticker)
+    if cache_path.exists():
+        # Check cache age
+        import time as _time
+        age_days = (_time.time() - cache_path.stat().st_mtime) / 86400
+        if age_days <= _EARNINGS_CACHE_MAX_AGE_DAYS:
+            try:
+                raw = pd.read_csv(cache_path)
+                if "date" in raw.columns and len(raw) > 0:
+                    dates = pd.to_datetime(raw["date"], errors="coerce").dropna()
+                    if len(dates) > 0:
+                        result = np.sort(dates.values.astype("datetime64[D]"))
+                        _earnings_mem_cache[key] = result
+                        return result
+            except Exception as e:
+                logger.debug("Failed to read cached earnings dates for %s: %s", ticker, e)
+        else:
+            logger.debug("Earnings cache for %s is %d days old, refreshing", ticker, int(age_days))
+
     try:
         import yfinance as yf
+        try:
+            yf.set_tz_cache_location(str((CACHE_DIR / "yfinance").resolve()))
+        except Exception:
+            pass
         tk = yf.Ticker(ticker)
         # get_earnings_dates returns future and past dates
         ed = tk.get_earnings_dates(limit=100)
         if ed is None or len(ed) == 0:
             logger.debug("No earnings dates found for %s", ticker)
-            return None
+            return None  # Don't cache failures
         dates = pd.to_datetime(ed.index)
         if dates.tz is not None:
             dates = dates.tz_localize(None)
         dates = np.sort(dates.values.astype("datetime64[D]"))
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"date": pd.to_datetime(dates).strftime("%Y-%m-%d")}).to_csv(
+                cache_path, index=False,
+            )
+        except Exception as e:
+            logger.debug("Failed to cache earnings dates for %s: %s", ticker, e)
         logger.info("Loaded %d earnings dates for %s", len(dates), ticker)
+        _earnings_mem_cache[key] = dates
         return dates
     except Exception as e:
         logger.debug("Failed to load earnings dates for %s: %s", ticker, e)
-        return None
-
-
-from typing import Optional
+        return None  # Don't cache failures
 
 
 def compute_earnings_proximity(

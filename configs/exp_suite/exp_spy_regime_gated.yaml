@@ -22,6 +22,8 @@ model:
   t_df: 5.0
   garch_in_sim: true
   garch_model_type: gjr
+  fhs_enabled: false
+  garch_ensemble: false
   garch_stationarity_constraint: true
   garch_target_persistence: 0.9944
   jump_enabled: true

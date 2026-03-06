@@ -218,5 +218,14 @@ def _validate(cfg: PipelineConfig):
         assert cfg.model.jump_low_vol >= 0, "jump_low_vol must be non-negative"
         assert cfg.model.jump_high_vol >= 0, "jump_high_vol must be non-negative"
 
+    if cfg.model.earnings_calendar and not cfg.calibration.multi_feature:
+        import warnings
+        warnings.warn(
+            "earnings_calendar=True has no effect without multi_feature=True. "
+            "Earnings proximity is only used by the multi-feature calibrator.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     if cfg.data.source == "csv":
         assert cfg.data.csv_path is not None, "csv_path required when source=csv"
