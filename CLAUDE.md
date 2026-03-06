@@ -93,6 +93,8 @@ These were tried, tested, and proven to not work for our use case. Do not add th
 | **RegimeCalibrator** (`regime_conditional`) | Vol-percentile-binned calibration was superseded by `RegimeMultiFeatureCalibrator` which integrates regime-gating into multi-feature directly. |
 | **IsotonicCalibrator** | Isotonic regression post-cal was superseded by histogram binning with Bayesian shrinkage + PAV monotonicity, which is more stable for small-N bins. |
 | **`vol_scaled` threshold mode** | Self-referential: threshold = `k × σ × √H` moves with current vol, creating circular predictions. Produces AUC ≈ 0.50 (no discrimination). Use `fixed_pct` instead. |
+| **FHS** (`fhs_enabled`) | Resampled GARCH standardized residuals have fewer tail events than parametric Student-t(5). Stationarity projection silently drops residuals, causing inconsistent innovation distribution across time. Regime-conditional t-df (which was BO-tuned) gets bypassed. Combined stack regressed SPY 3/3→2/3, GOOGL 2/3→1/3. |
+| **GARCH Ensemble** (`garch_ensemble`) | Averaging sigma from GARCH(1,1)+GJR+EGARCH creates sigma/dynamics mismatch: averaged sigma initializes sim, but GJR dynamics mean-revert to GJR's unconditional level. Mismatch grows with horizon. Pooled EGARCH residuals contaminate FHS distribution. |
 
 **What works (the proven stack):**
 - **Volatility**: GARCH(1,1)/GJR with EWMA fallback + stationarity projection
