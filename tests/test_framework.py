@@ -2827,6 +2827,7 @@ class TestGateRecheckShadowGate:
 
         assert pooled_flags == [True, True]
 
+class TestHarRvContinued(TestHarRv):
     def test_har_rv_r_squared_range(self):
         """R-squared should be in a reasonable range."""
         returns = self._make_returns(1000)

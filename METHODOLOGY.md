@@ -406,9 +406,9 @@ The calibrator only starts adjusting after `min_updates` (default 50) outcomes h
 
 Uses 6 features instead of just `logit(p_raw)` (7 features when earnings calendar is active for the horizon):
 
-$$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t},\ (\mathrm{earn}_t)\right]$$
+$$x_t=\left[1,\ \mathrm{logit}\!\left(p_t^{\mathrm{raw}}\right),\ 100\,\sigma_{d,t},\ 100\,\Delta\sigma_{20,t},\ \frac{\sigma_{r,t}}{\sigma_{d,t}},\ 100\,v_{ov,t},\ (\mathrm{earn}_{t})\right]$$
 
-Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, $v_{ov,t}$ corresponds to `vol_of_vol_t`, and $\mathrm{earn}_t$ is the earnings proximity feature (optional, 0-1 scale).
+Here, $p_t^{\mathrm{raw}}\equiv p_{\mathrm{raw},t}$, $\sigma_{d,t}\equiv\sigma_{1d,t}$, $\sigma_{r,t}\equiv\sigma_{\mathrm{realized},t}$, $v_{ov,t}$ corresponds to `vol_of_vol_t`, and $\mathrm{earn}_{t}$ is the earnings proximity feature (optional, 0-1 scale).
 
 $$p_{\mathrm{cal},t}=\sigma\!\left(w^\top x_t\right)$$
 
@@ -418,7 +418,7 @@ Updated via SGD with L2 regularization (prevents overfitting) and gradient clipp
 
 When `earnings_calendar: true`, an earnings proximity feature is added to the multi-feature calibrator **for short horizons only (H ≤ 5)**. Earnings announcements produce significantly larger moves than non-earnings days ([Dubinsky et al., 2019](https://doi.org/10.1093/rfs/hhy018) | [Savor & Wilson, 2016](https://doi.org/10.1111/jofi.12351)), making this a strong calibration signal at weekly timescales.
 
-$$\mathrm{earn}_t = \max\!\left(0,\, 1 - \frac{|\mathrm{days\_to\_nearest\_earnings}|}{20}\right)$$
+$$\mathrm{earn}_{t} = \max\!\left(0,\, 1 - \frac{\left|\text{days\_to\_nearest\_earnings}\right|}{20}\right)$$
 
 The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days away. At longer horizons (H=10, H=20), prediction windows almost always overlap with an earnings date, so the feature becomes uninformative noise. The horizon restriction is enforced automatically in the backtest engine.
 
