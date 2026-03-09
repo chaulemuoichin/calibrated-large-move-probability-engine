@@ -1,8 +1,8 @@
 data:
   source: csv
-  ticker: GOOGL
-  csv_path: data/googl_daily.csv
-  start: '2004-08-19'
+  ticker: NVDA
+  csv_path: data/nvda_daily.csv
+  start: '1999-01-22'
   end: '2025-12-31'
   fallback_to_synthetic: false
   min_rows: 756
@@ -22,7 +22,7 @@ model:
   t_df: 5.0
   garch_in_sim: true
   garch_model_type: gjr
-  fhs_enabled: true
+  fhs_enabled: false
   garch_ensemble: false
   earnings_calendar: true
   garch_stationarity_constraint: true
@@ -39,16 +39,16 @@ model:
   jump_high_mean: -0.04
   jump_high_vol: 0.06
   threshold_mode: regime_gated
-  fixed_threshold_pct: 0.04
+  fixed_threshold_pct: 0.06
   regime_gated_low_mode: fixed_pct
   regime_gated_mid_mode: fixed_pct
   regime_gated_high_mode: anchored_vol
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
   regime_gated_fixed_pct_by_horizon:
-    5: 0.0522
-    10: 0.0924
-    20: 0.1265
+    5: 0.0984
+    10: 0.1804
+    20: 0.2368
   hmm_regime: false
   hmm_n_regimes: 2
   hmm_vol_blend: 0.0
@@ -93,7 +93,7 @@ calibration:
   histogram_prior_strength: 5.0
   histogram_interpolate: true
   histogram_n_bins_by_horizon:
-    5: 12
+    5: 15
     10: 10
     20: 7
   histogram_prior_strength_by_horizon:

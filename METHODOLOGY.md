@@ -476,13 +476,74 @@ Monotonic enforcement via the Pool Adjacent Violators (PAV) algorithm ensures th
 
 **File:** `em_sde/calibration.py` (`HistogramCalibrator`)
 
+### Per-Horizon Histogram Settings
+
+Histogram post-calibration supports per-horizon bin counts and prior strengths via config overrides (`histogram_n_bins_by_horizon`, `histogram_prior_strength_by_horizon`). At long horizons (H=20), events are sparser, so fewer bins and stronger priors reduce noise:
+
+```yaml
+histogram_n_bins_by_horizon:
+  5: 15    # more bins for abundant H=5 data
+  10: 10   # moderate
+  20: 7    # fewer bins for sparse H=20
+histogram_prior_strength_by_horizon:
+  5: 5.0   # light shrinkage (many samples)
+  10: 10.0
+  20: 25.0 # strong shrinkage (few samples)
+```
+
+When `histogram_interpolate: true`, the correction between adjacent bins is linearly interpolated instead of piecewise-constant, reducing staircase artifacts at bin boundaries that inflate ECE.
+
+### Options-Implied Volatility (`implied_vol_enabled`)
+
+When enabled, the system blends options-implied volatility into the Monte Carlo simulation and optionally adds an implied vol ratio as a calibration feature. This captures forward-looking market expectations that historical GARCH cannot.
+
+**Data input:** CSV with date index and implied vol columns. Two formats supported:
+- **VIX format** (percentage points): columns `VIX`, `VIX9D`, `VIX3M` — auto-scaled to decimal
+- **Decimal format**: columns `iv_9d`, `iv_30d`, `iv_3m` — used directly
+
+**Horizon matching:**
+
+| Horizon | Implied Vol Source | Fallback |
+|---------|-------------------|----------|
+| H <= 5  | `iv_9d` (9-day)    | `iv_30d` |
+| H <= 10 | Interpolate `iv_9d` to `iv_30d` | `iv_30d` alone |
+| H <= 22 | `iv_30d` (30-day)  | `iv_3m`  |
+| H > 22  | `iv_3m` (3-month)  | `iv_30d` |
+
+**Sigma blending:** The per-horizon sigma used for MC simulation is a weighted average:
+
+```
+sigma_blend = (1 - w) * sigma_hist + w * sigma_implied_daily
+```
+
+where `sigma_implied_daily = IV_annualized / sqrt(252)` and `w` = `implied_vol_blend` (default 0.3).
+
+**Calibration feature:** When `implied_vol_as_feature: true`, the ratio `sigma_implied / sigma_hist` is added as an additional feature in the multi-feature calibrator. Values > 1 indicate the market expects more volatility than GARCH forecasts; values < 1 indicate less.
+
+**Walk-forward safety:**
+- Uses most recent available IV data on or before the current date
+- Staleness guard: skips blending if IV data is more than 5 business days old
+- Feature defaults to 1.0 (neutral) when no data available
+
+**Config:**
+```yaml
+model:
+  implied_vol_enabled: true
+  implied_vol_csv_path: data/vix_daily.csv
+  implied_vol_blend: 0.3        # 30% implied, 70% historical
+  implied_vol_as_feature: true  # add ratio to MF calibrator
+```
+
+**File:** `em_sde/data_layer.py` (`load_implied_vol`, `get_implied_vol_for_horizon`), `em_sde/backtest.py` (blending + feature wiring)
+
 ### Where to look for problems
 
 - **Cold start**: The first 50-100 predictions are uncalibrated. If the evaluation window is short, this dominates the metrics.
 - **Learning rate**: Too high causes oscillation. Too low causes the calibrator to never catch up with regime changes. The adaptive decay helps but doesn't solve structural shifts.
-- **Multi-feature overfitting**: With 6 features and online learning, the calibrator can chase noise. L2 regularization mitigates this, but the default `1e-4` may be too weak for very noisy data.
+- **Multi-feature overfitting**: With 6-8 features and online learning, the calibrator can chase noise. L2 regularization mitigates this, but the default `1e-4` may be too weak for very noisy data.
 - **Gate hysteresis**: Once the safety gate or discrimination gate activates, there's no explicit re-entry logic — it re-evaluates every step. This can cause rapid on/off switching.
 - **Histogram calibrator + Platt interaction**: The histogram post-pass learns from the Platt-scaled output at update time (not prediction time). If Platt parameters shift significantly between prediction and resolution, the histogram correction may lag. This is mitigated by adaptive lr decay on the Platt stage.
+- **Implied vol data gaps**: If the IV CSV has gaps (holidays, missing data), the staleness guard skips blending for those days. Verify IV coverage matches the price data date range.
 
 ---
 
@@ -839,11 +900,11 @@ if float(er_by_horizon.min()) < min_er_target:
 
 | File | What it does |
 |------|-------------|
-| `em_sde/data_layer.py` | Loads prices, caches, validates, runs quality checks |
+| `em_sde/data_layer.py` | Loads prices, implied vol data, earnings dates, caches, validates, runs quality checks |
 | `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HAR-RV volatility model (inactive) |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
 | `em_sde/calibration.py` | Online/multi-feature/regime-MF calibrators, histogram post-calibration, safety gates |
-| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing |
+| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, implied vol blending |
 | `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
 | `em_sde/config.py` | YAML config loading and validation |
@@ -852,7 +913,7 @@ if float(er_by_horizon.min()) < min_er_target:
 | `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
 | `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
-| `tests/test_framework.py` | 191 unit tests |
+| `tests/test_framework.py` | 229 unit tests |
 
 ---
 

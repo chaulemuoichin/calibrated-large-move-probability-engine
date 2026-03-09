@@ -34,6 +34,7 @@ class GarchResult:
     gamma: Optional[float] = None    # GJR asymmetry term (None for symmetric GARCH)
     diagnostics: Optional[dict] = None  # stationarity, half-life, unconditional vol
     standardized_residuals: Optional[np.ndarray] = None  # FHS: z_t = resid_t / sigma_t
+    model_type: str = "garch"  # actual fitted dynamics for downstream persistence math
 
 
 def _to_float(value: object) -> float:
@@ -156,12 +157,13 @@ def fit_garch(
                 gamma=gamma_val,
                 diagnostics=diagnostics,
                 standardized_residuals=standardized_residuals,
+                model_type=model_type,
             )
 
     except Exception as e:
         logger.debug("GARCH fit failed (%s), using EWMA fallback", e)
         sigma_1d = ewma_volatility(data)
-        return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback")
+        return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback", model_type=model_type)
 
 
 def ewma_volatility(returns: NDArray[np.float64], span: int = 252) -> float:
@@ -690,6 +692,7 @@ def fit_garch_ensemble(
                                 _to_float(res2.params.get("gamma[1]", 0.0)),
                                 "gjr",
                             ),
+                            model_type="gjr",
                         )
         except Exception as e:
             logger.debug("Ensemble GJR-GARCH failed: %s", e)
@@ -720,7 +723,7 @@ def fit_garch_ensemble(
     if not sigmas:
         # All models failed — fall back to EWMA
         sigma_1d = ewma_volatility(data)
-        return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback")
+        return GarchResult(sigma_1d=sigma_1d, source="ewma_fallback", model_type="garch")
 
     avg_sigma = float(np.mean(sigmas))
 
@@ -741,6 +744,7 @@ def fit_garch_ensemble(
             gamma=gjr_result.gamma,
             diagnostics=gjr_result.diagnostics,
             standardized_residuals=pooled_resid,
+            model_type="gjr",
         )
 
     # No GJR — return averaged sigma without sim params
@@ -748,4 +752,5 @@ def fit_garch_ensemble(
         sigma_1d=avg_sigma,
         source=f"ensemble_{len(sigmas)}",
         standardized_residuals=pooled_resid,
+        model_type="garch",
     )

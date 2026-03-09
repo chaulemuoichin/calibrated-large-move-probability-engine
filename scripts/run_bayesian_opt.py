@@ -49,6 +49,8 @@ CONFIGS = {
     "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
     "aapl": "configs/exp_suite/exp_aapl_regime_gated.yaml",
     "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
+    "amzn": "configs/exp_suite/exp_amzn_regime_gated.yaml",
+    "nvda": "configs/exp_suite/exp_nvda_regime_gated.yaml",
 }
 
 
@@ -208,6 +210,23 @@ def objective(trial: optuna.Trial, df, base_config_path: str,
 
     mean_ece = float(ece_rows["value"].mean())
 
+    # N_eff soft penalty: discourage configs with inadequate statistical power
+    min_neff_ratio = float('inf')
+    for _, row in ece_rows.iterrows():
+        n_s = int(row.get("n_samples", 0))
+        n_e = int(row.get("n_events", 0))
+        n_ne = n_s - n_e
+        n_eff_h = min(n_e, n_ne) * 2
+        ratio = n_eff_h / n_params if n_params > 0 else 0
+        min_neff_ratio = min(min_neff_ratio, ratio)
+
+    if min_neff_ratio < 100:
+        shortfall = (100 - min_neff_ratio) / 100
+        penalty = 0.01 * shortfall ** 2
+        mean_ece += penalty
+        trial.set_user_attr("neff_penalty", round(penalty, 6))
+        trial.set_user_attr("min_neff_ratio", round(min_neff_ratio, 1))
+
     # Track secondary metrics
     n_pass = int(
         gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
@@ -304,8 +323,8 @@ def holdout_evaluate(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
         pooled_gate=True,
-        min_events=2,
-        min_nonevents=2,
+        min_events=10,
+        min_nonevents=10,
     )
 
     pooled = gates[gates["regime"] == "pooled"]
@@ -323,20 +342,31 @@ def holdout_evaluate(
 def _study_version_key(config_path: Path, lean: bool) -> str:
     """Compute a short hash of feature flags + search mode to version BO studies.
 
-    Changing feature flags (fhs, ensemble, earnings) or lean/full mode
-    invalidates prior trials, so the study name must change to avoid
-    contamination from stale results.
+    Changing feature flags (fhs, ensemble, earnings, implied vol) or
+    lean/full mode invalidates prior trials, so the study name must
+    change to avoid contamination from stale results.
     """
     cfg = load_config(str(config_path))
+    iv_src = str(Path(cfg.model.implied_vol_csv_path).resolve()) if cfg.model.implied_vol_csv_path else ""
     flags = (
         f"lean={lean},"
         f"fhs={cfg.model.fhs_enabled},"
         f"ens={cfg.model.garch_ensemble},"
         f"earn={cfg.model.earnings_calendar},"
         f"garch_type={cfg.model.garch_model_type},"
-        f"regime_tdf={cfg.model.mc_regime_t_df}"
+        f"regime_tdf={cfg.model.mc_regime_t_df},"
+        f"iv={cfg.model.implied_vol_enabled},"
+        f"iv_blend={cfg.model.implied_vol_blend},"
+        f"iv_feat={cfg.model.implied_vol_as_feature},"
+        f"iv_src={iv_src}"
     )
     return hashlib.md5(flags.encode()).hexdigest()[:8]
+
+
+def _versioned_study_name(config_name: str, config_path: str | Path, lean: bool) -> str:
+    """Return the exact study name for the current config version."""
+    ver = _study_version_key(Path(config_path), lean)
+    return f"ece_opt_{config_name}_v{ver}"
 
 
 def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
@@ -346,9 +376,8 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
     mode = "lean (6 params)" if lean else "full (14 params)"
 
     # Version key ensures feature flag changes start a fresh study
-    ver = _study_version_key(config_path, lean)
     db_path = OUT_DIR / f"optuna_{config_name}.db"
-    study_name = f"ece_opt_{config_name}_v{ver}"
+    study_name = _versioned_study_name(config_name, config_path, lean)
 
     print(f"\n{'='*60}")
     print(f"Bayesian Optimization: {config_name} [{mode}]")
@@ -473,32 +502,44 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
     return study
 
 
-def _find_study_name(config_name: str, db_path: Path) -> Optional[str]:
-    """Find the most recent versioned study for a config, falling back to legacy name."""
+def _find_study_name(config_name: str, config_path: str | Path,
+                     db_path: Path, lean: bool) -> Optional[str]:
+    """Find the study matching the current config version and search mode."""
     storage_url = f"sqlite:///{db_path}"
     try:
         summaries = optuna.study.get_all_study_summaries(storage=storage_url)
     except Exception:
         return None
-    # Prefer versioned studies (ece_opt_{config}_v{hash}), pick the one with most trials
-    candidates = [s for s in summaries if s.study_name.startswith(f"ece_opt_{config_name}")]
-    if not candidates:
-        return None
-    # Sort by number of trials descending, then by name (versioned > legacy)
-    candidates.sort(key=lambda s: s.n_trials, reverse=True)
-    return candidates[0].study_name
+    study_names = {s.study_name for s in summaries}
+    expected = _versioned_study_name(config_name, config_path, lean)
+    if expected in study_names:
+        return expected
+
+    legacy = f"ece_opt_{config_name}"
+    if legacy in study_names:
+        return legacy
+
+    versioned = sorted(
+        name for name in study_names
+        if name.startswith(f"ece_opt_{config_name}_v")
+    )
+    if len(versioned) == 1:
+        return versioned[0]
+    return None
 
 
-def show_best(config_name: str) -> None:
+def show_best(config_name: str, lean: bool = True) -> None:
     """Show best results from a previous optimization run."""
     db_path = OUT_DIR / f"optuna_{config_name}.db"
     if not db_path.exists():
         print(f"No study found at {db_path}")
         return
 
-    study_name = _find_study_name(config_name, db_path)
+    config_path = CONFIGS[config_name]
+    mode = "lean" if lean else "full"
+    study_name = _find_study_name(config_name, config_path, db_path, lean)
     if study_name is None:
-        print(f"No studies found in {db_path}")
+        print(f"No matching {mode} study found in {db_path} for the current config version.")
         return
 
     study = optuna.load_study(
@@ -535,16 +576,18 @@ def show_best(config_name: str) -> None:
         print(f"  #{t.number}: ECE={val}, pass={n_pass}/3, {elapsed} min")
 
 
-def apply_best(config_name: str) -> None:
+def apply_best(config_name: str, lean: bool = True) -> None:
     """Apply best params to the YAML config file."""
     db_path = OUT_DIR / f"optuna_{config_name}.db"
     if not db_path.exists():
         print(f"No study found at {db_path}")
         return
 
-    study_name = _find_study_name(config_name, db_path)
+    config_path = CONFIGS[config_name]
+    mode = "lean" if lean else "full"
+    study_name = _find_study_name(config_name, config_path, db_path, lean)
     if study_name is None:
-        print(f"No studies found in {db_path}")
+        print(f"No matching {mode} study found in {db_path} for the current config version.")
         return
 
     study = optuna.load_study(
@@ -632,11 +675,11 @@ def main() -> int:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     if args.show_best:
-        show_best(args.config)
+        show_best(args.config, lean=not args.full)
         return 0
 
     if args.apply:
-        apply_best(args.config)
+        apply_best(args.config, lean=not args.full)
         return 0
 
     run_optimization(args.config, args.n_trials, lean=not args.full)

@@ -47,6 +47,7 @@ class PendingPrediction:
     vol_ratio: float = 1.0     # realized_vol / forecast_vol
     vol_of_vol: float = 0.0    # rolling std of sigma
     earnings_proximity: float = 0.0  # proximity to nearest earnings date
+    implied_vol_ratio: float = 1.0   # sigma_implied / sigma_hist (1.0 = no implied data)
 
 
 @dataclass
@@ -163,6 +164,10 @@ def run_walkforward(
     histogram_min_samples = cfg.calibration.histogram_min_samples
     histogram_prior_strength = cfg.calibration.histogram_prior_strength
     histogram_monotonic = cfg.calibration.histogram_monotonic
+    histogram_interpolate = cfg.calibration.histogram_interpolate
+    histogram_n_bins_by_horizon = cfg.calibration.histogram_n_bins_by_horizon or {}
+    histogram_prior_by_horizon = cfg.calibration.histogram_prior_strength_by_horizon or {}
+    beta_calibration = cfg.calibration.beta_calibration
     multi_feature_regime_conditional = cfg.calibration.multi_feature_regime_conditional
     threshold_mode = cfg.model.threshold_mode
     fixed_threshold_pct = cfg.model.fixed_threshold_pct
@@ -178,6 +183,9 @@ def run_walkforward(
     fhs_enabled = cfg.model.fhs_enabled
     garch_ensemble_enabled = cfg.model.garch_ensemble
     earnings_calendar_enabled = cfg.model.earnings_calendar
+    implied_vol_enabled = cfg.model.implied_vol_enabled
+    implied_vol_blend = cfg.model.implied_vol_blend
+    implied_vol_as_feature = cfg.model.implied_vol_as_feature
 
     # Regime-gated threshold router
     regime_router: Optional[RegimeRouter] = None
@@ -202,9 +210,27 @@ def run_walkforward(
             logger.warning("Earnings calendar enabled but no dates found for %s", cfg.data.ticker)
             earnings_calendar_enabled = False
 
+    # Load implied vol data if enabled
+    iv_df = None
+    if implied_vol_enabled:
+        from .data_layer import load_implied_vol, get_implied_vol_for_horizon
+        iv_df = load_implied_vol(cfg.model.implied_vol_csv_path)
+        logger.info("Implied vol loaded: %d rows, blend=%.2f, as_feature=%s",
+                     len(iv_df), implied_vol_blend, implied_vol_as_feature)
+
     # Calibrators: one per horizon (multi-feature or standard online)
+    # Per-horizon histogram overrides allow coarser bins / stronger priors
+    # at long horizons where events are sparse (e.g., H=20: 7 bins, prior=25).
     calibrators_online: Optional[Dict[int, OnlineCalibrator]] = None
     calibrators_mf: Optional[Dict[int, MultiFeatureCalibrator]] = None
+
+    def _hist_kwargs(H: int) -> dict:
+        """Per-horizon histogram settings with fallback to global defaults."""
+        return dict(
+            histogram_n_bins=histogram_n_bins_by_horizon.get(H, histogram_n_bins),
+            histogram_prior_strength=histogram_prior_by_horizon.get(H, histogram_prior_strength),
+        )
+
     _mf_kwargs_base = dict(
         lr=multi_feature_lr,
         l2_reg=multi_feature_l2,
@@ -216,11 +242,12 @@ def run_walkforward(
         gate_separation_threshold=gate_sep_thr,
         gate_discrimination_window=gate_disc_win,
         histogram_post_cal=histogram_post_cal,
-        histogram_n_bins=histogram_n_bins,
         histogram_min_samples=histogram_min_samples,
-        histogram_prior_strength=histogram_prior_strength,
         histogram_monotonic=histogram_monotonic,
+        histogram_interpolate=histogram_interpolate,
         post_cal_method=post_cal_method,
+        beta_calibration=beta_calibration,
+        implied_vol_aware=implied_vol_enabled and implied_vol_as_feature,
     )
     if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
@@ -228,6 +255,7 @@ def run_walkforward(
                 n_bins=regime_n_bins,
                 earnings_aware=earnings_calendar_enabled and H <= 5,
                 **_mf_kwargs_base,
+                **_hist_kwargs(H),
             )
             for H in horizons
         }
@@ -236,6 +264,7 @@ def run_walkforward(
             H: MultiFeatureCalibrator(
                 earnings_aware=earnings_calendar_enabled and H <= 5,
                 **_mf_kwargs_base,
+                **_hist_kwargs(H),
             )
             for H in horizons
         }
@@ -252,11 +281,11 @@ def run_walkforward(
                 gate_separation_threshold=gate_sep_thr,
                 gate_discrimination_window=gate_disc_win,
                 histogram_post_cal=histogram_post_cal,
-                histogram_n_bins=histogram_n_bins,
                 histogram_min_samples=histogram_min_samples,
-                histogram_prior_strength=histogram_prior_strength,
                 histogram_monotonic=histogram_monotonic,
+                histogram_interpolate=histogram_interpolate,
                 post_cal_method=post_cal_method,
+                **_hist_kwargs(H),
             )
             for H in horizons
         }
@@ -333,17 +362,20 @@ def run_walkforward(
         if (garch_stationarity and garch_in_sim
                 and garch_result.diagnostics is not None
                 and not garch_result.diagnostics.get("is_stationary", True)):
+            effective_garch_model_type = garch_result.model_type
             if garch_fallback_ewma:
                 sigma_ewma = ewma_volatility(available_returns, span=252)
                 garch_result = GarchResult(
                     sigma_1d=sigma_ewma,
                     source="ewma_fallback_nonstationary",
+                    standardized_residuals=garch_result.standardized_residuals,
+                    model_type=effective_garch_model_type,
                 )
                 projected = True
             elif garch_result.omega is not None:
                 omega_p, alpha_p, beta_p, gamma_p = project_to_stationary(
                     garch_result.omega, garch_result.alpha, garch_result.beta,
-                    garch_result.gamma, garch_model_type,
+                    garch_result.gamma, effective_garch_model_type,
                     target_persistence=garch_target_persistence,
                     variance_anchor=garch_result.sigma_1d ** 2,
                 )
@@ -351,7 +383,9 @@ def run_walkforward(
                     sigma_1d=garch_result.sigma_1d,
                     source=garch_result.source + "_projected",
                     omega=omega_p, alpha=alpha_p, beta=beta_p, gamma=gamma_p,
-                    diagnostics=_garch_diag(omega_p, alpha_p, beta_p, gamma_p, garch_model_type),
+                    diagnostics=_garch_diag(omega_p, alpha_p, beta_p, gamma_p, effective_garch_model_type),
+                    standardized_residuals=garch_result.standardized_residuals,
+                    model_type=effective_garch_model_type,
                 )
                 projected = True
 
@@ -464,10 +498,14 @@ def run_walkforward(
         if har_rv_enabled and har_rv_result is not None:
             # HAR-RV provides horizon-specific sigma directly
             for H in horizons:
-                if H <= 5:
-                    sigma_per_h[H] = har_rv_result.sigma_5d
-                elif H <= 10:
-                    # Interpolate between 5d and 22d
+                if H <= 1:
+                    sigma_per_h[H] = har_rv_result.sigma_1d
+                elif H < 5:
+                    # Interpolate between 1d and 5d
+                    w = (H - 1) / (5 - 1)
+                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_1d + w * har_rv_result.sigma_5d
+                elif H < 22:
+                    # H=5: w=0 → sigma_5d; H>5: interpolate 5d→22d
                     w = (H - 5) / (22 - 5)
                     sigma_per_h[H] = (1 - w) * har_rv_result.sigma_5d + w * har_rv_result.sigma_22d
                 else:
@@ -479,10 +517,30 @@ def run_walkforward(
                     sigma_per_h[H] = garch_term_structure_vol(
                         sigma_1d, garch_result.omega, garch_result.alpha,
                         garch_result.beta, garch_result.gamma, H,
-                        model_type=garch_model_type,
+                        model_type=garch_result.model_type,
                     )
                 else:
                     sigma_per_h[H] = sigma_1d
+
+        # === Step 5c: Implied vol blending ===
+        implied_vol_ratios: Dict[int, float] = {H: 1.0 for H in horizons}
+        if implied_vol_enabled and iv_df is not None:
+            for H in horizons:
+                iv_val = get_implied_vol_for_horizon(iv_df, dates[idx], H)
+                if iv_val is not None:
+                    # Convert annualized implied vol to daily
+                    sigma_implied_daily = iv_val / np.sqrt(252.0)
+                    sigma_hist = sigma_per_h[H]
+                    implied_vol_ratios[H] = sigma_implied_daily / sigma_hist if sigma_hist > 0 else 1.0
+                    # Blend: weighted average of historical and implied
+                    sigma_per_h[H] = (1 - implied_vol_blend) * sigma_hist + implied_vol_blend * sigma_implied_daily
+                    row[f"iv_implied_{H}"] = iv_val
+                    row[f"iv_ratio_{H}"] = implied_vol_ratios[H]
+
+        # Persist the effective horizon sigma actually fed into MC so
+        # downstream OOF gating can bucket on the true forecast state.
+        for H in horizons:
+            row[f"sigma_forecast_{H}"] = sigma_per_h[H]
 
         # WS3: Regime-conditional t_df
         if mc_regime_t_df and len(sigma_history) >= 50:
@@ -539,7 +597,8 @@ def run_walkforward(
                 p_raw, se = mc_result
             if calibrators_mf is not None:
                 p_cal = calibrators_mf[H].calibrate(
-                    p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_prox)
+                    p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+                    earnings_prox, implied_vol_ratios.get(H, 1.0))
                 state = calibrators_mf[H].state()
             else:
                 assert calibrators_online is not None
@@ -575,6 +634,7 @@ def run_walkforward(
                 vol_ratio=vol_ratio,
                 vol_of_vol=vol_of_vol,
                 earnings_proximity=earnings_prox,
+                implied_vol_ratio=implied_vol_ratios.get(H, 1.0),
             ))
 
         # === Step 7: Ensemble (optional) ===
@@ -716,7 +776,7 @@ def _resolve_predictions_mf(
                 calibrators[H].update(
                     pred.p_raw, y, pred.sigma_1d,
                     pred.delta_sigma, pred.vol_ratio, pred.vol_of_vol,
-                    pred.earnings_proximity,
+                    pred.earnings_proximity, pred.implied_vol_ratio,
                 )
                 resolved_labels[H].append(y)
 

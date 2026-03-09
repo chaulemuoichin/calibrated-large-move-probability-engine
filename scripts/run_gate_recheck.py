@@ -93,7 +93,14 @@ def run_single_config(name: str, config_path: str) -> None:
                 ci_str = ""
                 if metric == "ece_cal" and not np.isnan(row.get("ece_ci_low", np.nan)):
                     ci_str = f"  CI=[{row['ece_ci_low']:.4f}, {row['ece_ci_high']:.4f}]"
-                print(f" {prefix}{row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}{diag}")
+                    conf = row.get("ece_gate_confidence", "")
+                    if conf in ("fragile_pass", "fragile_fail"):
+                        ci_str += f" [{conf}]"
+                neff_str = ""
+                neff_warn = row.get("neff_warning", "")
+                if neff_warn and metric == "bss_cal":
+                    neff_str = f" [N_eff {neff_warn}: {row.get('neff_ratio', '?')}x]"
+                print(f" {prefix}{row['regime']:>8s}/{metric} = {value:+.6f}  (thr {threshold}, margin {margin:+.6f}, n={n_s}, events={n_e}){ci_str} {tag}{diag}{neff_str}")
 
     n_pass = gates_oof.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
     n_undecided = (gates_oof.groupby(["config_name", "horizon"])["promotion_status"].first() == "UNDECIDED").sum() if "promotion_status" in gates_oof.columns else 0
@@ -104,6 +111,7 @@ def run_single_config(name: str, config_path: str) -> None:
     shadow_gates = apply_promotion_gates_oof(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.04},
+        pooled_gate=True,
     )
     shadow_pass = shadow_gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
     shadow_total = shadow_gates.groupby(["config_name", "horizon"]).ngroups
@@ -123,6 +131,8 @@ def main() -> int:
         "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
         "aapl": "configs/exp_suite/exp_aapl_regime_gated.yaml",
         "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
+        "amzn": "configs/exp_suite/exp_amzn_regime_gated.yaml",
+        "nvda": "configs/exp_suite/exp_nvda_regime_gated.yaml",
     }
 
     configs = {}

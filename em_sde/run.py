@@ -18,7 +18,11 @@ from .data_layer import load_data
 from .backtest import run_walkforward, compute_backtest_analytics
 from .evaluation import compute_metrics, compute_reliability, compute_risk_report
 from .output import write_outputs
-from .model_selection import expanding_window_cv, compare_models, apply_promotion_gates
+from .model_selection import (
+    expanding_window_cv,
+    compare_models,
+    apply_promotion_gates_oof,
+)
 
 
 def _date_str(value: object) -> str:
@@ -281,7 +285,7 @@ def _run_compare(args):
     print()
 
     # Run CV
-    cv_results, _oof_df = expanding_window_cv(df, configs, names, n_folds=args.cv_folds)
+    cv_results, oof_df = expanding_window_cv(df, configs, names, n_folds=args.cv_folds)
 
     # Summarize
     summary = compare_models(cv_results)
@@ -305,18 +309,38 @@ def _run_compare(args):
             "auc_cal": configs[0].calibration.promotion_auc_min,
             "ece_cal": configs[0].calibration.promotion_ece_max,
         }
-        gate_report = apply_promotion_gates(cv_results, gates=gates)
+        use_pooled_gate = configs[0].calibration.promotion_pooled_gate
+        gate_report = apply_promotion_gates_oof(
+            oof_df,
+            gates=gates,
+            pooled_gate=use_pooled_gate,
+        )
 
         print()
         print("-" * 60)
-        print("PROMOTION GATES (per regime bucket)")
+        if use_pooled_gate:
+            print("PROMOTION GATES (OOF pooled primary, per-regime diagnostic)")
+        else:
+            print("PROMOTION GATES (OOF per-regime)")
         print("-" * 60)
         for row in gate_report.to_dict(orient="records"):
-            status = "PASS" if row["passed"] else "FAIL"
+            row_status = row.get("status", "evaluated")
+            if row_status == "insufficient_data":
+                reason = row.get("insufficient_reason", "?")
+                print(
+                    f"  [SKIP] {row['config_name']:20s} H={int(row['horizon']):2d} "
+                    f"regime={row['regime']:10s} {row['metric']}=n/a "
+                    f"(reason={reason}, n={int(row.get('n_samples', 0))}, "
+                    f"events={int(row.get('n_events', 0))})"
+                )
+                continue
+
+            verdict = "PASS" if bool(row["passed"]) else "FAIL"
+            diag = " [diag]" if row_status == "diagnostic" else ""
             print(
-                f"  [{status}] {row['config_name']:20s} H={int(row['horizon']):2d} "
+                f"  [{verdict}] {row['config_name']:20s} H={int(row['horizon']):2d} "
                 f"regime={row['regime']:10s} {row['metric']}={row['value']:.4f} "
-                f"(threshold={row['threshold']:.4f}, margin={row['margin']:+.4f})"
+                f"(threshold={row['threshold']:.4f}, margin={row['margin']:+.4f}){diag}"
             )
 
         # Summary

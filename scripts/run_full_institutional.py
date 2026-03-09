@@ -3,10 +3,9 @@ Full institutional validation battery runner.
 
 Stages:
 1) Unit tests (pytest)
-2) Quick validation (6 configs)
-3) Stress suite (12 configs)
-4) Multi-seed stability (30 runs = 6 configs x 5 seeds)
-5) CV + promotion gates per pattern family
+2) Stress suite
+3) Multi-seed stability (3 configs x 5 seeds)
+4) CV + promotion gates per pattern family
 
 Usage:
     python -u scripts/run_full_institutional.py
@@ -34,7 +33,7 @@ from em_sde.evaluation import compute_metrics
 from em_sde.model_selection import (
     expanding_window_cv,
     compare_models,
-    apply_promotion_gates,
+    apply_promotion_gates_oof,
 )
 
 
@@ -67,11 +66,8 @@ def _run_subprocess_stage(name: str, cmd: list[str]) -> None:
 def _stage_seed_stability() -> Path:
     """30-run stability test: 6 configs x 5 seeds."""
     configs = [
-        "configs/exp_suite/exp_cluster_inst_fixed_multi.yaml",
         "configs/exp_suite/exp_cluster_regime_gated.yaml",
-        "configs/exp_suite/exp_jump_inst_fixed_multi.yaml",
         "configs/exp_suite/exp_jump_regime_gated.yaml",
-        "configs/exp_suite/exp_trend_inst_fixed_multi.yaml",
         "configs/exp_suite/exp_trend_regime_gated.yaml",
     ]
     seeds = [11, 22, 33, 44, 55]
@@ -134,21 +130,12 @@ def _stage_cv_and_gates() -> None:
     """CV + promotion-gate reports for cluster/jump/trend families."""
     families = {
         "cluster": [
-            "configs/exp_suite/exp_cluster_legacy.yaml",
-            "configs/exp_suite/exp_cluster_dyn_volscaled.yaml",
-            "configs/exp_suite/exp_cluster_inst_fixed_multi.yaml",
             "configs/exp_suite/exp_cluster_regime_gated.yaml",
         ],
         "jump": [
-            "configs/exp_suite/exp_jump_legacy.yaml",
-            "configs/exp_suite/exp_jump_dyn_volscaled.yaml",
-            "configs/exp_suite/exp_jump_inst_fixed_multi.yaml",
             "configs/exp_suite/exp_jump_regime_gated.yaml",
         ],
         "trend": [
-            "configs/exp_suite/exp_trend_legacy.yaml",
-            "configs/exp_suite/exp_trend_dyn_volscaled.yaml",
-            "configs/exp_suite/exp_trend_inst_fixed_multi.yaml",
             "configs/exp_suite/exp_trend_regime_gated.yaml",
         ],
     }
@@ -160,10 +147,10 @@ def _stage_cv_and_gates() -> None:
         names = [Path(p).stem for p in paths]
 
         df, _ = load_data(configs[0])
-        cv_results, _oof_df = expanding_window_cv(df, configs, names, n_folds=5)
+        cv_results, oof_df = expanding_window_cv(df, configs, names, n_folds=5)
         summary = compare_models(cv_results)
-        gate_report = apply_promotion_gates(
-            cv_results,
+        gate_report = apply_promotion_gates_oof(
+            oof_df,
             gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
         )
 
@@ -181,8 +168,7 @@ def main() -> int:
 
     try:
         _run_subprocess_stage("00_pytest", [py, "-m", "pytest", "tests", "-q"])
-        _run_subprocess_stage("01_quick_validation", [py, "-u", "scripts/run_quick_validation.py"])
-        _run_subprocess_stage("02_stress_suite", [py, "-u", "scripts/run_stress_suite.py"])
+        _run_subprocess_stage("01_stress_suite", [py, "-u", "scripts/run_stress_suite.py"])
         _stage_seed_stability()
         _stage_cv_and_gates()
     except Exception as exc:

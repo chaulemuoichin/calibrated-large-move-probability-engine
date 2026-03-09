@@ -3,7 +3,7 @@ Model selection framework: expanding-window cross-validation
 and information criteria for systematic model comparison.
 
 Usage:
-    python -m em_sde.run --compare configs/spy_fixed.yaml configs/spy.yaml
+    python -m em_sde.run --compare configs/spy_fixed.yaml configs/goog_fixed.yaml
 """
 
 import logging
@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 def _as_float_array(values: object) -> NDArray[np.float64]:
     """Return a 1D float64 numpy array from pandas/numpy array-like inputs."""
     return np.asarray(values, dtype=np.float64).reshape(-1)
+
+
+def _effective_sigma_column(results: pd.DataFrame, H: int) -> str | None:
+    """Return the best available sigma column for horizon-aware OOF gating."""
+    candidates = (
+        f"sigma_forecast_{H}",
+        "sigma_har_rv_1d",
+        "sigma_garch_1d",
+    )
+    for col in candidates:
+        if col in results.columns:
+            return col
+    return None
 
 
 def expanding_window_cv(
@@ -63,6 +76,8 @@ def expanding_window_cv(
     oof_df : pd.DataFrame
         Row-level out-of-fold predictions pooled across all folds.
         Columns: config_name, fold, horizon, p_cal, y, sigma_1d.
+        Here sigma_1d is the effective daily sigma proxy actually used for
+        that horizon forecast, not necessarily the raw GARCH 1-day sigma.
     """
     n = len(df)
     min_train = int(n * min_train_pct)
@@ -97,17 +112,17 @@ def expanding_window_cv(
             if len(test_res) == 0:
                 continue
 
-            # Per-row sigma for OOF collection
-            sigma_1d_all = (
-                _as_float_array(test_res["sigma_garch_1d"])
-                if "sigma_garch_1d" in test_res.columns
-                else np.full(len(test_res), np.nan)
-            )
-
             for H in cfg.model.horizons:
                 y_col = f"y_{H}"
                 if y_col not in test_res.columns:
                     continue
+
+                sigma_col = _effective_sigma_column(test_res, H)
+                sigma_1d_all = (
+                    _as_float_array(test_res[sigma_col])
+                    if sigma_col is not None
+                    else np.full(len(test_res), np.nan)
+                )
 
                 y = _as_float_array(test_res[y_col])
                 p_raw = _as_float_array(test_res[f"p_raw_{H}"])
@@ -134,10 +149,8 @@ def expanding_window_cv(
 
                 # Sigma mean for legacy regime bucketing
                 sigma_mean = np.nan
-                if "sigma_garch_1d" in test_res.columns:
-                    sigma_mean = float(np.nanmean(
-                        _as_float_array(test_res["sigma_garch_1d"])
-                    ))
+                if sigma_col is not None:
+                    sigma_mean = float(np.nanmean(_as_float_array(test_res[sigma_col])))
 
                 rows.append({
                     "config_name": name,
@@ -248,6 +261,7 @@ def apply_promotion_gates_oof(
     min_events: int = 30,
     min_nonevents: int = 30,
     pooled_gate: bool = False,
+    n_bo_params: int = 6,
 ) -> pd.DataFrame:
     """
     Apply promotion gates on pooled out-of-fold row-level predictions.
@@ -277,7 +291,9 @@ def apply_promotion_gates_oof(
         Columns: config_name, horizon, regime, metric, value, threshold,
                  passed, margin, n_samples, n_events, n_nonevents,
                  insufficient_reason, status,
-                 ece_ci_low, ece_ci_high, promotion_status, all_gates_passed
+                 ece_ci_low, ece_ci_high,
+                 n_eff, neff_ratio, neff_warning, ece_gate_confidence,
+                 promotion_status, all_gates_passed
     """
     if gates is None:
         gates = {"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02}
@@ -324,6 +340,11 @@ def apply_promotion_gates_oof(
             n_events = int(np.sum(y_r))
             n_nonevents = n_samples - n_events
 
+            # N_eff for overfitting guardrail
+            n_eff = min(n_events, n_nonevents) * 2
+            neff_ratio = round(n_eff / n_bo_params, 1) if n_bo_params > 0 else 0.0
+            neff_warning = "" if neff_ratio >= 100 else ("YELLOW" if neff_ratio >= 50 else "RED")
+
             # Determine insufficiency reason
             if n_samples < min_samples:
                 insufficient_reason = "too_few_samples"
@@ -359,6 +380,10 @@ def apply_promotion_gates_oof(
                         "status": "insufficient_data",
                         "ece_ci_low": np.nan,
                         "ece_ci_high": np.nan,
+                        "n_eff": n_eff,
+                        "neff_ratio": neff_ratio,
+                        "neff_warning": neff_warning,
+                        "ece_gate_confidence": "",
                     })
                     continue
 
@@ -380,6 +405,14 @@ def apply_promotion_gates_oof(
                     passed = value >= threshold
                     margin = round(value - threshold, 6)
 
+                # ECE confidence annotation
+                _ece_conf = ""
+                if metric == "ece_cal":
+                    if passed:
+                        _ece_conf = "fragile_pass" if ece_ci_high > threshold else "solid_pass"
+                    else:
+                        _ece_conf = "fragile_fail" if ece_ci_low <= threshold else "solid_fail"
+
                 rows.append({
                     "config_name": config_name,
                     "horizon": horizon,
@@ -396,6 +429,10 @@ def apply_promotion_gates_oof(
                     "status": "evaluated" if not (pooled_gate and regime != "pooled") else "diagnostic",
                     "ece_ci_low": round(ece_ci_low, 6) if not np.isnan(ece_ci_low) else np.nan,
                     "ece_ci_high": round(ece_ci_high, 6) if not np.isnan(ece_ci_high) else np.nan,
+                    "n_eff": n_eff,
+                    "neff_ratio": neff_ratio,
+                    "neff_warning": neff_warning,
+                    "ece_gate_confidence": _ece_conf,
                 })
 
     report = pd.DataFrame(rows)

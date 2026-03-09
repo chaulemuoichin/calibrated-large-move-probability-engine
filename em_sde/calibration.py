@@ -79,13 +79,15 @@ class HistogramCalibrator:
 
     def __init__(self, n_bins: int = 10, min_samples_per_bin: int = 15,
                  decay: float = 1.0, prior_strength: float = 15.0,
-                 monotonic: bool = True):
+                 monotonic: bool = True, interpolate: bool = False):
         self.n_bins = n_bins
         self.min_samples_per_bin = min_samples_per_bin
         self.decay = decay
         self.prior_strength = prior_strength
         self.monotonic = monotonic
+        self.interpolate = interpolate
         self.bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        self._bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
         self._sum_pred = np.zeros(n_bins)
         self._sum_obs = np.zeros(n_bins)
         self._count = np.zeros(n_bins, dtype=np.float64)
@@ -132,11 +134,35 @@ class HistogramCalibrator:
         self._corrections = corrections
 
     def calibrate(self, p_cal: float) -> float:
-        """Apply shrinkage-damped histogram bias correction."""
+        """Apply shrinkage-damped histogram bias correction.
+
+        When interpolate=True, linearly interpolates between adjacent bin
+        corrections to produce a smooth calibration map (avoids staircase
+        artifacts that inflate ECE at bin boundaries).
+        """
         idx = self._get_bin(p_cal)
         if self._count[idx] < self.min_samples_per_bin:
             return p_cal
-        return float(np.clip(p_cal - self._corrections[idx], 0.0, 1.0))
+
+        if not self.interpolate:
+            return float(np.clip(p_cal - self._corrections[idx], 0.0, 1.0))
+
+        # Linear interpolation between adjacent bin corrections
+        center = self._bin_centers[idx]
+        if p_cal <= center and idx > 0 and self._count[idx - 1] >= self.min_samples_per_bin:
+            # Interpolate with left neighbor
+            left_center = self._bin_centers[idx - 1]
+            t = (p_cal - left_center) / (center - left_center)
+            corr = (1 - t) * self._corrections[idx - 1] + t * self._corrections[idx]
+        elif p_cal > center and idx < self.n_bins - 1 and self._count[idx + 1] >= self.min_samples_per_bin:
+            # Interpolate with right neighbor
+            right_center = self._bin_centers[idx + 1]
+            t = (p_cal - center) / (right_center - center)
+            corr = (1 - t) * self._corrections[idx] + t * self._corrections[idx + 1]
+        else:
+            corr = self._corrections[idx]
+
+        return float(np.clip(p_cal - corr, 0.0, 1.0))
 
     def update(self, p_cal: float, y: float):
         """Update bin statistics with a resolved outcome."""
@@ -152,11 +178,13 @@ class HistogramCalibrator:
 
 
 def _make_post_calibrator(method: str, n_bins: int, min_samples: int,
-                          prior_strength: float, monotonic: bool):
+                          prior_strength: float, monotonic: bool,
+                          interpolate: bool = False):
     """Factory for post-calibration method selection."""
     if method == "histogram":
         return HistogramCalibrator(n_bins=n_bins, min_samples_per_bin=min_samples,
-                                   prior_strength=prior_strength, monotonic=monotonic)
+                                   prior_strength=prior_strength, monotonic=monotonic,
+                                   interpolate=interpolate)
     elif method == "none":
         return None
     else:
@@ -190,6 +218,7 @@ class OnlineCalibrator:
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
                  histogram_monotonic: bool = True,
+                 histogram_interpolate: bool = False,
                  post_cal_method: str = ""):
         self.a: float = 0.0
         self.b: float = 1.0
@@ -223,6 +252,7 @@ class OnlineCalibrator:
         self._histogram_cal = _make_post_calibrator(
             effective_method, histogram_n_bins, histogram_min_samples,
             histogram_prior_strength, histogram_monotonic,
+            interpolate=histogram_interpolate,
         )
 
         # Convergence tracking
@@ -372,10 +402,11 @@ class RegimeMultiFeatureCalibrator:
     instead of a single global MultiFeatureCalibrator.
     """
 
-    def __init__(self, n_bins: int = 3, **mf_kwargs):
+    def __init__(self, n_bins: int = 3, beta_calibration: bool = False, **mf_kwargs):
         self.n_bins = n_bins
         self.calibrators: list = []  # populated after class def
         self._mf_kwargs = mf_kwargs
+        self._mf_kwargs['beta_calibration'] = beta_calibration
         self._vol_history: deque = deque(maxlen=252)
         self._warmup: int = 50
 
@@ -402,22 +433,26 @@ class RegimeMultiFeatureCalibrator:
     def calibrate(self, p_raw: float, sigma_1d: float,
                   delta_sigma: float, vol_ratio: float,
                   vol_of_vol: float,
-                  earnings_proximity: float = 0.0) -> float:
+                  earnings_proximity: float = 0.0,
+                  implied_vol_ratio: float = 1.0) -> float:
         """Apply regime-specific multi-feature calibration."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         return self.calibrators[regime].calibrate(
-            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
+            p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+            earnings_proximity, implied_vol_ratio)
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
                delta_sigma: float, vol_ratio: float,
                vol_of_vol: float,
-               earnings_proximity: float = 0.0) -> None:
+               earnings_proximity: float = 0.0,
+               implied_vol_ratio: float = 1.0) -> None:
         """Update the regime-specific multi-feature calibrator."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         self.calibrators[regime].update(
-            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
+            p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+            earnings_proximity, implied_vol_ratio)
 
     def state(self) -> Dict:
         """Return state of the currently active regime calibrator."""
@@ -470,12 +505,25 @@ class MultiFeatureCalibrator:
                  histogram_min_samples: int = 15,
                  histogram_prior_strength: float = 15.0,
                  histogram_monotonic: bool = True,
+                 histogram_interpolate: bool = False,
                  post_cal_method: str = "",
-                 earnings_aware: bool = False):
+                 earnings_aware: bool = False,
+                 beta_calibration: bool = False,
+                 implied_vol_aware: bool = False):
         self.earnings_aware = earnings_aware
-        self.N_FEATURES = 7 if earnings_aware else 6
+        self.beta_calibration = beta_calibration
+        self.implied_vol_aware = implied_vol_aware
+        # Beta cal splits logit(p) into log(p) + log(1-p), adding 1 feature
+        n_base = 7 if beta_calibration else 6
+        n_optional = (1 if earnings_aware else 0) + (1 if implied_vol_aware else 0)
+        self.N_FEATURES = n_base + n_optional
         self.w = np.zeros(self.N_FEATURES)
-        self.w[1] = 1.0  # identity on logit(p_raw)
+        if beta_calibration:
+            # Identity: sigmoid(0 + 1*log(p) + (-1)*log(1-p)) = sigmoid(logit(p)) = p
+            self.w[1] = 1.0   # weight on log(p)
+            self.w[2] = -1.0  # weight on log(1-p)
+        else:
+            self.w[1] = 1.0  # identity on logit(p_raw)
         self.lr = lr
         self.l2_reg = l2_reg
         self.min_updates = min_updates
@@ -506,6 +554,7 @@ class MultiFeatureCalibrator:
         self._histogram_cal = _make_post_calibrator(
             effective_method, histogram_n_bins, histogram_min_samples,
             histogram_prior_strength, histogram_monotonic,
+            interpolate=histogram_interpolate,
         )
 
         # Convergence tracking
@@ -514,36 +563,60 @@ class MultiFeatureCalibrator:
     def _build_features(self, p_raw: float, sigma_1d: float,
                         delta_sigma: float, vol_ratio: float,
                         vol_of_vol: float,
-                        earnings_proximity: float = 0.0) -> np.ndarray:
-        """Build feature vector from raw inputs."""
-        features = [
-            1.0,                     # intercept
-            logit(p_raw),            # logit of MC probability
-            sigma_1d * 100.0,        # daily vol (scaled for gradient stability)
-            delta_sigma * 100.0,     # 20d vol change (scaled)
-            vol_ratio,               # realized_vol / forecast_vol
-            vol_of_vol * 100.0,      # rolling std of sigma (scaled)
-        ]
+                        earnings_proximity: float = 0.0,
+                        implied_vol_ratio: float = 1.0) -> np.ndarray:
+        """Build feature vector from raw inputs.
+
+        Standard mode (6 features): [1, logit(p), sigma, delta_sigma, vol_ratio, vol_of_vol]
+        Beta calibration (7 features): [1, log(p), log(1-p), sigma, delta_sigma, vol_ratio, vol_of_vol]
+        + optional: earnings_proximity, implied_vol_ratio
+        """
+        p_clipped = np.clip(p_raw, _CLIP_LO, _CLIP_HI)
+        if self.beta_calibration:
+            features = [
+                1.0,                         # intercept
+                float(np.log(p_clipped)),    # log(p) — beta calibration
+                float(np.log(1 - p_clipped)),  # log(1-p) — beta calibration
+                sigma_1d * 100.0,
+                delta_sigma * 100.0,
+                vol_ratio,
+                vol_of_vol * 100.0,
+            ]
+        else:
+            features = [
+                1.0,                     # intercept
+                logit(p_raw),            # logit of MC probability
+                sigma_1d * 100.0,        # daily vol (scaled for gradient stability)
+                delta_sigma * 100.0,     # 20d vol change (scaled)
+                vol_ratio,               # realized_vol / forecast_vol
+                vol_of_vol * 100.0,      # rolling std of sigma (scaled)
+            ]
         if self.earnings_aware:
             features.append(earnings_proximity)  # 0=far from earnings, 1=earnings day
+        if self.implied_vol_aware:
+            features.append(implied_vol_ratio)   # sigma_implied / sigma_hist (centered ~1.0)
         return np.array(features)
 
     def _compute_cal(self, p_raw: float, sigma_1d: float,
                      delta_sigma: float, vol_ratio: float,
                      vol_of_vol: float,
-                     earnings_proximity: float = 0.0) -> float:
+                     earnings_proximity: float = 0.0,
+                     implied_vol_ratio: float = 1.0) -> float:
         """Apply the logistic mapping (internal, ignoring gate)."""
         if self.n_updates < self.min_updates:
             return p_raw
-        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+                                 earnings_proximity, implied_vol_ratio)
         return sigmoid(float(self.w @ x))
 
     def calibrate(self, p_raw: float, sigma_1d: float,
                   delta_sigma: float, vol_ratio: float,
                   vol_of_vol: float,
-                  earnings_proximity: float = 0.0) -> float:
+                  earnings_proximity: float = 0.0,
+                  implied_vol_ratio: float = 1.0) -> float:
         """Apply calibration. Falls back to raw if safety gate triggers."""
-        p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
+        p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+                                  earnings_proximity, implied_vol_ratio)
         if self.safety_gate and self._gate_active:
             return p_raw
         if self.gate_on_discrimination and self._discrimination_gate_active:
@@ -555,9 +628,11 @@ class MultiFeatureCalibrator:
     def update(self, p_raw: float, y: float, sigma_1d: float,
                delta_sigma: float, vol_ratio: float,
                vol_of_vol: float,
-               earnings_proximity: float = 0.0) -> None:
+               earnings_proximity: float = 0.0,
+               implied_vol_ratio: float = 1.0) -> None:
         """Update weights via SGD on label resolution."""
-        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity)
+        x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
+                                 earnings_proximity, implied_vol_ratio)
         p_cal = sigmoid(float(self.w @ x))
         error = y - p_cal
 

@@ -14,7 +14,7 @@ Build an **institutional-grade calibrated large-move probability engine** that c
 4. **No leakage.** Train/test splits are strictly chronological. Expanding-window CV only.
 5. **Always check N_eff, not raw N.** Overlapping predictions create correlated samples. Effective sample size governs all statistical conclusions.
 6. **Backward compatibility behind flags.** New features use flags (e.g., `lean` mode in BO). Don't break existing configs or tests.
-7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (191+ tests).
+7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (241+ tests).
 8. **Adaptive event-rate guard in BO.** `min_rate = max((100 × n_params) / (2 × n_oof), 3%)`. Adapts to dataset size — larger datasets get a looser guard, smaller ones stricter. Ensures N_eff/N_params >= 100x (GREEN). Floor at 3% absolute minimum. Per Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
 9. **Use all available data from IPO/inception.** All configs must use the earliest available data for the ticker. Never truncate history arbitrarily.
 10. **Always update docs after any change.** When making code changes, results, or architectural decisions, update ALL relevant docs: `CLAUDE.md` (current state, rules, context for next session), `METHODOLOGY.md` (technical details), `RESULTS.md` (honest numbers), `README.md` (if user-facing). Never leave docs stale — the next Claude session depends on accurate CLAUDE.md.
@@ -30,11 +30,11 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | Module | Purpose |
 |--------|---------|
 | `config.py` | YAML config loading, dataclass validation |
-| `data_layer.py` | Price loading (yfinance/CSV/synthetic), quality checks, caching |
+| `data_layer.py` | Price loading (yfinance/CSV/synthetic), implied vol loading, earnings dates, quality checks, caching |
 | `garch.py` | GARCH(1,1)/GJR, EWMA fallback, stationarity projection, HAR-RV (inactive) |
 | `monte_carlo.py` | GBM/GARCH-in-sim, Merton jump-diffusion, Student-t fat tails, state-dependent jumps |
-| `calibration.py` | Online Platt, multi-feature (6 features + L2), regime-conditional multi-feature, histogram post-cal |
-| `backtest.py` | Walk-forward engine, resolution queue, regime-gated thresholds |
+| `calibration.py` | Online Platt, multi-feature (6-8 features + L2), regime-conditional multi-feature, histogram post-cal |
+| `backtest.py` | Walk-forward engine, resolution queue, regime-gated thresholds, implied vol blending |
 | `evaluation.py` | Brier, BSS, AUC, ECE (adaptive bins), VaR, CVaR, CRPS, N_eff |
 | `model_selection.py` | Expanding-window CV (5-fold), OOF row-level promotion gates (pooled + per-regime) |
 | `output.py` | CSV/JSON results, reliability curves, charts |
@@ -98,11 +98,13 @@ These were tried, tested, and proven to not work for our use case. Do not add th
 
 **What works (the proven stack):**
 - **Volatility**: GARCH(1,1)/GJR with EWMA fallback + stationarity projection
-- **Simulation**: GARCH-in-sim Monte Carlo with Student-t fat tails (regime-conditional df)
-- **Calibration**: Multi-feature linear (6 features + L2) with histogram post-calibration. Earnings calendar (7th feature) for H≤5 on single stocks.
+- **Simulation**: GARCH-in-sim Monte Carlo with Student-t fat tails (regime-conditional df), optional implied vol blending
+- **Calibration**: Multi-feature linear (6-8 features + L2) with per-horizon histogram post-calibration + interpolation. Earnings calendar (7th feature) for H≤5 on single stocks. Implied vol ratio (8th feature) when options data available.
 - **Thresholds**: `fixed_pct` or `regime_gated` (routes to fixed_pct/anchored_vol by vol regime)
 
 **Earnings Calendar** (`earnings_calendar: true`): Adds earnings proximity feature (0-1 scale) to multi-feature calibrator. **Only active for H≤5** — at longer horizons the signal becomes noise and adds a parameter without improving discrimination. Horizon-conditional gating is automatic in `backtest.py`. (Dubinsky et al., 2019; Savor & Wilson, 2016)
+
+**Options-Implied Volatility** (`implied_vol_enabled: true`): Blends options-implied vol into MC sigma and adds implied_vol_ratio as a calibration feature. Accepts VIX data (SPY) or generic IV CSVs (single stocks). Horizon-matched: H=5→VIX9D, H=10→interpolated, H=20→VIX. Staleness guard skips data >5 business days old. Default blend weight 30%. Disabled by default — requires `implied_vol_csv_path`.
 
 ## Common Commands
 
@@ -114,7 +116,7 @@ python -m pytest tests/ -v
 python -m em_sde.run --config configs/spy_fixed.yaml --run-id my_run
 
 # Compare configs with CV
-python -m em_sde.run --compare configs/spy_fixed.yaml configs/spy.yaml --cv-folds 5
+python -m em_sde.run --compare configs/spy_fixed.yaml configs/goog_fixed.yaml --cv-folds 5
 
 # Bayesian optimization (lean mode, default)
 python scripts/run_bayesian_opt.py spy --n-trials 12
@@ -131,24 +133,35 @@ python scripts/run_overfit_check.py all
 python -u scripts/run_full_institutional.py
 ```
 
-## Current State (2026-03-01)
+## Current State (2026-03-09)
 
 ### Ticker Status
-- **SPY**: 6538 rows (2000-2025), **3/3 gates PASS**. Working. Thresholds: H=5 5.3%, H=10 3.3%, H=20 5.0%.
-- **AAPL**: 6538 rows (2000-2025), **1/3 gates PASS** (H=5 only). BO with adaptive guard found thr_5=6.2% (PASS, BSS=+0.004, AUC=0.637, ECE=0.010), thr_10=11.2% (FAIL, BSS=-0.043), thr_20=14.7% (FAIL, BSS=-0.010). H=10/H=20 event rates too low (2.4%, 4.0%). Overfitting: 4 RED, 6 YELLOW, 5 GREEN.
-- **GOOGL**: 5376 rows (2004-2025), **2/3 gates PASS** (H=10, H=20). BO with adaptive guard found thr_5=5.2% (FAIL, ECE=0.027), thr_10=9.2% (PASS, BSS=+0.017, AUC=0.661, ECE=0.020), thr_20=12.7% (PASS, BSS=+0.014, AUC=0.642, ECE=0.012). BSS positive everywhere — model has real skill. H=5 ECE borderline (0.027 vs 0.02 gate). Overfitting: 3 GREEN, 10 YELLOW, 2 RED.
 
-### Recent Changes (2026-03-01)
-1. **Adaptive event-rate guard**: `min_rate = max((100 × n_params) / (2 × n_oof), 3%)`. Adapts to dataset size.
-2. **Threshold range tightened**: Upper bound = P90 (no margin), lower bound = P80 * 0.9.
-3. **Per-regime gate minimums raised**: min_samples=100, min_events=30, min_nonevents=30.
-4. **All yfinance configs**: Now use data from IPO/inception.
-5. **Dead code cleanup**: Removed HMM, NeuralCalibrator, RegimeCalibrator, IsotonicCalibrator, vol_scaled. ~820 LOC removed. Tests: 227 → 191 (36 tests for removed code).
+- **SPY**: 6538 rows (2000-2025), **2/3 gates PASS** (H=5, H=10). Thresholds: H=5 3.72%, H=10 5.54%, H=20 7.05%. H=20 ECE=0.024 barely fails. BSS positive across all horizons.
+- **GOOGL**: 5376 rows (2004-2025), **3/3 gates PASS**. FHS + earnings + implied vol (VIX proxy) enabled. Thresholds: H=5 5.22%, H=10 9.24%, H=20 12.65%. Implied vol was the key unlock — H=5 ECE dropped 0.022→0.0076.
+- **AMZN**: 7202 rows (1997-2025), **3/3 gates PASS**. Earnings + implied vol enabled. Thresholds: H=5 8.52%, H=10 15.99%, H=20 20.50%. Best calibration: H=10 ECE=0.0029. AUC >0.70 all horizons.
+- **NVDA**: 6777 rows (1999-2025), **1/3 gates PASS** (H=5 only). Earnings + implied vol enabled. Thresholds: H=5 9.84%, H=10 18.04%, H=20 23.68%. H=10/H=20 BSS negative. Only 5 BO trials — needs more.
+
+### Recent Changes (2026-03-09)
+
+1. **AMZN 3/3 gates PASS** on first attempt. ECE: H=5 0.0070, H=10 0.0029, H=20 0.0118. AUC >0.70 across all horizons.
+2. **NVDA 1/3 gates PASS** (H=5). H=10/H=20 BSS negative — thresholds too aggressive from 5-trial BO.
+3. **New tickers added**: AMZN (7202 rows, 1997-2025) and NVDA (6777 rows, 1999-2025). Configs, BO, and gate rechecks complete.
+4. AMZN and NVDA registered in `run_bayesian_opt.py` CONFIGS and `run_gate_recheck.py`.
+
+### Previous Changes (2026-03-08)
+
+1. GOOGL 3/3 gates PASS with implied vol enabled.
+2. VIX data downloaded: `data/vix_history.csv` (5421 rows, 2004-2025).
+3. Bug fixes: IV horizon mapping, HAR-RV sigma interpolation, BO study versioning. 11 regression tests added.
+4. 241 tests passing.
 
 ### Next Steps
-1. AAPL: Run more BO trials (4-8) for H=10/H=20, or investigate model improvements
-2. GOOGL: Gate recheck in progress; likely needs more BO trials
-3. Consider: Whether single-stock BSS failure at longer horizons is fundamental
+
+1. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → higher event rates → positive BSS
+2. **Gate recheck SPY** with implied vol enabled — VIX data already available
+3. SPY H=20: ECE=0.024 — implied vol may push it under 0.02
+4. Consider BO re-tuning GOOGL with implied vol enabled (current thresholds tuned without IV)
 
 ### Standard Workflow
 ```bash

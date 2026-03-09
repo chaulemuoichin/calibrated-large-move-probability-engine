@@ -81,6 +81,11 @@ class ModelConfig:
     garch_ensemble: bool = False
     # Earnings calendar: add earnings proximity feature to multi-feature calibrator
     earnings_calendar: bool = False
+    # Implied volatility: blend options-implied vol into MC sigma and add as calibration feature
+    implied_vol_enabled: bool = False
+    implied_vol_csv_path: Optional[str] = None  # CSV with date index + iv columns
+    implied_vol_blend: float = 0.3              # weight on implied vol in sigma blend (0=pure hist, 1=pure implied)
+    implied_vol_as_feature: bool = True         # add implied_vol_ratio as MF calibration feature
 
 
 @dataclass
@@ -107,6 +112,10 @@ class CalibrationConfig:
     histogram_min_samples: int = 15          # min effective samples per bin before correction activates
     histogram_prior_strength: float = 15.0   # Bayesian shrinkage (histogram only): correction *= count/(count + prior_strength)
     histogram_monotonic: bool = True         # monotonic PAV enforcement on bin corrections (histogram only)
+    histogram_interpolate: bool = False      # smooth linear interpolation between bin corrections (reduces staircase ECE)
+    histogram_n_bins_by_horizon: Optional[dict] = None        # per-horizon override: {5: 15, 10: 10, 20: 7}
+    histogram_prior_strength_by_horizon: Optional[dict] = None  # per-horizon override: {5: 10, 10: 15, 20: 25}
+    beta_calibration: bool = False           # use beta calibration (log(p), log(1-p)) instead of logit(p)
     ensemble_enabled: bool = True
     ensemble_weights: List[float] = field(default_factory=lambda: [0.5, 0.3, 0.2])
     # Promotion gates for model selection
@@ -226,6 +235,19 @@ def _validate(cfg: PipelineConfig):
             UserWarning,
             stacklevel=2,
         )
+
+    if cfg.model.implied_vol_enabled:
+        assert cfg.model.implied_vol_csv_path is not None, \
+            "implied_vol_csv_path required when implied_vol_enabled=True"
+        assert 0.0 <= cfg.model.implied_vol_blend <= 1.0, \
+            "implied_vol_blend must be in [0, 1]"
+        if cfg.model.implied_vol_as_feature and not cfg.calibration.multi_feature:
+            import warnings
+            warnings.warn(
+                "implied_vol_as_feature=True has no effect without multi_feature=True.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     if cfg.data.source == "csv":
         assert cfg.data.csv_path is not None, "csv_path required when source=csv"

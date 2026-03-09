@@ -43,7 +43,7 @@ pip install -r requirements.txt
 python -m em_sde.run --config configs/spy_fixed.yaml --run-id my_first_run
 
 # Compare two configs with cross-validation
-python -m em_sde.run --compare configs/spy_fixed.yaml configs/spy.yaml --cv-folds 5
+python -m em_sde.run --compare configs/spy_fixed.yaml configs/goog_fixed.yaml --cv-folds 5
 ```
 
 Output goes to `outputs/<run_id>/`: results CSV, summary JSON, and charts.

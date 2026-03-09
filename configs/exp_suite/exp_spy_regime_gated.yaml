@@ -58,9 +58,9 @@ model:
   har_rv_ridge_alpha: 0.01
   mc_vol_term_structure: true
   mc_regime_t_df: true
-  mc_regime_t_df_low: 12.0
-  mc_regime_t_df_mid: 3.0
-  mc_regime_t_df_high: 3.7
+  mc_regime_t_df_low: 10.0
+  mc_regime_t_df_mid: 5.0
+  mc_regime_t_df_high: 4.0
   store_quantiles: true
 calibration:
   lr: 0.05
@@ -76,7 +76,7 @@ calibration:
   multi_feature: true
   multi_feature_lr: 0.004861
   multi_feature_l2: 0.000803
-  multi_feature_min_updates: 94
+  multi_feature_min_updates: 63
   multi_feature_regime_conditional: true
   ensemble_enabled: true
   ensemble_weights:
@@ -86,6 +86,16 @@ calibration:
   histogram_n_bins: 15
   histogram_min_samples: 8
   histogram_prior_strength: 5.0
+  histogram_interpolate: true
+  histogram_n_bins_by_horizon:
+    5: 15
+    10: 10
+    20: 7
+  histogram_prior_strength_by_horizon:
+    5: 5.0
+    10: 10.0
+    20: 25.0
+  beta_calibration: false
   promotion_pooled_gate: true
 output:
   base_dir: outputs

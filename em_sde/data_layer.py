@@ -560,6 +560,118 @@ def compute_earnings_proximity(
     return max(0.0, 1.0 - min_diff / max_days)
 
 
+def load_implied_vol(csv_path: str) -> pd.DataFrame:
+    """
+    Load implied volatility data from CSV.
+
+    Expected format: date index with one or more of these columns:
+        - iv_9d:  9-day implied vol (annualized decimal, e.g. 0.18)
+        - iv_30d: 30-day implied vol (or 'vix' column, auto-scaled from pct)
+        - iv_3m:  3-month implied vol
+        - vix, vix9d, vix3m: CBOE VIX indices (in percentage points, e.g. 17.5)
+
+    Returns DataFrame with DatetimeIndex and columns normalized to annualized
+    decimal (e.g. 0.175 = 17.5% annualized).
+    """
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Implied vol CSV not found: {csv_path}")
+
+    raw = pd.read_csv(csv_path, parse_dates=True, index_col=0)
+
+    if not isinstance(raw.index, pd.DatetimeIndex):
+        raw.index = pd.to_datetime(raw.index)
+    if raw.index.tz is not None:
+        raw.index = raw.index.tz_localize(None)
+    raw = raw.sort_index()
+
+    result = pd.DataFrame(index=raw.index)
+
+    # Map VIX columns (percentage points) to decimal annualized
+    vix_map = {"vix": "iv_30d", "vix9d": "iv_9d", "vix3m": "iv_3m"}
+    for vix_col, iv_col in vix_map.items():
+        matches = [c for c in raw.columns if c.lower() == vix_col]
+        if matches:
+            result[iv_col] = raw[matches[0]].astype(float) / 100.0
+
+    # Direct IV columns (already in decimal annualized)
+    for col in ["iv_9d", "iv_30d", "iv_3m"]:
+        if col in raw.columns and col not in result.columns:
+            result[col] = raw[col].astype(float)
+
+    if result.empty:
+        raise ValueError(
+            f"No recognized implied vol columns in {csv_path}. "
+            f"Expected: vix/vix9d/vix3m (pct) or iv_9d/iv_30d/iv_3m (decimal). "
+            f"Got: {list(raw.columns)}"
+        )
+
+    result = result.dropna(how="all")
+    logger.info("Loaded implied vol from %s: %d rows, columns=%s",
+                csv_path, len(result), list(result.columns))
+    return result
+
+
+def get_implied_vol_for_horizon(
+    iv_df: pd.DataFrame,
+    current_date,
+    H: int,
+) -> Optional[float]:
+    """
+    Look up horizon-matched implied vol for a given date.
+
+    Mapping:
+        H <= 9      -> iv_9d  (or iv_30d fallback)
+        9 < H < 30  -> interpolate iv_9d and iv_30d, or single-tenor fallback
+        H >= 30     -> iv_3m  (or iv_30d fallback)
+
+    Returns annualized decimal implied vol, or None if no data available.
+    Walk-forward safe: uses most recent available date <= current_date.
+    """
+    current_dt = pd.Timestamp(current_date)
+
+    # Get most recent row on or before current_date
+    mask = iv_df.index <= current_dt
+    if not mask.any():
+        return None
+    row = iv_df.loc[mask].iloc[-1]
+
+    # Check staleness: skip if data is more than 5 business days old
+    last_date = iv_df.index[mask][-1]
+    gap = np.busday_count(
+        last_date.to_numpy().astype("datetime64[D]"),
+        current_dt.to_numpy().astype("datetime64[D]"),
+    )
+    if gap > 5:
+        return None
+
+    has_9d = "iv_9d" in row.index and pd.notna(row.get("iv_9d"))
+    has_30d = "iv_30d" in row.index and pd.notna(row.get("iv_30d"))
+    has_3m = "iv_3m" in row.index and pd.notna(row.get("iv_3m"))
+
+    if H <= 9:
+        if has_9d:
+            return float(row["iv_9d"])
+        elif has_30d:
+            return float(row["iv_30d"])
+    elif H < 30:
+        # 9 < H < 30: interpolate iv_9d → iv_30d
+        if has_9d and has_30d:
+            w = max(0.0, min(1.0, (H - 9) / (30 - 9)))
+            return float((1 - w) * row["iv_9d"] + w * row["iv_30d"])
+        elif has_30d:
+            return float(row["iv_30d"])
+        elif has_9d:
+            return float(row["iv_9d"])
+    else:
+        # H >= 30
+        if has_3m:
+            return float(row["iv_3m"])
+        elif has_30d:
+            return float(row["iv_30d"])
+
+    return None
+
+
 def _cache_load(ticker: str, max_age_days: int):
     """Load cached data if fresh enough."""
     cache_path = CACHE_DIR / f"{ticker}.parquet"

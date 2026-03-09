@@ -8,10 +8,12 @@ Usage:
     python scripts/run_overfit_check.py cluster
     python scripts/run_overfit_check.py jump
     python scripts/run_overfit_check.py both
+    python scripts/run_overfit_check.py spy --full
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 import warnings
@@ -30,17 +32,31 @@ import optuna
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
 from em_sde.evaluation import expected_calibration_error
+from scripts.run_bayesian_opt import CONFIGS, _find_study_name
 
 DIAG_DIR = Path("outputs/diagnostics")
 OUT_DIR = Path("outputs")
 
-CONFIGS = {
-    "cluster": "configs/exp_suite/exp_cluster_regime_gated.yaml",
-    "jump": "configs/exp_suite/exp_jump_regime_gated.yaml",
-    "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
-    "aapl": "configs/exp_suite/exp_aapl_regime_gated.yaml",
-    "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
-}
+
+def _find_optuna_study(config_name: str, lean: bool = True) -> optuna.Study | None:
+    """Find the current Optuna study for a config and BO mode."""
+    config_path = CONFIGS.get(config_name)
+    if config_path is None:
+        return None
+
+    db_path = OUT_DIR / f"optuna_{config_name}.db"
+    if not db_path.exists():
+        return None
+    storage_url = f"sqlite:///{db_path}"
+
+    study_name = _find_study_name(config_name, config_path, db_path, lean)
+    if study_name is None:
+        return None
+
+    try:
+        return optuna.load_study(study_name=study_name, storage=storage_url)
+    except Exception:
+        return None
 
 # Thresholds for each metric
 THRESHOLDS = {
@@ -70,20 +86,15 @@ def _status(value: float, metric: str) -> str:
     return "RED"
 
 
-def compute_generalization_gap(config_name: str) -> list[dict]:
+def compute_generalization_gap(config_name: str, lean: bool = True) -> list[dict]:
     """Metric 1: Compare BO train CV ECE vs full-data gate recheck ECE."""
     results = []
 
-    # Load BO train ECE from Optuna study
-    db_path = OUT_DIR / f"optuna_{config_name}.db"
-    if not db_path.exists():
+    # Load BO train ECE from Optuna study (versioned name lookup)
+    study = _find_optuna_study(config_name, lean=lean)
+    if study is None:
         return [{"metric": "gen_gap", "horizon": "all", "value": np.nan,
-                 "status": "SKIP", "detail": "No Optuna DB found"}]
-
-    study = optuna.load_study(
-        study_name=f"ece_opt_{config_name}",
-        storage=f"sqlite:///{db_path}",
-    )
+                 "status": "SKIP", "detail": "No Optuna DB/study found"}]
     train_ece = study.best_trial.user_attrs.get("ece_per_horizon", {})
 
     # Load full-data gate recheck ECE
@@ -107,7 +118,7 @@ def compute_generalization_gap(config_name: str) -> list[dict]:
         results.append({
             "metric": "gen_gap", "horizon": h,
             "value": gap_ratio,
-            "status": _status(abs(gap_ratio), "gen_gap"),
+            "status": _status(max(gap_ratio, 0.0), "gen_gap"),
             "detail": f"train={t_ece:.4f} full={full_ece:.4f} gap={gap_ratio:+.1%}",
         })
     return results
@@ -220,17 +231,18 @@ def compute_temporal_stability(config_name: str) -> list[dict]:
 
         if mean_ece == 0:
             continue
-        gap = abs(late - early) / mean_ece
+        raw_gap = (late - early) / mean_ece  # positive = late folds worse (bad)
+        gap = max(raw_gap, 0.0)  # only flag degradation; improvement is fine
         results.append({
             "metric": "temporal", "horizon": int(h),
             "value": gap,
             "status": _status(gap, "temporal"),
-            "detail": f"early={early:.4f} late={late:.4f} mean={mean_ece:.4f}",
+            "detail": f"early={early:.4f} late={late:.4f} mean={mean_ece:.4f} raw={raw_gap:+.1%}",
         })
     return results
 
 
-def compute_neff_ratio(config_name: str) -> list[dict]:
+def compute_neff_ratio(config_name: str, lean: bool = True) -> list[dict]:
     """Metric 5: Effective sample size vs number of BO parameters."""
     gates_path = DIAG_DIR / f"cv_{config_name}_gates_recheck.csv"
     if not gates_path.exists():
@@ -240,15 +252,11 @@ def compute_neff_ratio(config_name: str) -> list[dict]:
     gates = pd.read_csv(gates_path)
     pooled = gates[(gates["regime"] == "pooled") & (gates["metric"] == "ece_cal")]
 
-    # Count BO params from Optuna
-    db_path = OUT_DIR / f"optuna_{config_name}.db"
+    # Count BO params from Optuna (versioned name lookup)
     n_params = 14  # default
-    if db_path.exists():
+    study = _find_optuna_study(config_name, lean=lean)
+    if study is not None:
         try:
-            study = optuna.load_study(
-                study_name=f"ece_opt_{config_name}",
-                storage=f"sqlite:///{db_path}",
-            )
             n_params = len(study.best_params)
         except Exception:
             pass
@@ -266,25 +274,27 @@ def compute_neff_ratio(config_name: str) -> list[dict]:
             "metric": "neff_ratio", "horizon": h,
             "value": ratio,
             "status": _status(ratio, "neff_ratio"),
+            "n_params": n_params,
             "detail": f"n_eff={n_eff} n_params={n_params} n_events={n_events} n_total={n_samples}",
         })
     return results
 
 
-def run_diagnostic(config_name: str) -> pd.DataFrame:
+def run_diagnostic(config_name: str, lean: bool = True) -> pd.DataFrame:
     """Run all 5 overfitting diagnostics for a config."""
     t0 = time.perf_counter()
+    mode = "lean" if lean else "full"
 
     print(f"\n{'='*65}")
-    print(f"  OVERFITTING DIAGNOSTIC: {config_name.upper()}")
+    print(f"  OVERFITTING DIAGNOSTIC: {config_name.upper()} [{mode}]")
     print(f"{'='*65}\n")
 
     all_results = []
-    all_results.extend(compute_generalization_gap(config_name))
+    all_results.extend(compute_generalization_gap(config_name, lean=lean))
     all_results.extend(compute_fold_stability(config_name))
     all_results.extend(compute_threshold_sensitivity(config_name))
     all_results.extend(compute_temporal_stability(config_name))
-    all_results.extend(compute_neff_ratio(config_name))
+    all_results.extend(compute_neff_ratio(config_name, lean=lean))
 
     df = pd.DataFrame(all_results)
 
@@ -349,7 +359,8 @@ def run_diagnostic(config_name: str) -> pd.DataFrame:
                 elif r["metric"] == "fold_cv":
                     print(f"  - H={h}: {name} is {r['value']:.2f} — ECE very unstable across folds")
                 elif r["metric"] == "neff_ratio":
-                    print(f"  - H={h}: {name} is {r['value']:.0f}x — too few events for {len(df)} params")
+                    n_params = int(r.get("n_params", 0)) if not pd.isna(r.get("n_params", np.nan)) else "?"
+                    print(f"  - H={h}: {name} is {r['value']:.0f}x — too few events for {n_params} params")
 
     elapsed = time.perf_counter() - t0
     print(f"\n({elapsed:.1f}s)")
@@ -364,16 +375,22 @@ def run_diagnostic(config_name: str) -> pd.DataFrame:
 
 
 def main() -> int:
-    target = sys.argv[1] if len(sys.argv) > 1 else "both"
+    parser = argparse.ArgumentParser(description="Overfitting diagnostics for BO studies")
+    parser.add_argument("target", nargs="?", default="both", help="Config name or both/all")
+    parser.add_argument("--full", action="store_true",
+                        help="Inspect the full-search BO study instead of lean mode")
+    args = parser.parse_args()
+    target = args.target
+    lean = not args.full
 
     if target == "both":
-        run_diagnostic("cluster")
-        run_diagnostic("jump")
+        run_diagnostic("cluster", lean=lean)
+        run_diagnostic("jump", lean=lean)
     elif target == "all":
         for name in CONFIGS:
-            run_diagnostic(name)
+            run_diagnostic(name, lean=lean)
     elif target in CONFIGS:
-        run_diagnostic(target)
+        run_diagnostic(target, lean=lean)
     else:
         print(f"Unknown config: {target}. Available: {list(CONFIGS.keys())}")
         return 1

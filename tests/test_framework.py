@@ -14,8 +14,11 @@ import json
 import re
 import tempfile
 import subprocess
+import io
 from contextlib import contextmanager
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, Optional
 from unittest.mock import patch
 
@@ -2560,6 +2563,38 @@ class TestPooledECEGate:
         assert pooled_n > per_regime_max
 
 
+class TestCvEffectiveSigma:
+    """Regression tests for horizon-aware sigma export in CV/OOF gating."""
+
+    def test_expanding_window_cv_uses_effective_horizon_sigma(self):
+        """OOF sigma should come from the forecast sigma used for that horizon."""
+        import em_sde.model_selection as ms
+
+        dates = pd.bdate_range("2024-01-01", periods=60)
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, len(dates))}, index=dates)
+        results = pd.DataFrame({
+            "date": dates,
+            "y_5": np.ones(len(dates)),
+            "p_raw_5": np.full(len(dates), 0.10),
+            "p_cal_5": np.full(len(dates), 0.12),
+            "sigma_garch_1d": np.full(len(dates), 0.01),
+            "sigma_forecast_5": np.full(len(dates), 0.02),
+        })
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=20),
+            model=ModelConfig(horizons=[5], garch_min_window=20),
+            calibration=CalibrationConfig(),
+            output=OutputConfig(charts=False),
+        )
+
+        with patch.object(ms, "run_walkforward", return_value=results):
+            _, oof_df = ms.expanding_window_cv(df, [cfg], ["test_cfg"], n_folds=2)
+
+        assert len(oof_df) > 0
+        assert np.allclose(oof_df["sigma_1d"].to_numpy(dtype=float), 0.02)
+        assert not np.allclose(oof_df["sigma_1d"].to_numpy(dtype=float), 0.01)
+
+
 class TestRegimeTdfConfig:
     """Tests for regime-conditional t_df config (WS3)."""
 
@@ -2636,6 +2671,161 @@ class TestHarRv:
             assert result.sigma_1d > 0
             assert result.sigma_5d > 0
             assert result.sigma_22d > 0
+
+
+class TestComparePromotionGatePolicy:
+    """Regression tests for compare-mode promotion gate routing."""
+
+    @staticmethod
+    def _compare_summary():
+        return pd.DataFrame([{
+            "rank": 1,
+            "config_name": "cfg",
+            "horizon": 5,
+            "bss_cal_mean": 0.02,
+            "bss_cal_std": 0.01,
+            "auc_cal_mean": 0.60,
+            "auc_cal_std": 0.01,
+            "brier_cal_mean": 0.08,
+            "total_n": 120,
+            "n_folds": 2,
+        }])
+
+    @staticmethod
+    def _gate_report():
+        return pd.DataFrame([{
+            "config_name": "cfg",
+            "horizon": 5,
+            "regime": "pooled",
+            "metric": "ece_cal",
+            "value": 0.01,
+            "threshold": 0.02,
+            "passed": True,
+            "margin": 0.01,
+            "status": "evaluated",
+            "all_gates_passed": True,
+        }])
+
+    def test_compare_mode_honors_pooled_gate_true(self):
+        """compare mode should use OOF gating with pooled_gate=True when configured."""
+        import em_sde.run as run_mod
+
+        cfg = PipelineConfig()
+        cfg.calibration.promotion_gates_enabled = True
+        cfg.calibration.promotion_pooled_gate = True
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, 40)},
+                          index=pd.bdate_range("2024-01-01", periods=40))
+        cv_results = pd.DataFrame()
+        oof_df = pd.DataFrame({
+            "config_name": ["cfg"],
+            "fold": [0],
+            "horizon": [5],
+            "p_cal": [0.1],
+            "y": [0.0],
+            "sigma_1d": [0.02],
+        })
+        args = SimpleNamespace(compare=["configs/test.yaml"], cv_folds=2)
+
+        with patch.object(run_mod, "load_config", return_value=cfg), \
+                patch.object(run_mod, "load_data", return_value=(df, {})), \
+                patch.object(run_mod, "expanding_window_cv", return_value=(cv_results, oof_df)), \
+                patch.object(run_mod, "compare_models", return_value=self._compare_summary()), \
+                patch.object(run_mod, "apply_promotion_gates_oof", return_value=self._gate_report()) as gate_mock, \
+                redirect_stdout(io.StringIO()):
+            run_mod._run_compare(args)
+
+        assert gate_mock.call_count == 1
+        assert gate_mock.call_args.kwargs["pooled_gate"] is True
+
+    def test_compare_mode_honors_pooled_gate_false(self):
+        """compare mode should still use OOF gating and respect pooled_gate=False."""
+        import em_sde.run as run_mod
+
+        cfg = PipelineConfig()
+        cfg.calibration.promotion_gates_enabled = True
+        cfg.calibration.promotion_pooled_gate = False
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, 40)},
+                          index=pd.bdate_range("2024-01-01", periods=40))
+        cv_results = pd.DataFrame()
+        oof_df = pd.DataFrame({
+            "config_name": ["cfg"],
+            "fold": [0],
+            "horizon": [5],
+            "p_cal": [0.1],
+            "y": [0.0],
+            "sigma_1d": [0.02],
+        })
+        args = SimpleNamespace(compare=["configs/test.yaml"], cv_folds=2)
+
+        with patch.object(run_mod, "load_config", return_value=cfg), \
+                patch.object(run_mod, "load_data", return_value=(df, {})), \
+                patch.object(run_mod, "expanding_window_cv", return_value=(cv_results, oof_df)), \
+                patch.object(run_mod, "compare_models", return_value=self._compare_summary()), \
+                patch.object(run_mod, "apply_promotion_gates_oof", return_value=self._gate_report()) as gate_mock, \
+                redirect_stdout(io.StringIO()):
+            run_mod._run_compare(args)
+
+        assert gate_mock.call_count == 1
+        assert gate_mock.call_args.kwargs["pooled_gate"] is False
+
+
+class TestGateRecheckShadowGate:
+    """Regression tests for shadow-gate configuration."""
+
+    def test_shadow_gate_keeps_pooled_mode(self):
+        """Shadow gate should vary only the ECE threshold, not the gate mode."""
+        import scripts.run_gate_recheck as recheck
+
+        cfg = PipelineConfig()
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, 40)},
+                          index=pd.bdate_range("2024-01-01", periods=40))
+        cv_results = pd.DataFrame()
+        oof_df = pd.DataFrame({
+            "config_name": ["cfg"],
+            "fold": [0],
+            "horizon": [5],
+            "p_cal": [0.1],
+            "y": [0.0],
+            "sigma_1d": [0.02],
+        })
+        gate_report = pd.DataFrame([{
+            "config_name": "cfg",
+            "horizon": 5,
+            "regime": "pooled",
+            "metric": "ece_cal",
+            "value": 0.01,
+            "threshold": 0.02,
+            "passed": True,
+            "margin": 0.01,
+            "status": "evaluated",
+            "n_samples": 100,
+            "n_events": 10,
+            "n_nonevents": 90,
+            "ece_ci_low": 0.005,
+            "ece_ci_high": 0.015,
+            "ece_gate_confidence": "solid_pass",
+            "promotion_status": "PASS",
+            "all_gates_passed": True,
+            "neff_warning": "",
+            "neff_ratio": 120.0,
+        }])
+        pooled_flags = []
+
+        def fake_apply(*args, **kwargs):
+            pooled_flags.append(kwargs.get("pooled_gate", False))
+            return gate_report
+
+        with patch.object(recheck, "load_config", return_value=cfg), \
+                patch.object(recheck, "load_data", return_value=(df, {})), \
+                patch.object(recheck, "expanding_window_cv", return_value=(cv_results, oof_df)), \
+                patch.object(recheck, "compare_models", return_value=pd.DataFrame()), \
+                patch.object(recheck, "apply_promotion_gates_oof", side_effect=fake_apply), \
+                patch.object(recheck, "apply_promotion_gates", return_value=pd.DataFrame()), \
+                patch.object(pd.DataFrame, "to_csv", return_value=None), \
+                redirect_stdout(io.StringIO()):
+            recheck.run_single_config("spy", "configs/exp_suite/exp_spy_regime_gated.yaml")
+
+        assert pooled_flags == [True, True]
 
     def test_har_rv_r_squared_range(self):
         """R-squared should be in a reasonable range."""
@@ -2737,6 +2927,67 @@ class TestOverfitDiagnostics:
         assert _status(150, "neff_ratio") == "GREEN"
         assert _status(75, "neff_ratio") == "YELLOW"
         assert _status(30, "neff_ratio") == "RED"
+
+    def test_find_optuna_study_uses_current_mode_lookup(self):
+        """Overfit diagnostics should reuse the versioned BO study resolver."""
+        import scripts.run_overfit_check as overfit
+
+        fake_study = object()
+        expected_db = overfit.OUT_DIR / "optuna_aapl.db"
+
+        with patch.object(overfit.Path, "exists", return_value=True), \
+                patch.object(overfit, "_find_study_name", return_value="ece_opt_aapl_vfeedface") as find_mock, \
+                patch.object(overfit.optuna, "load_study", return_value=fake_study) as load_mock:
+            study = overfit._find_optuna_study("aapl", lean=True)
+
+        assert study is fake_study
+        find_mock.assert_called_once_with(
+            "aapl",
+            overfit.CONFIGS["aapl"],
+            expected_db,
+            True,
+        )
+        load_mock.assert_called_once_with(
+            study_name="ece_opt_aapl_vfeedface",
+            storage=f"sqlite:///{expected_db}",
+        )
+
+    def test_overfit_main_full_flag_uses_full_mode(self):
+        """CLI --full should route diagnostics to the full BO study."""
+        import scripts.run_overfit_check as overfit
+
+        with patch.object(overfit, "run_diagnostic") as run_mock, \
+                patch.object(sys, "argv", ["run_overfit_check.py", "aapl", "--full"]):
+            rc = overfit.main()
+
+        assert rc == 0
+        run_mock.assert_called_once_with("aapl", lean=False)
+
+    def test_neff_recommendation_reports_actual_param_count(self):
+        """N_eff recommendation should print BO param count, not report row count."""
+        import scripts.run_overfit_check as overfit
+
+        neff_row = {
+            "metric": "neff_ratio",
+            "horizon": 5,
+            "value": 13.4,
+            "status": "RED",
+            "n_params": 14,
+            "detail": "n_eff=188 n_params=14 n_events=94 n_total=1900",
+        }
+        out = io.StringIO()
+
+        with patch.object(overfit, "compute_generalization_gap", return_value=[]), \
+                patch.object(overfit, "compute_fold_stability", return_value=[]), \
+                patch.object(overfit, "compute_threshold_sensitivity", return_value=[]), \
+                patch.object(overfit, "compute_temporal_stability", return_value=[]), \
+                patch.object(overfit, "compute_neff_ratio", return_value=[neff_row]), \
+                patch.object(overfit.pd.DataFrame, "to_csv", return_value=None), \
+                redirect_stdout(out):
+            overfit.run_diagnostic("aapl")
+
+        text = out.getvalue()
+        assert "too few events for 14 params" in text
 
 
 # ============================================================
@@ -2876,6 +3127,126 @@ class TestGarchEnsemble:
             # Pooled from multiple models -> should be longer than single model
             assert len(result.standardized_residuals) >= 100
 
+    def test_walkforward_uses_fitted_model_type_for_ensemble_dynamics(self):
+        """Ensemble GJR params should drive projection and term-structure math."""
+        import em_sde.backtest as backtest
+
+        prices = np.linspace(100.0, 120.0, 40)
+        dates = pd.bdate_range("2024-01-01", periods=len(prices))
+        df = pd.DataFrame({"price": prices}, index=dates)
+
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=20),
+            model=ModelConfig(
+                horizons=[5],
+                garch_window=20,
+                garch_min_window=20,
+                mc_base_paths=16,
+                mc_boost_paths=16,
+                seed=42,
+                garch_in_sim=True,
+                garch_model_type="garch",
+                garch_ensemble=True,
+                mc_vol_term_structure=True,
+                fhs_enabled=True,
+                garch_fallback_to_ewma=False,
+            ),
+            calibration=CalibrationConfig(),
+            output=OutputConfig(base_dir=tempfile.mkdtemp(), charts=False),
+        )
+
+        ensemble_result = GarchResult(
+            sigma_1d=0.02,
+            source="ensemble_3",
+            omega=1e-6,
+            alpha=0.20,
+            beta=0.90,
+            gamma=0.10,
+            diagnostics={"is_stationary": False},
+            standardized_residuals=np.linspace(-1.5, 1.5, 150),
+            model_type="gjr",
+        )
+        captured_project_types = []
+        captured_term_types = []
+        captured_residual_lengths = []
+
+        def fake_project(omega, alpha, beta, gamma=None, model_type="garch",
+                         target_persistence=0.98, variance_anchor=None):
+            captured_project_types.append(model_type)
+            return omega, alpha * 0.5, beta * 0.5, gamma * 0.5 if gamma is not None else None
+
+        def fake_diag(omega, alpha, beta, gamma=None, model_type="garch"):
+            return {"is_stationary": True, "persistence": 0.95}
+
+        def fake_term_structure(sigma_1d, omega, alpha, beta, gamma, H, model_type="garch"):
+            captured_term_types.append(model_type)
+            return sigma_1d
+
+        def fake_simulate(*args, standardized_residuals=None, **kwargs):
+            captured_residual_lengths.append(
+                0 if standardized_residuals is None else len(standardized_residuals)
+            )
+            return (0.10, 0.01)
+
+        with patch.object(backtest, "fit_garch_ensemble", return_value=ensemble_result), \
+                patch.object(backtest, "project_to_stationary", side_effect=fake_project), \
+                patch.object(backtest, "_garch_diag", side_effect=fake_diag), \
+                patch.object(backtest, "garch_term_structure_vol", side_effect=fake_term_structure), \
+                patch.object(backtest, "_simulate_horizon", side_effect=fake_simulate):
+            results = run_walkforward(df, cfg)
+
+        assert len(results) > 0
+        assert captured_project_types
+        assert captured_term_types
+        assert set(captured_project_types) == {"gjr"}
+        assert set(captured_term_types) == {"gjr"}
+        assert captured_residual_lengths
+        assert min(captured_residual_lengths) == 150
+
+
+class TestBayesianOptStudyLookup:
+    """Tests for versioned Optuna study selection."""
+
+    def test_find_study_name_prefers_exact_current_version(self):
+        """Current config version should win over stale studies with more trials."""
+        import scripts.run_bayesian_opt as bo
+
+        summaries = [
+            SimpleNamespace(study_name="ece_opt_aapl_vdeadbeef", n_trials=24),
+            SimpleNamespace(study_name="ece_opt_aapl_vfeedface", n_trials=3),
+        ]
+
+        with patch.object(bo, "_study_version_key", return_value="feedface"), \
+                patch.object(bo.optuna.study, "get_all_study_summaries", return_value=summaries):
+            study_name = bo._find_study_name(
+                "aapl",
+                Path("configs/exp_suite/exp_aapl_regime_gated.yaml"),
+                Path("outputs/optuna_aapl.db"),
+                lean=True,
+            )
+
+        assert study_name == "ece_opt_aapl_vfeedface"
+
+    def test_find_study_name_rejects_other_versions_when_current_missing(self):
+        """Missing current version should not silently fall back to stale studies."""
+        import scripts.run_bayesian_opt as bo
+
+        summaries = [
+            SimpleNamespace(study_name="ece_opt_aapl_vdeadbeef", n_trials=24),
+            SimpleNamespace(study_name="ece_opt_aapl_vbadc0de0", n_trials=12),
+        ]
+
+        with patch.object(bo, "_study_version_key", return_value="feedface"), \
+                patch.object(bo.optuna.study, "get_all_study_summaries", return_value=summaries):
+            study_name = bo._find_study_name(
+                "aapl",
+                Path("configs/exp_suite/exp_aapl_regime_gated.yaml"),
+                Path("outputs/optuna_aapl.db"),
+                lean=True,
+            )
+
+        assert study_name is None
+
 
 # ============================================================
 # Test: Earnings Calendar Feature
@@ -2957,6 +3328,579 @@ class TestNewFeatureConfig:
         """Earnings calendar should be disabled by default."""
         cfg = PipelineConfig()
         assert cfg.model.earnings_calendar is False
+
+
+class TestImpliedVolFeature:
+    """Tests for implied volatility data loading, blending, and calibration feature."""
+
+    def test_implied_vol_config_defaults(self):
+        """Implied vol should be disabled by default."""
+        cfg = PipelineConfig()
+        assert cfg.model.implied_vol_enabled is False
+        assert cfg.model.implied_vol_csv_path is None
+        assert cfg.model.implied_vol_blend == 0.3
+        assert cfg.model.implied_vol_as_feature is True
+
+    def test_implied_vol_validation_requires_csv_path(self):
+        """implied_vol_enabled=True without csv_path should raise."""
+        cfg = PipelineConfig()
+        cfg.model.implied_vol_enabled = True
+        from em_sde.config import _validate
+        try:
+            _validate(cfg)
+            assert False, "Should have raised"
+        except AssertionError as e:
+            assert "implied_vol_csv_path" in str(e)
+
+    def test_implied_vol_validation_blend_range(self):
+        """implied_vol_blend must be in [0, 1]."""
+        cfg = PipelineConfig()
+        cfg.model.implied_vol_enabled = True
+        cfg.model.implied_vol_csv_path = "dummy.csv"
+        cfg.model.implied_vol_blend = 1.5
+        from em_sde.config import _validate
+        try:
+            _validate(cfg)
+            assert False, "Should have raised"
+        except AssertionError as e:
+            assert "implied_vol_blend" in str(e)
+
+    def test_load_implied_vol_vix_format(self, tmp_path):
+        """Load VIX-format CSV (percentage points) and verify scaling."""
+        from em_sde.data_layer import load_implied_vol
+        csv_path = tmp_path / "vix.csv"
+        csv_path.write_text(
+            "date,VIX,VIX9D,VIX3M\n"
+            "2020-01-02,13.78,12.50,15.10\n"
+            "2020-01-03,14.02,12.80,15.30\n"
+        )
+        df = load_implied_vol(str(csv_path))
+        assert "iv_30d" in df.columns
+        assert "iv_9d" in df.columns
+        assert "iv_3m" in df.columns
+        # VIX 13.78 -> 0.1378 decimal
+        assert abs(df["iv_30d"].iloc[0] - 0.1378) < 1e-6
+        assert abs(df["iv_9d"].iloc[0] - 0.1250) < 1e-6
+
+    def test_load_implied_vol_decimal_format(self, tmp_path):
+        """Load decimal IV CSV and verify no rescaling."""
+        from em_sde.data_layer import load_implied_vol
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text(
+            "date,iv_30d,iv_9d\n"
+            "2020-01-02,0.18,0.16\n"
+            "2020-01-03,0.19,0.17\n"
+        )
+        df = load_implied_vol(str(csv_path))
+        assert abs(df["iv_30d"].iloc[0] - 0.18) < 1e-6
+        assert abs(df["iv_9d"].iloc[0] - 0.16) < 1e-6
+
+    def test_load_implied_vol_missing_file(self):
+        """Missing CSV should raise FileNotFoundError."""
+        from em_sde.data_layer import load_implied_vol
+        try:
+            load_implied_vol("nonexistent.csv")
+            assert False, "Should have raised"
+        except FileNotFoundError:
+            pass
+
+    def test_load_implied_vol_bad_columns(self, tmp_path):
+        """CSV with no recognized columns should raise ValueError."""
+        from em_sde.data_layer import load_implied_vol
+        csv_path = tmp_path / "bad.csv"
+        csv_path.write_text("date,foo,bar\n2020-01-02,1.0,2.0\n")
+        try:
+            load_implied_vol(str(csv_path))
+            assert False, "Should have raised"
+        except ValueError as e:
+            assert "No recognized" in str(e)
+
+    def test_get_implied_vol_horizon_mapping(self, tmp_path):
+        """Horizon mapping: H<=9->iv_9d, 9<H<30->interp, H>=30->iv_3m."""
+        from em_sde.data_layer import load_implied_vol, get_implied_vol_for_horizon
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text(
+            "date,iv_9d,iv_30d,iv_3m\n"
+            "2020-01-02,0.15,0.18,0.20\n"
+        )
+        df = load_implied_vol(str(csv_path))
+        # H=5 -> iv_9d
+        assert abs(get_implied_vol_for_horizon(df, "2020-01-02", 5) - 0.15) < 1e-6
+        # H=9 -> iv_9d (boundary)
+        assert abs(get_implied_vol_for_horizon(df, "2020-01-02", 9) - 0.15) < 1e-6
+        # H=20 -> interpolation between iv_9d and iv_30d
+        iv_20 = get_implied_vol_for_horizon(df, "2020-01-02", 20)
+        assert 0.15 < iv_20 < 0.18
+        # H=10 -> interpolation between iv_9d and iv_30d
+        iv_10 = get_implied_vol_for_horizon(df, "2020-01-02", 10)
+        assert 0.15 < iv_10 < 0.18
+        # H=30 -> iv_3m
+        assert abs(get_implied_vol_for_horizon(df, "2020-01-02", 30) - 0.20) < 1e-6
+
+    def test_get_implied_vol_short_horizons_no_extrapolation(self, tmp_path):
+        """Regression: H=6,7,8 must return iv_9d, never extrapolate below it."""
+        from em_sde.data_layer import load_implied_vol, get_implied_vol_for_horizon
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text(
+            "date,iv_9d,iv_30d\n"
+            "2020-01-02,0.15,0.18\n"
+        )
+        df = load_implied_vol(str(csv_path))
+        iv_9d, iv_30d = 0.15, 0.18
+        for H in [6, 7, 8, 9]:
+            val = get_implied_vol_for_horizon(df, "2020-01-02", H)
+            # H <= 9 must use iv_9d exactly
+            assert abs(val - iv_9d) < 1e-6, f"H={H}: expected {iv_9d}, got {val}"
+
+    def test_get_implied_vol_interp_monotone(self, tmp_path):
+        """Regression: H=10..29 must be monotone between iv_9d and iv_30d."""
+        from em_sde.data_layer import load_implied_vol, get_implied_vol_for_horizon
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text(
+            "date,iv_9d,iv_30d\n"
+            "2020-01-02,0.15,0.18\n"
+        )
+        df = load_implied_vol(str(csv_path))
+        iv_9d, iv_30d = 0.15, 0.18
+        prev = iv_9d
+        for H in range(10, 30):
+            val = get_implied_vol_for_horizon(df, "2020-01-02", H)
+            assert val >= iv_9d, f"H={H}: {val} < iv_9d={iv_9d}"
+            assert val <= iv_30d, f"H={H}: {val} > iv_30d={iv_30d}"
+            assert val >= prev, f"H={H}: {val} < H={H-1} value {prev} (not monotone)"
+            prev = val
+
+    def test_get_implied_vol_staleness_guard(self, tmp_path):
+        """Data older than 5 business days should return None."""
+        from em_sde.data_layer import load_implied_vol, get_implied_vol_for_horizon
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text("date,iv_30d\n2020-01-02,0.18\n")
+        df = load_implied_vol(str(csv_path))
+        # Same day: should work
+        assert get_implied_vol_for_horizon(df, "2020-01-02", 20) is not None
+        # 2 weeks later: stale, should return None
+        assert get_implied_vol_for_horizon(df, "2020-01-20", 20) is None
+
+    def test_get_implied_vol_before_data_start(self, tmp_path):
+        """Query before any data should return None."""
+        from em_sde.data_layer import load_implied_vol, get_implied_vol_for_horizon
+        csv_path = tmp_path / "iv.csv"
+        csv_path.write_text("date,iv_30d\n2020-01-02,0.18\n")
+        df = load_implied_vol(str(csv_path))
+        assert get_implied_vol_for_horizon(df, "2019-12-01", 20) is None
+
+    def test_mf_calibrator_implied_vol_aware(self):
+        """MultiFeatureCalibrator with implied_vol_aware has correct feature count."""
+        from em_sde.calibration import MultiFeatureCalibrator
+        # Without implied vol: 6 features
+        cal_base = MultiFeatureCalibrator()
+        assert cal_base.N_FEATURES == 6
+        # With implied vol: 7 features
+        cal_iv = MultiFeatureCalibrator(implied_vol_aware=True)
+        assert cal_iv.N_FEATURES == 7
+        # With both earnings and implied vol: 8 features
+        cal_both = MultiFeatureCalibrator(earnings_aware=True, implied_vol_aware=True)
+        assert cal_both.N_FEATURES == 8
+
+    def test_mf_calibrator_implied_vol_identity_init(self):
+        """Implied vol feature starts with 0 weight (no effect initially)."""
+        from em_sde.calibration import MultiFeatureCalibrator
+        cal = MultiFeatureCalibrator(implied_vol_aware=True)
+        # Weight for implied_vol_ratio (last feature) should be 0
+        assert cal.w[-1] == 0.0
+        # Identity: calibrate(p, ...) ≈ p during warmup
+        p = cal.calibrate(0.15, 0.01, 0.0, 1.0, 0.0, 0.0, implied_vol_ratio=1.5)
+        assert abs(p - 0.15) < 1e-6
+
+    def test_mf_calibrator_update_with_implied_vol(self):
+        """Update with implied_vol_ratio should work without error."""
+        from em_sde.calibration import MultiFeatureCalibrator
+        cal = MultiFeatureCalibrator(implied_vol_aware=True, min_updates=2)
+        for _ in range(5):
+            cal.update(0.10, 1.0, 0.015, 0.001, 1.0, 0.002, 0.0, implied_vol_ratio=1.2)
+        # After enough updates, calibration should differ from raw
+        p = cal.calibrate(0.10, 0.015, 0.001, 1.0, 0.002, 0.0, implied_vol_ratio=1.2)
+        assert 0.0 <= p <= 1.0
+
+    def test_regime_mf_calibrator_implied_vol_passthrough(self):
+        """RegimeMultiFeatureCalibrator passes implied_vol_ratio to sub-calibrators."""
+        from em_sde.calibration import RegimeMultiFeatureCalibrator
+        cal = RegimeMultiFeatureCalibrator(
+            n_bins=3, implied_vol_aware=True, min_updates=2, lr=0.01,
+        )
+        # Warmup
+        for _ in range(60):
+            cal.observe_vol(0.01)
+        for _ in range(5):
+            cal.update(0.10, 1.0, 0.01, 0.001, 1.0, 0.002, 0.0, implied_vol_ratio=1.1)
+        p = cal.calibrate(0.10, 0.01, 0.001, 1.0, 0.002, 0.0, implied_vol_ratio=1.1)
+        assert 0.0 <= p <= 1.0
+
+
+class TestHarRvHorizonMapping:
+    """Regression tests for HAR-RV sigma mapping across horizons."""
+
+    def test_h1_uses_sigma_1d(self):
+        """H=1 must use sigma_1d, not sigma_5d."""
+        from types import SimpleNamespace
+        har = SimpleNamespace(sigma_1d=0.01, sigma_5d=0.012, sigma_22d=0.015)
+        # Replicate the mapping logic from backtest.py
+        def map_sigma(H, har_rv):
+            if H <= 1:
+                return har_rv.sigma_1d
+            elif H < 5:
+                w = (H - 1) / (5 - 1)
+                return (1 - w) * har_rv.sigma_1d + w * har_rv.sigma_5d
+            elif H < 22:
+                w = (H - 5) / (22 - 5)
+                return (1 - w) * har_rv.sigma_5d + w * har_rv.sigma_22d
+            else:
+                return har_rv.sigma_22d
+
+        assert map_sigma(1, har) == har.sigma_1d
+
+    def test_h5_uses_sigma_5d(self):
+        """H=5 must use sigma_5d exactly."""
+        from types import SimpleNamespace
+        har = SimpleNamespace(sigma_1d=0.01, sigma_5d=0.012, sigma_22d=0.015)
+        def map_sigma(H, har_rv):
+            if H <= 1:
+                return har_rv.sigma_1d
+            elif H < 5:
+                w = (H - 1) / (5 - 1)
+                return (1 - w) * har_rv.sigma_1d + w * har_rv.sigma_5d
+            elif H < 22:
+                w = (H - 5) / (22 - 5)
+                return (1 - w) * har_rv.sigma_5d + w * har_rv.sigma_22d
+            else:
+                return har_rv.sigma_22d
+
+        assert abs(map_sigma(5, har) - har.sigma_5d) < 1e-12
+
+    def test_h3_between_sigma_1d_and_5d(self):
+        """H=3 must interpolate between sigma_1d and sigma_5d."""
+        from types import SimpleNamespace
+        har = SimpleNamespace(sigma_1d=0.01, sigma_5d=0.012, sigma_22d=0.015)
+        def map_sigma(H, har_rv):
+            if H <= 1:
+                return har_rv.sigma_1d
+            elif H < 5:
+                w = (H - 1) / (5 - 1)
+                return (1 - w) * har_rv.sigma_1d + w * har_rv.sigma_5d
+            elif H < 22:
+                w = (H - 5) / (22 - 5)
+                return (1 - w) * har_rv.sigma_5d + w * har_rv.sigma_22d
+            else:
+                return har_rv.sigma_22d
+
+        val = map_sigma(3, har)
+        assert har.sigma_1d < val < har.sigma_5d, \
+            f"H=3 sigma={val} not between sigma_1d={har.sigma_1d} and sigma_5d={har.sigma_5d}"
+
+    def test_h22_uses_sigma_22d(self):
+        """H=22 must use sigma_22d."""
+        from types import SimpleNamespace
+        har = SimpleNamespace(sigma_1d=0.01, sigma_5d=0.012, sigma_22d=0.015)
+        def map_sigma(H, har_rv):
+            if H <= 1:
+                return har_rv.sigma_1d
+            elif H < 5:
+                w = (H - 1) / (5 - 1)
+                return (1 - w) * har_rv.sigma_1d + w * har_rv.sigma_5d
+            elif H < 22:
+                w = (H - 5) / (22 - 5)
+                return (1 - w) * har_rv.sigma_5d + w * har_rv.sigma_22d
+            else:
+                return har_rv.sigma_22d
+
+        assert abs(map_sigma(22, har) - har.sigma_22d) < 1e-12
+
+    def test_monotone_1_through_22(self):
+        """Sigma must be monotone non-decreasing from H=1 to H=22."""
+        from types import SimpleNamespace
+        har = SimpleNamespace(sigma_1d=0.01, sigma_5d=0.012, sigma_22d=0.015)
+        def map_sigma(H, har_rv):
+            if H <= 1:
+                return har_rv.sigma_1d
+            elif H < 5:
+                w = (H - 1) / (5 - 1)
+                return (1 - w) * har_rv.sigma_1d + w * har_rv.sigma_5d
+            elif H < 22:
+                w = (H - 5) / (22 - 5)
+                return (1 - w) * har_rv.sigma_5d + w * har_rv.sigma_22d
+            else:
+                return har_rv.sigma_22d
+
+        prev = 0.0
+        for H in range(1, 23):
+            val = map_sigma(H, har)
+            assert val >= prev, f"H={H}: {val} < H={H-1} value {prev}"
+            prev = val
+
+
+class TestStudyVersionImpliedVol:
+    """Regression tests for Optuna study versioning with implied-vol settings."""
+
+    def test_implied_vol_enabled_changes_version_key(self, tmp_path):
+        """Enabling implied_vol must change the study version key."""
+        import scripts.run_bayesian_opt as bo
+
+        # Create two configs: one with IV off, one with IV on
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20]},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        cfg_off = tmp_path / "off.yaml"
+        cfg_on = tmp_path / "on.yaml"
+        import yaml
+        with open(cfg_off, "w") as f:
+            yaml.dump(base, f)
+        base_on = {**base, "model": {**base["model"],
+                   "implied_vol_enabled": True,
+                   "implied_vol_csv_path": "data/vix.csv"}}
+        with open(cfg_on, "w") as f:
+            yaml.dump(base_on, f)
+
+        key_off = bo._study_version_key(cfg_off, lean=True)
+        key_on = bo._study_version_key(cfg_on, lean=True)
+        assert key_off != key_on, "Enabling implied_vol must change version key"
+
+    def test_implied_vol_blend_changes_version_key(self, tmp_path):
+        """Changing implied_vol_blend must change the study version key."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20],
+                      "implied_vol_enabled": True,
+                      "implied_vol_csv_path": "data/vix.csv",
+                      "implied_vol_blend": 0.3},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        cfg_a = tmp_path / "a.yaml"
+        with open(cfg_a, "w") as f:
+            yaml.dump(base, f)
+
+        base_b = {**base, "model": {**base["model"], "implied_vol_blend": 0.5}}
+        cfg_b = tmp_path / "b.yaml"
+        with open(cfg_b, "w") as f:
+            yaml.dump(base_b, f)
+
+        key_a = bo._study_version_key(cfg_a, lean=True)
+        key_b = bo._study_version_key(cfg_b, lean=True)
+        assert key_a != key_b, "Changing implied_vol_blend must change version key"
+
+    def test_implied_vol_csv_path_changes_version_key(self, tmp_path):
+        """Changing implied_vol_csv_path must change the study version key."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20],
+                      "implied_vol_enabled": True,
+                      "implied_vol_csv_path": "data/vix.csv"},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        cfg_a = tmp_path / "a.yaml"
+        with open(cfg_a, "w") as f:
+            yaml.dump(base, f)
+
+        base_b = {**base, "model": {**base["model"],
+                  "implied_vol_csv_path": "data/spy_iv.csv"}}
+        cfg_b = tmp_path / "b.yaml"
+        with open(cfg_b, "w") as f:
+            yaml.dump(base_b, f)
+
+        key_a = bo._study_version_key(cfg_a, lean=True)
+        key_b = bo._study_version_key(cfg_b, lean=True)
+        assert key_a != key_b, "Changing implied_vol_csv_path must change version key"
+
+    def test_implied_vol_csv_same_basename_different_dir(self, tmp_path):
+        """Same CSV filename in different directories must produce different keys."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20],
+                      "implied_vol_enabled": True,
+                      "implied_vol_csv_path": "vendor_a/vix.csv"},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        cfg_a = tmp_path / "a.yaml"
+        with open(cfg_a, "w") as f:
+            yaml.dump(base, f)
+
+        base_b = {**base, "model": {**base["model"],
+                  "implied_vol_csv_path": "vendor_b/vix.csv"}}
+        cfg_b = tmp_path / "b.yaml"
+        with open(cfg_b, "w") as f:
+            yaml.dump(base_b, f)
+
+        key_a = bo._study_version_key(cfg_a, lean=True)
+        key_b = bo._study_version_key(cfg_b, lean=True)
+        assert key_a != key_b, (
+            "Same CSV basename in different directories must produce different version keys"
+        )
+
+    def test_stale_study_not_reused_after_iv_change(self, tmp_path):
+        """_find_study_name must reject stale studies when IV settings change."""
+        import scripts.run_bayesian_opt as bo
+
+        # Two stale studies with different version keys — neither matches current
+        summaries = [
+            SimpleNamespace(study_name="ece_opt_spy_voldkey00", n_trials=20),
+            SimpleNamespace(study_name="ece_opt_spy_voldkey01", n_trials=10),
+        ]
+
+        with patch.object(bo, "_study_version_key", return_value="newkey11"), \
+                patch.object(bo.optuna.study, "get_all_study_summaries",
+                             return_value=summaries):
+            result = bo._find_study_name(
+                "spy",
+                Path("configs/exp_suite/exp_spy_regime_gated.yaml"),
+                Path("outputs/optuna_spy.db"),
+                lean=True,
+            )
+
+        assert result is None, "Stale studies must not be reused after IV settings change"
+
+
+# ============================================================
+# Test: Anti-Overfitting Methodology Improvements
+# ============================================================
+
+class TestNeffGateColumns:
+    """Tests for N_eff columns and ECE confidence in gate reports."""
+
+    def _make_oof(self, n=500, event_rate=0.10, seed=42):
+        rng = np.random.default_rng(seed)
+        y = (rng.random(n) < event_rate).astype(float)
+        p_cal = np.clip(y * 0.3 + (1 - y) * 0.05 + rng.normal(0, 0.02, n), 0.01, 0.99)
+        sigma = rng.uniform(0.01, 0.03, n)
+        return pd.DataFrame({
+            "config_name": "test",
+            "fold": np.repeat(range(5), n // 5),
+            "horizon": 5,
+            "p_cal": p_cal,
+            "y": y,
+            "sigma_1d": sigma,
+        })
+
+    def test_neff_columns_present(self):
+        """Gate report includes n_eff, neff_ratio, neff_warning columns."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        for col in ("n_eff", "neff_ratio", "neff_warning"):
+            assert col in report.columns, f"Missing column: {col}"
+
+    def test_neff_computed_correctly(self):
+        """N_eff = min(events, nonevents) * 2."""
+        oof = self._make_oof(n=500, event_rate=0.10)
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        pooled = report[report["regime"] == "pooled"]
+        for _, row in pooled.iterrows():
+            expected_neff = min(int(row["n_events"]), int(row["n_nonevents"])) * 2
+            assert row["n_eff"] == expected_neff
+
+    def test_neff_ratio_uses_n_bo_params(self):
+        """neff_ratio reflects the n_bo_params parameter."""
+        oof = self._make_oof(n=500, event_rate=0.10)
+        report_6 = apply_promotion_gates_oof(oof, pooled_gate=True, n_bo_params=6)
+        report_14 = apply_promotion_gates_oof(oof, pooled_gate=True, n_bo_params=14)
+        pooled_6 = report_6[(report_6["regime"] == "pooled") & (report_6["metric"] == "ece_cal")]
+        pooled_14 = report_14[(report_14["regime"] == "pooled") & (report_14["metric"] == "ece_cal")]
+        ratio_6 = pooled_6["neff_ratio"].iloc[0]
+        ratio_14 = pooled_14["neff_ratio"].iloc[0]
+        # Same N_eff, different denominators
+        assert ratio_6 > ratio_14
+
+    def test_neff_warning_red_for_low_ratio(self):
+        """Very few events → RED neff_warning."""
+        rng = np.random.default_rng(42)
+        n = 500
+        y = np.zeros(n)
+        y[:5] = 1.0  # only 5 events → n_eff = 10 → ratio ~1.7x
+        p_cal = np.clip(y * 0.2 + 0.02 + rng.normal(0, 0.01, n), 0.01, 0.99)
+        sigma = rng.uniform(0.01, 0.03, n)
+        oof = pd.DataFrame({
+            "config_name": "test", "fold": np.repeat(range(5), n // 5),
+            "horizon": 5, "p_cal": p_cal, "y": y, "sigma_1d": sigma,
+        })
+        report = apply_promotion_gates_oof(oof, pooled_gate=True, min_events=1)
+        pooled = report[(report["regime"] == "pooled") & (report["metric"] == "ece_cal")]
+        assert pooled["neff_warning"].iloc[0] == "RED"
+
+    def test_neff_warning_empty_for_high_ratio(self):
+        """Many events → empty neff_warning (GREEN)."""
+        oof = self._make_oof(n=2000, event_rate=0.20, seed=99)
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        pooled = report[(report["regime"] == "pooled") & (report["metric"] == "ece_cal")]
+        assert pooled["neff_warning"].iloc[0] == ""
+
+    def test_ece_gate_confidence_column_present(self):
+        """Gate report includes ece_gate_confidence column."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        assert "ece_gate_confidence" in report.columns
+
+    def test_ece_gate_confidence_non_ece_metrics_empty(self):
+        """Non-ECE metrics have empty ece_gate_confidence."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        non_ece = report[report["metric"] != "ece_cal"]
+        assert all(non_ece["ece_gate_confidence"] == "")
+
+    def test_ece_gate_confidence_values_valid(self):
+        """ECE confidence values are one of the expected strings."""
+        oof = self._make_oof()
+        report = apply_promotion_gates_oof(oof, pooled_gate=True)
+        ece_rows = report[(report["metric"] == "ece_cal") & (report["status"] != "insufficient_data")]
+        valid = {"solid_pass", "fragile_pass", "solid_fail", "fragile_fail"}
+        for _, row in ece_rows.iterrows():
+            assert row["ece_gate_confidence"] in valid, f"Unexpected: {row['ece_gate_confidence']}"
+
+    def test_insufficient_data_has_neff_columns(self):
+        """Even insufficient_data rows have n_eff columns."""
+        oof = self._make_oof(n=20, event_rate=0.10)
+        report = apply_promotion_gates_oof(oof, min_samples=30)
+        assert all(report["status"] == "insufficient_data")
+        for col in ("n_eff", "neff_ratio", "neff_warning"):
+            assert col in report.columns
+
+
+class TestOverfitSignFixes:
+    """Tests for gen gap sign bug fix and temporal stability direction fix."""
+
+    def test_gen_gap_negative_is_green(self):
+        """Negative gen gap (model improves) should be GREEN, not RED."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from run_overfit_check import _status
+        # Negative gap → max(negative, 0.0) = 0.0 → GREEN
+        assert _status(max(-0.50, 0.0), "gen_gap") == "GREEN"
+        # Positive gap > 0.50 → RED
+        assert _status(max(0.60, 0.0), "gen_gap") == "RED"
+
+    def test_temporal_late_better_is_green(self):
+        """Late folds better than early (negative raw_gap) should be GREEN."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from run_overfit_check import _status
+        # late < early → raw_gap negative → max(negative, 0.0) = 0.0 → GREEN
+        raw_gap = -0.40  # late is 40% better
+        gap = max(raw_gap, 0.0)
+        assert gap == 0.0
+        assert _status(gap, "temporal") == "GREEN"
+
+    def test_temporal_late_worse_flags_correctly(self):
+        """Late folds worse than early should flag based on magnitude."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from run_overfit_check import _status
+        raw_gap = 0.70  # late is 70% worse
+        gap = max(raw_gap, 0.0)
+        assert _status(gap, "temporal") == "RED"
 
 
 if __name__ == "__main__":
