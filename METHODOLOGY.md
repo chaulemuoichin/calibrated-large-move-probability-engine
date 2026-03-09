@@ -418,9 +418,9 @@ Updated via SGD with L2 regularization (prevents overfitting) and gradient clipp
 
 When `earnings_calendar: true`, an earnings proximity feature is added to the multi-feature calibrator **for short horizons only (H ≤ 5)**. Earnings announcements produce significantly larger moves than non-earnings days ([Dubinsky et al., 2019](https://doi.org/10.1093/rfs/hhy018) | [Savor & Wilson, 2016](https://doi.org/10.1111/jofi.12351)), making this a strong calibration signal at weekly timescales.
 
-$$\mathrm{earn}_{t} = \max\!\left(0,\, 1 - \frac{\left|\text{days\_to\_nearest\_earnings}\right|}{20}\right)$$
+$$\mathrm{earn}_{t} = \max\!\left(0,\, 1 - \frac{\left|d^{\mathrm{earn}}_{t}\right|}{20}\right)$$
 
-The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days away. At longer horizons (H=10, H=20), prediction windows almost always overlap with an earnings date, so the feature becomes uninformative noise. The horizon restriction is enforced automatically in the backtest engine.
+Here, $d^{\mathrm{earn}}_{t}$ is the number of calendar days to the nearest earnings date. The feature equals 1.0 on an earnings day and decays linearly to 0.0 at 20 calendar days away. At longer horizons (H=10, H=20), prediction windows almost always overlap with an earnings date, so the feature becomes uninformative noise. The horizon restriction is enforced automatically in the backtest engine.
 
 Walk-forward safe: earnings dates are publicly announced weeks in advance. Data sourced from yfinance with local CSV caching (30-day expiry).
 
