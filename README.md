@@ -3,7 +3,7 @@
 Estimates the probability of large stock price moves over 1-4 week horizons, with online self-correction as outcomes arrive.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-209%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-296%20passing-brightgreen)
 
 ## Why This Exists
 
@@ -24,10 +24,10 @@ If that number is trustworthy, you can size positions, hedge, or wait with confi
 
 Full methodology: [METHODOLOGY.md](METHODOLOGY.md)
 
-1. **Estimate current volatility.** Fit a GARCH/GJR model to recent returns to measure how jumpy the market is right now.
-2. **Simulate many futures.** Generate thousands of Monte Carlo price paths using current vol conditions.
+1. **Estimate current volatility.** Fit a GARCH/GJR or HAR-family model to recent returns, with optional OHLC range anchoring and implied-vol blending.
+2. **Simulate many futures.** Generate thousands of Monte Carlo price paths using current vol conditions, optional jumps, and scheduled-event variance.
 3. **Count large moves.** What fraction of simulated paths exceed the threshold? That's the raw probability.
-4. **Calibrate against history.** Compare past predictions to actual outcomes and adjust systematically.
+4. **Calibrate against history.** Compare past predictions to actual outcomes and adjust systematically, either online or with train-fold-only offline pooled calibration.
 5. **Output a calibrated probability.** The final number reflects both current conditions and the model's track record.
 
 ## Quick Start
@@ -55,6 +55,8 @@ Output goes to `outputs/<run_id>/`: results CSV, summary JSON, and charts.
 | `results.csv` | Daily predictions: raw/calibrated probabilities, realized labels, volatility |
 | `summary.json` | Evaluation metrics (Brier, AUC, ECE) |
 | `reliability.csv` | Calibration curve data |
+| `artifact_manifest.json` | Dataset hash, config fingerprint, and artifact lineage |
+| `data_snapshot.csv` | Persisted research snapshot when enabled |
 | `charts/` | Probability time series, reliability diagram, vol regime, rolling accuracy |
 
 ### Key Metrics
@@ -84,8 +86,11 @@ Settings live in YAML files under `configs/`.
 
 - Jump-diffusion (Merton) for crash-prone stocks
 - Multi-feature calibration (6 features + L2 regularization)
+- Offline pooled calibration on train folds (`offline_pooled_calibration`)
 - Student-t fat-tailed innovations with regime-conditional degrees of freedom
 - Earnings calendar proximity for single-stock short-horizon calibration
+- Scheduled event jump variance for earnings-driven horizons
+- OHLC-derived realized-state features and optional hybrid variance blending
 - Regime-gated threshold routing
 
 ### Preset Configs
@@ -122,7 +127,7 @@ scripts/               Operational runners
   run_overfit_check.py   Overfitting diagnostics
   run_full_institutional.py  Full validation battery
   run_stress_suite.py    Stress testing
-tests/                 209 unit tests
+tests/                 296 unit tests
 ```
 
 ## Running Tests
@@ -134,9 +139,12 @@ python -m pytest tests/ -v
 ## Validation & Optimization
 
 ```bash
-# Bayesian optimization (lean mode, 6 params)
+# Bayesian optimization (lean mode, thresholds locked by default)
 python scripts/run_bayesian_opt.py spy --n-trials 12
 python scripts/run_bayesian_opt.py spy --apply
+
+# Optional: also tune the threshold panel
+python scripts/run_bayesian_opt.py spy --n-trials 12 --tune-thresholds
 
 # 5-fold CV gate validation
 python -u scripts/run_gate_recheck.py spy
@@ -150,10 +158,11 @@ python -u scripts/run_full_institutional.py
 
 ## Known Limitations
 
-1. Close-to-close returns only (no intraday data).
-2. No transaction costs or market impact — this is a probability tool, not a trading system.
+1. Many bundled CSVs are still close-only. OHLC-derived features and hybrid variance only activate when `open/high/low` are present in the dataset.
+2. No transaction costs or market impact - this is a probability tool, not a trading system.
 3. Calibration requires ~100 resolved outcomes to activate. Early predictions are uncalibrated.
-4. Overlapping prediction windows create correlated samples. Always check effective sample size (N_eff), not raw count.
+4. Single-name implied vol is still only as good as the supplied free-data proxy. If no ticker-specific IV is available, the system falls back to historical-only behavior.
+5. Overlapping prediction windows create correlated samples. Always check effective sample size (N_eff), not raw count.
 
 ## Disclaimer
 

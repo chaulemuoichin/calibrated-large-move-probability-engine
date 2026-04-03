@@ -28,6 +28,7 @@ from em_sde.data_layer import load_data
 from em_sde.model_selection import (
     expanding_window_cv, compare_models,
     apply_promotion_gates, apply_promotion_gates_oof,
+    compute_benchmark_report, compute_conditional_gate_report_oof,
 )
 
 OUT_DIR = Path("outputs/diagnostics")
@@ -40,16 +41,28 @@ def run_single_config(name: str, config_path: str) -> None:
 
     cfg = load_config(config_path)
     cfg_name = Path(config_path).stem
+    cfg.model.store_quantiles = True
     df, _ = load_data(cfg)
+    overfit_path = OUT_DIR / f"overfit_report_{name}.csv"
+    density_gates = {"crps_skill": 0.0, "pit_ks": 0.12, "tail_cov_error": 0.05}
 
     cv_results, oof_df = expanding_window_cv(df, [cfg], [cfg_name], n_folds=5)
     summary = compare_models(cv_results)
+    benchmark_report = compute_benchmark_report(oof_df, n_boot=300)
+    conditional_report = compute_conditional_gate_report_oof(
+        oof_df,
+        gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+        density_gates=density_gates,
+    )
 
     # Primary: row-level OOF gates (statistically valid, pooled across regimes)
     gates_oof = apply_promotion_gates_oof(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+        density_gates=density_gates,
         pooled_gate=True,
+        overfit_report=str(overfit_path) if overfit_path.exists() else None,
+        require_overfit=cfg.calibration.promotion_require_overfit,
     )
     # Legacy: fold-level gates (for comparison)
     gates_legacy = apply_promotion_gates(
@@ -62,6 +75,8 @@ def run_single_config(name: str, config_path: str) -> None:
     summary.to_csv(OUT_DIR / f"cv_{name}_summary_recheck.csv", index=False)
     gates_oof.to_csv(OUT_DIR / f"cv_{name}_gates_recheck.csv", index=False)
     gates_legacy.to_csv(OUT_DIR / f"cv_{name}_gates_legacy.csv", index=False)
+    benchmark_report.to_csv(OUT_DIR / f"cv_{name}_benchmark_recheck.csv", index=False)
+    conditional_report.to_csv(OUT_DIR / f"cv_{name}_conditional_recheck.csv", index=False)
 
     elapsed = (time.perf_counter() - t0) / 60.0
 
@@ -111,7 +126,10 @@ def run_single_config(name: str, config_path: str) -> None:
     shadow_gates = apply_promotion_gates_oof(
         oof_df,
         gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.04},
+        density_gates=density_gates,
         pooled_gate=True,
+        overfit_report=str(overfit_path) if overfit_path.exists() else None,
+        require_overfit=cfg.calibration.promotion_require_overfit,
     )
     shadow_pass = shadow_gates.groupby(["config_name", "horizon"])["all_gates_passed"].all().sum()
     shadow_total = shadow_gates.groupby(["config_name", "horizon"]).ngroups

@@ -1,0 +1,15 @@
+{
+  "run_id": "smoke_run",
+  "ticker": "SPY",
+  "rows": 321,
+  "columns": [
+    "price",
+    "open",
+    "high",
+    "low"
+  ],
+  "dataset_hash": "bf44c3c58945534289a54fb992e165de1a29b58ea5922343e608ff0f9bd22e0e",
+  "source_requested": "csv",
+  "field_used": "Close",
+  "strict_validation": true
+}

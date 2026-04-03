@@ -13,6 +13,8 @@ Charts (matplotlib only, no seaborn):
 
 import json
 import logging
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -81,9 +83,32 @@ def write_outputs(
         json.dump(summary, f, indent=2, default=_json_serializer)
     logger.info("Wrote %s", summary_path)
 
+    if prices is not None and cfg.output.store_data_snapshot:
+        snapshot_path = out_dir / "data_snapshot.csv"
+        prices.to_csv(snapshot_path)
+        logger.info("Wrote %s (%d rows)", snapshot_path, len(prices))
+
+        manifest = {
+            "run_id": run_id,
+            "ticker": cfg.data.ticker,
+            "rows": len(prices),
+            "columns": list(prices.columns),
+            "dataset_hash": metadata.get("dataset_hash"),
+            "source_requested": metadata.get("source_requested"),
+            "field_used": metadata.get("field_used"),
+            "strict_validation": metadata.get("strict_validation"),
+        }
+        manifest_path = out_dir / "data_snapshot_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=_json_serializer)
+        logger.info("Wrote %s", manifest_path)
+
     # Charts
     if cfg.output.charts:
         _generate_charts(results, reliability, cfg.model.horizons, charts_dir, prices=prices)
+
+    artifact_manifest = _write_artifact_manifest(out_dir)
+    _append_run_registry(Path(cfg.output.base_dir), summary, metadata, artifact_manifest)
 
     return out_dir
 
@@ -116,7 +141,10 @@ def _build_summary(
             "jump_enabled": cfg.model.jump_enabled,
             "threshold_mode": cfg.model.threshold_mode,
             "fixed_threshold_pct": cfg.model.fixed_threshold_pct,
+            "lock_threshold_panel": cfg.model.lock_threshold_panel,
             "multi_feature": cfg.calibration.multi_feature,
+            "ohlc_features_enabled": cfg.model.ohlc_features_enabled,
+            "strict_validation": cfg.data.strict_validation,
         },
         "unit_convention": {
             "returns": "daily simple returns (decimal, e.g. 0.01 = 1%)",
@@ -143,6 +171,58 @@ def _json_serializer(obj):
     if isinstance(obj, pd.Timestamp):
         return str(obj)
     return str(obj)
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 for a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_artifact_manifest(out_dir: Path) -> dict:
+    """Write immutable artifact hashes for the run directory."""
+    files = []
+    for path in sorted(p for p in out_dir.rglob("*") if p.is_file()):
+        rel = path.relative_to(out_dir).as_posix()
+        files.append({
+            "path": rel,
+            "size_bytes": path.stat().st_size,
+            "sha256": _sha256_file(path),
+        })
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "root": out_dir.as_posix(),
+        "files": files,
+    }
+    manifest_path = out_dir / "artifact_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, default=_json_serializer)
+    logger.info("Wrote %s", manifest_path)
+    return manifest
+
+
+def _append_run_registry(base_dir: Path, summary: dict, metadata: dict, artifact_manifest: dict) -> None:
+    """Append a one-line immutable registry entry for this run."""
+    registry_path = base_dir / "run_registry.jsonl"
+    entry = {
+        "run_id": summary.get("run_id"),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ticker": summary.get("config", {}).get("ticker"),
+        "data_source": summary.get("config", {}).get("data_source"),
+        "dataset_hash": metadata.get("dataset_hash"),
+        "artifact_manifest_sha256": hashlib.sha256(
+            json.dumps(artifact_manifest, sort_keys=True, default=_json_serializer).encode("utf-8")
+        ).hexdigest(),
+        "prediction_rows": summary.get("prediction_rows"),
+        "horizons": summary.get("config", {}).get("horizons"),
+        "output_root": artifact_manifest.get("root"),
+    }
+    with open(registry_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=_json_serializer) + "\n")
+    logger.info("Appended %s", registry_path)
 
 
 def _generate_charts(

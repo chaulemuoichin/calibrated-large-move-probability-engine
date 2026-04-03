@@ -2,16 +2,24 @@
 
 ## Current Status
 
-| Ticker | Data | Rows | Gates Passed | Status |
-|--------|------|------|-------------|--------|
-| **SPY** | 2000-2025 | 6,538 | **2/3** | H=5, H=10 PASS. H=20 FAIL (ECE = 0.024) |
-| **GOOGL** | 2004-2025 | 5,376 | **3/3** | All horizons PASS. Implied vol (VIX proxy) enabled. |
-| **AMZN** | 1997-2025 | 7,202 | **3/3** | All horizons PASS. Implied vol + earnings enabled. |
-| **NVDA** | 1999-2025 | 6,777 | **1/3** | H=5 PASS. H=10, H=20 FAIL (BSS < 0). Needs more BO trials. |
+| Ticker | Data | Rows | Legacy Gates Passed | Status |
+|--------|------|------|---------------------|--------|
+| **SPY** | 2000-2025 | 6,538 | **2/3** | Legacy point-metric gates: H=5, H=10 PASS. Latest density-governed recheck: offline pooled calibration fixes H=20 ECE, but CRPS/PIT gates still fail. |
+| **GOOGL** | 2004-2025 | 5,376 | **3/3** | Legacy point-metric winner. Latest density-governed recheck on the current config: H=5 passes, H=10/H=20 fail CRPS skill. |
+| **AMZN** | 1997-2025 | 7,202 | **3/3** | Legacy point-metric result. Not yet rechecked under the stricter density-governed promotion stack. |
+| **NVDA** | 1999-2025 | 6,777 | **1/3** | H=5 point-metric PASS. Scheduled jump variance improves H=5/H=10 point metrics in research screens, but full density gates still fail. |
 
-**Promotion gates** (all must pass per horizon): ECE <= 0.02, BSS > 0, AUC > 0.55
+**Legacy point-metric gates** (used by the pass counts below): ECE <= 0.02, BSS > 0, AUC > 0.55
 
-All results from 5-fold expanding-window cross-validation with pooled out-of-fold evaluation. Lean BO mode (6 tuned parameters).
+**Current promotion stack is stricter.** The live research code now supports pooled row-level OOF governance with optional density gates (`CRPS skill >= 0`, `PIT KS <= 0.12`, `tail coverage error <= 0.05`) and optional overfit gating. Legacy pass counts therefore overstate current promotion readiness.
+
+All results from 5-fold expanding-window cross-validation with pooled out-of-fold evaluation. BO now locks the threshold panel by default; legacy results below were produced before that change unless noted otherwise.
+
+### 2026-03-09 Research Update
+
+- `SPY`: full 5-fold research rerun with `offline_pooled_calibration=true` improved pooled `H=20` ECE from `0.0248` to `0.0090`, but the config still failed density governance because CRPS skill stayed negative and PIT/tail checks still failed at longer horizons.
+- `GOOGL`: full 5-fold rerun confirmed the current config remains better than the offline-pooled variant. Offline calibration improved `H=5`, but degraded `H=10/H=20` BSS enough to make the config worse overall.
+- `NVDA`: after fixing an offline-calibrator NaN bug, a 3-fold research screen showed `scheduled_jump_variance=true` materially improved `H=5/H=10` point metrics, but not enough to pass the full density-governed gate set. `hybrid_variance` had no effect because the current NVDA CSV only contains `price`, not OHLC.
 
 ---
 
@@ -25,7 +33,7 @@ All results from 5-fold expanding-window cross-validation with pooled out-of-fol
 | H=10 | 5.54% | 0.0147 | +0.046 | 0.715 | **PASS** |
 | H=20 | 7.05% | 0.0240 | +0.058 | 0.738 | FAIL (ECE) |
 
-Strong BSS and AUC across all horizons. H=20 ECE exceeds the 0.02 gate by 0.004. BSS is positive everywhere, confirming real forecasting skill.
+Strong BSS and AUC across all horizons. H=20 ECE exceeds the 0.02 gate by 0.004. BSS is positive everywhere, confirming real forecasting skill. Under the stricter density-governed research stack, offline pooled calibration improved H=20 ECE materially, but longer-horizon CRPS/PIT checks still blocked promotion.
 
 ## AAPL (Apple Inc.)
 
@@ -49,7 +57,7 @@ H=5 passes all gates. H=10 and H=20 have good ECE and AUC but negative BSS — t
 | H=10 | 9.24% | 0.0114 | +0.018 | 0.650 | 5.9% | **PASS** |
 | H=20 | 12.65% | 0.0181 | +0.022 | 0.671 | 6.9% | **PASS** |
 
-All gates pass. Implied vol (VIX as market-wide proxy, 30% blend) was the key unlock for H=5 — ECE dropped from 0.022 to 0.0076. The implied_vol_ratio calibration feature gives the model information about market-priced fear/greed that GARCH realized vol alone cannot capture.
+All legacy point-metric gates pass. Implied vol (VIX as market-wide proxy, 30% blend) was the key unlock for H=5 - ECE dropped from 0.022 to 0.0076. The implied_vol_ratio calibration feature gives the model information about market-priced fear/greed that GARCH realized vol alone cannot capture. Under the stricter density-governed research stack, H=10 and H=20 still fail CRPS skill despite positive BSS/AUC/ECE.
 
 ## AMZN (Amazon.com Inc.)
 
@@ -73,7 +81,7 @@ All gates pass on first attempt. Exceptional calibration: H=10 ECE of 0.0029 is 
 | H=10 | 18.04% | 0.0127 | -0.010 | 0.588 | 4.4% | FAIL (BSS) |
 | H=20 | 23.68% | 0.0395 | -0.010 | 0.595 | 6.9% | FAIL (BSS+ECE) |
 
-H=5 passes all gates. H=10 and H=20 have negative BSS — the model underperforms the base-rate at longer horizons. BO thresholds are likely too aggressive (only 5 trials completed). More BO trials with lower thresholds should improve event rates and BSS.
+H=5 passes the legacy point-metric gates. H=10 and H=20 have negative BSS - the model underperforms the base-rate at longer horizons. A follow-up research screen found `scheduled_jump_variance=true` improves H=5/H=10 point metrics, but the ticker still fails the stricter density-governed gate set and the current bundled dataset does not expose OHLC columns, so the hybrid variance path cannot contribute yet.
 
 ---
 

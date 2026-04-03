@@ -26,7 +26,7 @@ model:
   garch_ensemble: false
   earnings_calendar: true
   garch_stationarity_constraint: true
-  garch_target_persistence: 0.9769
+  garch_target_persistence: 0.9737
   jump_enabled: true
   jump_intensity: 2.0
   jump_mean: -0.02
@@ -46,9 +46,9 @@ model:
   regime_gated_warmup: 252
   regime_gated_vol_window: 252
   regime_gated_fixed_pct_by_horizon:
-    5: 0.0984
-    10: 0.1804
-    20: 0.2368
+    5: 0.1218
+    10: 0.1822
+    20: 0.2566
   hmm_regime: false
   hmm_n_regimes: 2
   hmm_vol_blend: 0.0
@@ -67,6 +67,7 @@ model:
   mc_regime_t_df_mid: 5.0
   mc_regime_t_df_high: 4.0
   store_quantiles: true
+  har_rv_variant: rv
 calibration:
   lr: 0.05
   adaptive_lr: true
@@ -79,8 +80,8 @@ calibration:
   gate_discrimination_window: 200
   regime_conditional: false
   multi_feature: true
-  multi_feature_lr: 0.003305
-  multi_feature_l2: 2.9e-05
+  multi_feature_lr: 0.002191
+  multi_feature_l2: 0.000117
   multi_feature_min_updates: 63
   multi_feature_regime_conditional: true
   ensemble_enabled: true

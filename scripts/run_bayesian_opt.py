@@ -80,13 +80,16 @@ def _compute_threshold_ranges(base_config_path: str):
 
 
 def build_trial_config(trial: optuna.Trial, base_config_path: str,
-                       threshold_ranges: dict = None, lean: bool = True):
+                       threshold_ranges: dict = None, lean: bool = True,
+                       tune_thresholds: bool = False):
     """Build a config with Optuna-suggested hyperparameters.
 
     Args:
         lean: If True (default), only tune 6 high-impact parameters and fix
               the rest at sensible defaults.  This improves N_eff/N_params
               ratio by ~2.3x, reducing overfitting risk.
+        tune_thresholds: If False (default), preserve the configured threshold
+              panel and treat thresholds as a fixed product design choice.
     """
     cfg = load_config(base_config_path)
 
@@ -102,15 +105,17 @@ def build_trial_config(trial: optuna.Trial, base_config_path: str,
         cfg.model.har_rv = False
         cfg.model.har_rv_ridge_alpha = 0.01
         cfg.model.har_rv_refit_interval = 21
+        cfg.model.har_rv_variant = "rv"
         cfg.calibration.multi_feature_min_updates = 63
 
-        # Tune only 6 params: 3 thresholds + garch_persistence + mf_lr + mf_l2
-        if threshold_ranges is None:
-            threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
-        cfg.model.regime_gated_fixed_pct_by_horizon = {
-            h: trial.suggest_float(f"thr_{h}", lo, hi)
-            for h, (lo, hi) in threshold_ranges.items()
-        }
+        # Research-default: thresholds stay frozen unless explicitly unlocked.
+        if tune_thresholds:
+            if threshold_ranges is None:
+                threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
+            cfg.model.regime_gated_fixed_pct_by_horizon = {
+                h: trial.suggest_float(f"thr_{h}", lo, hi)
+                for h, (lo, hi) in threshold_ranges.items()
+            }
         cfg.model.garch_target_persistence = trial.suggest_float("garch_persistence", 0.95, 0.995)
         cfg.calibration.multi_feature_lr = trial.suggest_float("mf_lr", 0.002, 0.05, log=True)
         cfg.calibration.multi_feature_l2 = trial.suggest_float("mf_l2", 1e-5, 1e-2, log=True)
@@ -130,13 +135,14 @@ def build_trial_config(trial: optuna.Trial, base_config_path: str,
         cfg.model.mc_regime_t_df_mid = trial.suggest_float("t_df_mid", 3.0, 8.0)
         cfg.model.mc_regime_t_df_high = trial.suggest_float("t_df_high", 2.5, 6.0)
 
-        # --- Per-horizon threshold percentages (data-adaptive ranges) ---
-        if threshold_ranges is None:
-            threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
-        cfg.model.regime_gated_fixed_pct_by_horizon = {
-            h: trial.suggest_float(f"thr_{h}", lo, hi)
-            for h, (lo, hi) in threshold_ranges.items()
-        }
+        # --- Per-horizon threshold percentages (explicit opt-in only) ---
+        if tune_thresholds:
+            if threshold_ranges is None:
+                threshold_ranges = {5: (0.015, 0.04), 10: (0.025, 0.055), 20: (0.03, 0.06)}
+            cfg.model.regime_gated_fixed_pct_by_horizon = {
+                h: trial.suggest_float(f"thr_{h}", lo, hi)
+                for h, (lo, hi) in threshold_ranges.items()
+            }
 
         # --- Multi-feature calibration ---
         cfg.calibration.multi_feature_lr = trial.suggest_float("mf_lr", 0.002, 0.05, log=True)
@@ -151,19 +157,25 @@ def build_trial_config(trial: optuna.Trial, base_config_path: str,
         if cfg.model.har_rv:
             cfg.model.har_rv_ridge_alpha = trial.suggest_float("har_rv_ridge", 0.001, 0.1, log=True)
             cfg.model.har_rv_refit_interval = trial.suggest_int("har_rv_refit", 5, 63)
+            cfg.model.har_rv_variant = trial.suggest_categorical("har_rv_variant", ["rv", "range", "rvx"])
         else:
             cfg.model.har_rv_ridge_alpha = 0.01
             cfg.model.har_rv_refit_interval = 21
+            cfg.model.har_rv_variant = "rv"
 
     return cfg
 
 
 def objective(trial: optuna.Trial, df, base_config_path: str,
-              threshold_ranges: dict = None, lean: bool = True) -> float:
+              threshold_ranges: dict = None, lean: bool = True,
+              tune_thresholds: bool = False) -> float:
     """Objective function: minimize mean pooled ECE across horizons."""
     t0 = time.perf_counter()
 
-    cfg = build_trial_config(trial, base_config_path, threshold_ranges, lean=lean)
+    cfg = build_trial_config(
+        trial, base_config_path, threshold_ranges, lean=lean,
+        tune_thresholds=tune_thresholds,
+    )
     cfg_name = f"trial_{trial.number}"
 
     try:
@@ -179,7 +191,7 @@ def objective(trial: optuna.Trial, df, base_config_path: str,
     #   min_rate = (target_ratio × n_params) / (2 × n_samples)
     # Floor at 3% absolute minimum (below this, calibration is meaningless).
     # Based on Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
-    n_params = 6 if lean else 14
+    n_params = max(len(trial.params), 1)
     n_oof = len(oof_df)
     min_er_target = max((100 * n_params) / (2 * n_oof), 0.03)
 
@@ -277,6 +289,7 @@ def holdout_evaluate(
         cfg.model.har_rv = False
         cfg.model.har_rv_ridge_alpha = 0.01
         cfg.model.har_rv_refit_interval = 21
+        cfg.model.har_rv_variant = "rv"
         cfg.calibration.multi_feature_min_updates = 63
     else:
         # Full mode: apply all params
@@ -297,17 +310,20 @@ def holdout_evaluate(
         if cfg.model.har_rv:
             cfg.model.har_rv_ridge_alpha = best_params.get("har_rv_ridge", 0.01)
             cfg.model.har_rv_refit_interval = best_params.get("har_rv_refit", 21)
+            cfg.model.har_rv_variant = best_params.get("har_rv_variant", "rv")
         else:
             cfg.model.har_rv_ridge_alpha = 0.01
             cfg.model.har_rv_refit_interval = 21
+            cfg.model.har_rv_variant = "rv"
 
     # Common params (both lean and full)
     cfg.model.garch_target_persistence = best_params["garch_persistence"]
-    cfg.model.regime_gated_fixed_pct_by_horizon = {
-        5: best_params["thr_5"],
-        10: best_params["thr_10"],
-        20: best_params["thr_20"],
-    }
+    if {"thr_5", "thr_10", "thr_20"}.issubset(best_params):
+        cfg.model.regime_gated_fixed_pct_by_horizon = {
+            5: best_params["thr_5"],
+            10: best_params["thr_10"],
+            20: best_params["thr_20"],
+        }
     cfg.calibration.multi_feature_lr = best_params["mf_lr"]
     cfg.calibration.multi_feature_l2 = best_params["mf_l2"]
 
@@ -339,7 +355,7 @@ def holdout_evaluate(
     return {"holdout_ece": holdout_ece, "holdout_mean_ece": mean_ece}
 
 
-def _study_version_key(config_path: Path, lean: bool) -> str:
+def _study_version_key(config_path: Path, lean: bool, tune_thresholds: bool = False) -> str:
     """Compute a short hash of feature flags + search mode to version BO studies.
 
     Changing feature flags (fhs, ensemble, earnings, implied vol) or
@@ -355,32 +371,48 @@ def _study_version_key(config_path: Path, lean: bool) -> str:
         f"earn={cfg.model.earnings_calendar},"
         f"garch_type={cfg.model.garch_model_type},"
         f"regime_tdf={cfg.model.mc_regime_t_df},"
+        f"offline_cal={cfg.calibration.offline_pooled_calibration},"
         f"iv={cfg.model.implied_vol_enabled},"
         f"iv_blend={cfg.model.implied_vol_blend},"
         f"iv_feat={cfg.model.implied_vol_as_feature},"
-        f"iv_src={iv_src}"
+        f"iv_src={iv_src},"
+        f"hybrid_var={cfg.model.hybrid_variance_enabled},"
+        f"hybrid_range_blend={cfg.model.hybrid_range_blend},"
+        f"har_variant={cfg.model.har_rv_variant},"
+        f"scheduled_jump={cfg.model.scheduled_jump_variance},"
+        f"scheduled_jump_lookback={cfg.model.scheduled_jump_lookback_events},"
+        f"scheduled_jump_min={cfg.model.scheduled_jump_min_events},"
+        f"scheduled_jump_scale={cfg.model.scheduled_jump_scale},"
+        f"ohlc_feat={cfg.model.ohlc_features_enabled},"
+        f"strict_data={cfg.data.strict_validation},"
+        f"lock_thr={cfg.model.lock_threshold_panel},"
+        f"tune_thr={tune_thresholds},"
+        f"thr_panel={cfg.model.regime_gated_fixed_pct_by_horizon or {}},"
+        f"fixed_thr={cfg.model.fixed_threshold_pct}"
     )
     return hashlib.md5(flags.encode()).hexdigest()[:8]
 
 
-def _versioned_study_name(config_name: str, config_path: str | Path, lean: bool) -> str:
+def _versioned_study_name(config_name: str, config_path: str | Path,
+                          lean: bool, tune_thresholds: bool = False) -> str:
     """Return the exact study name for the current config version."""
-    ver = _study_version_key(Path(config_path), lean)
+    ver = _study_version_key(Path(config_path), lean, tune_thresholds=tune_thresholds)
     return f"ece_opt_{config_name}_v{ver}"
 
 
 def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
-                     lean: bool = True) -> optuna.Study:
+                     lean: bool = True, tune_thresholds: bool = False) -> optuna.Study:
     """Run Bayesian optimization for a single config with holdout validation."""
     config_path = CONFIGS[config_name]
-    mode = "lean (6 params)" if lean else "full (14 params)"
+    mode = "lean" if lean else "full"
+    threshold_mode = "thresholds tuned" if tune_thresholds else "thresholds locked"
 
     # Version key ensures feature flag changes start a fresh study
     db_path = OUT_DIR / f"optuna_{config_name}.db"
-    study_name = _versioned_study_name(config_name, config_path, lean)
+    study_name = _versioned_study_name(config_name, config_path, lean, tune_thresholds=tune_thresholds)
 
     print(f"\n{'='*60}")
-    print(f"Bayesian Optimization: {config_name} [{mode}]")
+    print(f"Bayesian Optimization: {config_name} [{mode}, {threshold_mode}]")
     print(f"Config: {config_path}")
     print(f"Study: {study_name}")
     print(f"Trials: {n_trials}")
@@ -410,16 +442,27 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
         load_if_exists=True,
     )
 
-    # Compute data-adaptive threshold ranges
-    threshold_ranges = _compute_threshold_ranges(config_path)
-    print(f"Threshold search ranges (data-adaptive):")
-    for h, (lo, hi) in sorted(threshold_ranges.items()):
-        print(f"  H={h}: [{lo:.4f}, {hi:.4f}]")
-    print()
+    threshold_ranges = None
+    if tune_thresholds:
+        threshold_ranges = _compute_threshold_ranges(config_path)
+        print("Threshold search ranges (data-adaptive):")
+        for h, (lo, hi) in sorted(threshold_ranges.items()):
+            print(f"  H={h}: [{lo:.4f}, {hi:.4f}]")
+        print()
+    else:
+        panel = cfg.model.regime_gated_fixed_pct_by_horizon or {}
+        if panel:
+            print("Frozen threshold panel:")
+            for h, thr in sorted(panel.items()):
+                print(f"  H={h}: {thr:.4f}")
+            print()
 
     # Wrap objective with train data only
     def obj_fn(trial):
-        return objective(trial, df_train, config_path, threshold_ranges, lean=lean)
+        return objective(
+            trial, df_train, config_path, threshold_ranges, lean=lean,
+            tune_thresholds=tune_thresholds,
+        )
 
     t0 = time.perf_counter()
     study.optimize(obj_fn, n_trials=n_trials)
@@ -503,7 +546,8 @@ def run_optimization(config_name: str, n_trials: int, holdout_pct: float = 0.2,
 
 
 def _find_study_name(config_name: str, config_path: str | Path,
-                     db_path: Path, lean: bool) -> Optional[str]:
+                     db_path: Path, lean: bool,
+                     tune_thresholds: bool = False) -> Optional[str]:
     """Find the study matching the current config version and search mode."""
     storage_url = f"sqlite:///{db_path}"
     try:
@@ -511,7 +555,7 @@ def _find_study_name(config_name: str, config_path: str | Path,
     except Exception:
         return None
     study_names = {s.study_name for s in summaries}
-    expected = _versioned_study_name(config_name, config_path, lean)
+    expected = _versioned_study_name(config_name, config_path, lean, tune_thresholds=tune_thresholds)
     if expected in study_names:
         return expected
 
@@ -528,7 +572,7 @@ def _find_study_name(config_name: str, config_path: str | Path,
     return None
 
 
-def show_best(config_name: str, lean: bool = True) -> None:
+def show_best(config_name: str, lean: bool = True, tune_thresholds: bool = False) -> None:
     """Show best results from a previous optimization run."""
     db_path = OUT_DIR / f"optuna_{config_name}.db"
     if not db_path.exists():
@@ -537,7 +581,7 @@ def show_best(config_name: str, lean: bool = True) -> None:
 
     config_path = CONFIGS[config_name]
     mode = "lean" if lean else "full"
-    study_name = _find_study_name(config_name, config_path, db_path, lean)
+    study_name = _find_study_name(config_name, config_path, db_path, lean, tune_thresholds=tune_thresholds)
     if study_name is None:
         print(f"No matching {mode} study found in {db_path} for the current config version.")
         return
@@ -576,7 +620,7 @@ def show_best(config_name: str, lean: bool = True) -> None:
         print(f"  #{t.number}: ECE={val}, pass={n_pass}/3, {elapsed} min")
 
 
-def apply_best(config_name: str, lean: bool = True) -> None:
+def apply_best(config_name: str, lean: bool = True, tune_thresholds: bool = False) -> None:
     """Apply best params to the YAML config file."""
     db_path = OUT_DIR / f"optuna_{config_name}.db"
     if not db_path.exists():
@@ -585,7 +629,7 @@ def apply_best(config_name: str, lean: bool = True) -> None:
 
     config_path = CONFIGS[config_name]
     mode = "lean" if lean else "full"
-    study_name = _find_study_name(config_name, config_path, db_path, lean)
+    study_name = _find_study_name(config_name, config_path, db_path, lean, tune_thresholds=tune_thresholds)
     if study_name is None:
         print(f"No matching {mode} study found in {db_path} for the current config version.")
         return
@@ -620,6 +664,7 @@ def apply_best(config_name: str, lean: bool = True) -> None:
         raw["model"]["har_rv"] = False
         raw["model"]["har_rv_ridge_alpha"] = 0.01
         raw["model"]["har_rv_refit_interval"] = 21
+        raw["model"]["har_rv_variant"] = "rv"
         raw["calibration"]["multi_feature_min_updates"] = 63
     else:
         # Full mode: apply all params
@@ -639,23 +684,26 @@ def apply_best(config_name: str, lean: bool = True) -> None:
         if best.get("har_rv", False):
             raw["model"]["har_rv_ridge_alpha"] = round(best.get("har_rv_ridge", 0.01), 4)
             raw["model"]["har_rv_refit_interval"] = best.get("har_rv_refit", 21)
+            raw["model"]["har_rv_variant"] = best.get("har_rv_variant", "rv")
         else:
             raw["model"]["har_rv"] = False
+            raw["model"]["har_rv_variant"] = "rv"
 
     # Common params (both lean and full)
     raw["model"]["garch_target_persistence"] = round(best["garch_persistence"], 4)
-    raw["model"]["regime_gated_fixed_pct_by_horizon"] = {
-        5: round(best["thr_5"], 4),
-        10: round(best["thr_10"], 4),
-        20: round(best["thr_20"], 4),
-    }
+    if {"thr_5", "thr_10", "thr_20"}.issubset(best):
+        raw["model"]["regime_gated_fixed_pct_by_horizon"] = {
+            5: round(best["thr_5"], 4),
+            10: round(best["thr_10"], 4),
+            20: round(best["thr_20"], 4),
+        }
     raw["calibration"]["multi_feature_lr"] = round(best["mf_lr"], 6)
     raw["calibration"]["multi_feature_l2"] = round(best["mf_l2"], 6)
 
     with open(config_path, "w") as f:
         yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
 
-    mode = "lean (6 params)" if is_lean else "full (14 params)"
+    mode = "lean" if is_lean else "full"
     print(f"Applied best params ({mode}) to {config_path}")
     print(f"Best mean ECE: {study.best_value:.4f}")
     print("Run gate recheck to confirm:")
@@ -670,19 +718,24 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Apply best params to config")
     parser.add_argument("--full", action="store_true",
                         help="Use full 14-param search (default: lean 6-param)")
+    parser.add_argument("--tune-thresholds", action="store_true",
+                        help="Opt back into threshold tuning; default keeps the configured threshold panel fixed")
     args = parser.parse_args()
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     if args.show_best:
-        show_best(args.config, lean=not args.full)
+        show_best(args.config, lean=not args.full, tune_thresholds=args.tune_thresholds)
         return 0
 
     if args.apply:
-        apply_best(args.config, lean=not args.full)
+        apply_best(args.config, lean=not args.full, tune_thresholds=args.tune_thresholds)
         return 0
 
-    run_optimization(args.config, args.n_trials, lean=not args.full)
+    run_optimization(
+        args.config, args.n_trials, lean=not args.full,
+        tune_thresholds=args.tune_thresholds,
+    )
     return 0
 
 

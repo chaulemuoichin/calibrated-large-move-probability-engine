@@ -22,6 +22,9 @@ from .model_selection import (
     expanding_window_cv,
     compare_models,
     apply_promotion_gates_oof,
+    compute_benchmark_report,
+    compute_pairwise_significance_report,
+    compute_conditional_gate_report_oof,
 )
 
 
@@ -284,6 +287,10 @@ def _run_compare(args):
     print(f"  data:    {len(df)} rows [{start_date} .. {end_date}]")
     print()
 
+    if configs[0].calibration.promotion_gates_enabled:
+        for cfg in configs:
+            cfg.model.store_quantiles = True
+
     # Run CV
     cv_results, oof_df = expanding_window_cv(df, configs, names, n_folds=args.cv_folds)
 
@@ -309,12 +316,28 @@ def _run_compare(args):
             "auc_cal": configs[0].calibration.promotion_auc_min,
             "ece_cal": configs[0].calibration.promotion_ece_max,
         }
+        density_gates = {}
+        if configs[0].calibration.promotion_crps_min is not None:
+            density_gates["crps_skill"] = configs[0].calibration.promotion_crps_min
+        if configs[0].calibration.promotion_pit_ks_max is not None:
+            density_gates["pit_ks"] = configs[0].calibration.promotion_pit_ks_max
+        if configs[0].calibration.promotion_tail_cov_error_max is not None:
+            density_gates["tail_cov_error"] = configs[0].calibration.promotion_tail_cov_error_max
         use_pooled_gate = configs[0].calibration.promotion_pooled_gate
         gate_report = apply_promotion_gates_oof(
             oof_df,
             gates=gates,
+            density_gates=density_gates,
             pooled_gate=use_pooled_gate,
+            require_overfit=configs[0].calibration.promotion_require_overfit,
         )
+        conditional_report = compute_conditional_gate_report_oof(
+            oof_df,
+            gates=gates,
+            density_gates=density_gates,
+        )
+        benchmark_report = compute_benchmark_report(oof_df, n_boot=300)
+        pairwise_report = compute_pairwise_significance_report(oof_df, n_boot=300)
 
         print()
         print("-" * 60)
@@ -350,6 +373,39 @@ def _run_compare(args):
                 all_pass = grp["all_gates_passed"].iloc[0]
                 verdict = "PROMOTED" if all_pass else "BLOCKED"
                 print(f"  {name:20s} H={int(h):2d}: {verdict}")
+
+        if len(benchmark_report) > 0:
+            print()
+            print("-" * 60)
+            print("BENCHMARKS VS CLIMATOLOGY")
+            print("-" * 60)
+            for row in benchmark_report.to_dict(orient="records"):
+                print(
+                    f"  {row['config_name']:20s} H={int(row['horizon']):2d} "
+                    f"BrierSkill={row.get('brier_skill', float('nan')):+.4f} "
+                    f"p={row.get('brier_pvalue', float('nan')):.3f}"
+                )
+
+        if len(pairwise_report) > 0:
+            print()
+            print("-" * 60)
+            print("PAIRWISE SIGNIFICANCE")
+            print("-" * 60)
+            for row in pairwise_report.to_dict(orient="records"):
+                print(
+                    f"  H={int(row['horizon']):2d} {row['config_left']} vs {row['config_right']}: "
+                    f"better={row['better_config']} p={row['pvalue_left_beats_right']:.3f}"
+                )
+
+        if len(conditional_report) > 0:
+            print()
+            print("-" * 60)
+            print("CONDITIONAL GOVERNANCE")
+            print("-" * 60)
+            for (name, h, slice_type, slice_value), grp in conditional_report.groupby(
+                ["config_name", "horizon", "slice_type", "slice_value"]
+            ):
+                print(f"  {name:20s} H={int(h):2d} {slice_type}={slice_value}: {grp['promotion_status'].iloc[0]}")
 
     print()
     print("=" * 60)

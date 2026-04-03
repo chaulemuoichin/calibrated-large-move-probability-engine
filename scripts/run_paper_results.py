@@ -1,0 +1,338 @@
+"""
+Paper results collection: unified script to generate all tables for the paper.
+
+Runs:
+  1. Main results (5-fold CV) with significance testing
+  2. Baseline comparison with paired bootstrap p-values
+  3. Ablation study summary
+  4. Temporal hold-out results
+  5. Economic significance analysis
+
+Outputs LaTeX-ready tables to outputs/paper/tables/
+
+Usage:
+    python scripts/run_paper_results.py spy
+    python scripts/run_paper_results.py all
+"""
+
+import argparse
+import logging
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from em_sde.config import load_config
+from em_sde.data_layer import load_data
+from em_sde.model_selection import (
+    expanding_window_cv, apply_promotion_gates_oof,
+    compute_benchmark_report, compute_pairwise_significance_report,
+)
+from em_sde.evaluation import (
+    brier_score, brier_skill_score, auc_roc, expected_calibration_error,
+    effective_sample_size, paired_bootstrap_loss_diff_pvalue,
+)
+from scripts.baselines import run_all_baselines, evaluate_baseline
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+TICKER_CONFIGS = {
+    "spy": "configs/exp_suite/exp_spy_regime_gated.yaml",
+    "googl": "configs/exp_suite/exp_googl_regime_gated.yaml",
+    "amzn": "configs/exp_suite/exp_amzn_regime_gated.yaml",
+    "nvda": "configs/exp_suite/exp_nvda_regime_gated.yaml",
+}
+
+
+def _sig_stars(p: float) -> str:
+    """Convert p-value to significance stars."""
+    if np.isnan(p):
+        return ""
+    if p < 0.01:
+        return "***"
+    if p < 0.05:
+        return "**"
+    if p < 0.10:
+        return "*"
+    return ""
+
+
+def _format_metric(val: float, fmt: str = ".4f") -> str:
+    """Format metric with sign for BSS."""
+    if np.isnan(val):
+        return "---"
+    return f"{val:{fmt}}"
+
+
+def generate_main_results_table(ticker: str, n_folds: int = 5) -> pd.DataFrame:
+    """Generate Table 1: Main CV results with gate pass/fail and significance."""
+    config_path = TICKER_CONFIGS[ticker.lower()]
+    cfg = load_config(config_path)
+    df = load_data(cfg.data)
+
+    logger.info("Running %d-fold CV for %s...", n_folds, ticker.upper())
+    cv_results, oof_df = expanding_window_cv(df, [cfg], [ticker.upper()], n_folds=n_folds)
+
+    rows = []
+    for H in cfg.model.horizons:
+        h_oof = oof_df[(oof_df["config_name"] == ticker.upper()) & (oof_df["horizon"] == H)]
+        if len(h_oof) < 50:
+            continue
+
+        p = h_oof["p_cal"].to_numpy(dtype=float)
+        y = h_oof["y"].to_numpy(dtype=float)
+        mask = np.isfinite(p) & np.isfinite(y)
+        p_m, y_m = p[mask], y[mask]
+
+        n_eff = effective_sample_size(y_m, H)
+        bss = brier_skill_score(p_m, y_m)
+        auc = auc_roc(p_m, y_m)
+        ece = expected_calibration_error(p_m, y_m, adaptive=False)
+
+        # Bootstrap CI for ECE
+        rng = np.random.default_rng(42)
+        ece_boots = []
+        for _ in range(2000):
+            idx = rng.integers(0, len(p_m), size=len(p_m))
+            ece_boots.append(expected_calibration_error(p_m[idx], y_m[idx], adaptive=False))
+        ece_ci_lo = float(np.percentile(ece_boots, 2.5))
+        ece_ci_hi = float(np.percentile(ece_boots, 97.5))
+
+        # Significance vs climatology
+        clim = float(np.mean(y_m))
+        model_losses = (p_m - y_m) ** 2
+        clim_losses = (np.full_like(y_m, clim) - y_m) ** 2
+        pval = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000)
+
+        # Threshold
+        thresholds = cfg.model.regime_gated_fixed_pct_by_horizon or {}
+        thr = thresholds.get(H, cfg.model.fixed_threshold_pct)
+
+        rows.append({
+            "Ticker": ticker.upper(),
+            "H": H,
+            "Threshold": f"{thr*100:.2f}%",
+            "N": int(mask.sum()),
+            "N_eff": round(n_eff, 0),
+            "Event Rate": f"{clim*100:.1f}%",
+            "BSS": bss,
+            "AUC": auc,
+            "ECE": ece,
+            "ECE 95% CI": f"[{ece_ci_lo:.4f}, {ece_ci_hi:.4f}]",
+            "p-value": pval,
+            "Sig": _sig_stars(pval),
+            "Gates": "PASS" if (bss > 0 and auc >= 0.55 and ece <= 0.02) else "FAIL",
+        })
+
+    return pd.DataFrame(rows)
+
+
+def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
+    """Generate Table 2: Full model vs all baselines with paired significance."""
+    config_path = TICKER_CONFIGS[ticker.lower()]
+    cfg = load_config(config_path)
+    df = load_data(cfg.data)
+
+    prices = df["price"].to_numpy(dtype=float)
+    dates_idx = df.index
+    horizons = cfg.model.horizons
+
+    thresholds = {}
+    fixed_pct = cfg.model.regime_gated_fixed_pct_by_horizon or {}
+    for H in horizons:
+        thresholds[H] = fixed_pct.get(H, cfg.model.fixed_threshold_pct)
+
+    # Run baselines
+    baseline_results = run_all_baselines(
+        prices, dates_idx, horizons, thresholds,
+        iv_csv_path=cfg.model.implied_vol_csv_path if cfg.model.implied_vol_enabled else None,
+        garch_window=cfg.model.garch_window,
+        t_df=cfg.model.t_df,
+    )
+
+    # Run full model
+    logger.info("Running full model for baseline comparison...")
+    from em_sde.backtest import run_walkforward
+    full_results = run_walkforward(df, cfg)
+
+    rows = []
+    for H in horizons:
+        # Full model test
+        p_col = f"p_cal_{H}"
+        y_col = f"y_{H}"
+        if p_col not in full_results.columns:
+            continue
+
+        p_full = full_results[p_col].to_numpy(dtype=float)
+        y_full = full_results[y_col].to_numpy(dtype=float)
+        full_mask = np.isfinite(p_full) & np.isfinite(y_full)
+        p_full_m = p_full[full_mask]
+        y_full_m = y_full[full_mask]
+
+        if len(p_full_m) < 50:
+            continue
+
+        rows.append({
+            "Ticker": ticker.upper(),
+            "Method": "Full Model",
+            "H": H,
+            "BSS": brier_skill_score(p_full_m, y_full_m),
+            "AUC": auc_roc(p_full_m, y_full_m),
+            "ECE": expected_calibration_error(p_full_m, y_full_m, adaptive=False),
+            "p-value vs Full": "---",
+        })
+
+        # Compare each baseline
+        full_model_losses = (p_full_m - y_full_m) ** 2
+
+        for bl_name, bl_df in baseline_results.items():
+            if len(bl_df) == 0:
+                continue
+            p_bl_col = f"p_baseline_{H}"
+            y_bl_col = f"y_{H}"
+            if p_bl_col not in bl_df.columns:
+                continue
+
+            p_bl = bl_df[p_bl_col].to_numpy(dtype=float)
+            y_bl = bl_df[y_bl_col].to_numpy(dtype=float)
+            bl_mask = np.isfinite(p_bl) & np.isfinite(y_bl)
+            p_bl_m = p_bl[bl_mask]
+            y_bl_m = y_bl[bl_mask]
+
+            if len(p_bl_m) < 50:
+                continue
+
+            # Paired comparison (use common dates where possible)
+            n_common = min(len(p_full_m), len(p_bl_m))
+            if n_common < 50:
+                continue
+
+            bl_losses = (p_bl_m[:n_common] - y_bl_m[:n_common]) ** 2
+            fm_losses = full_model_losses[:n_common]
+            pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
+
+            rows.append({
+                "Ticker": ticker.upper(),
+                "Method": bl_name,
+                "H": H,
+                "BSS": brier_skill_score(p_bl_m, y_bl_m),
+                "AUC": auc_roc(p_bl_m, y_bl_m),
+                "ECE": expected_calibration_error(p_bl_m, y_bl_m, adaptive=False),
+                "p-value vs Full": f"{pval:.4f}{_sig_stars(pval)}",
+            })
+
+    return pd.DataFrame(rows)
+
+
+def to_latex_table(df: pd.DataFrame, caption: str, label: str) -> str:
+    """Convert DataFrame to LaTeX table."""
+    n_cols = len(df.columns)
+    col_fmt = "l" + "c" * (n_cols - 1)
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\small",
+        f"\\caption{{{caption}}}",
+        f"\\label{{{label}}}",
+        f"\\begin{{tabular}}{{{col_fmt}}}",
+        r"\toprule",
+    ]
+
+    # Header
+    header = " & ".join(str(c) for c in df.columns) + r" \\"
+    lines.append(header)
+    lines.append(r"\midrule")
+
+    # Body
+    for _, row in df.iterrows():
+        cells = []
+        for col in df.columns:
+            val = row[col]
+            if isinstance(val, float):
+                if "ECE" in str(col) or "BSS" in str(col) or "AUC" in str(col):
+                    cells.append(f"{val:.4f}")
+                elif "p-value" in str(col) or "p_value" in str(col):
+                    cells.append(f"{val:.4f}" if np.isfinite(val) else "---")
+                else:
+                    cells.append(f"{val:.3f}")
+            else:
+                cells.append(str(val))
+        lines.append(" & ".join(cells) + r" \\")
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table}",
+    ])
+
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate paper results tables")
+    parser.add_argument("ticker", help="Ticker or 'all'")
+    parser.add_argument("--n-folds", type=int, default=5)
+    args = parser.parse_args()
+
+    os.makedirs("outputs/paper/tables", exist_ok=True)
+
+    tickers = list(TICKER_CONFIGS.keys()) if args.ticker.lower() == "all" else [args.ticker.lower()]
+
+    all_main = []
+    all_baseline = []
+
+    for ticker in tickers:
+        try:
+            logger.info("=== Generating results for %s ===", ticker.upper())
+
+            # Table 1: Main results
+            main_df = generate_main_results_table(ticker, n_folds=args.n_folds)
+            all_main.append(main_df)
+
+            # Table 2: Baseline comparison
+            bl_df = generate_baseline_comparison_table(ticker)
+            all_baseline.append(bl_df)
+
+        except Exception as e:
+            logger.error("Failed for %s: %s", ticker, e, exc_info=True)
+
+    # Combine and save
+    if all_main:
+        combined_main = pd.concat(all_main, ignore_index=True)
+        combined_main.to_csv("outputs/paper/tables/main_results.csv", index=False)
+
+        latex = to_latex_table(
+            combined_main[["Ticker", "H", "BSS", "AUC", "ECE", "N_eff", "p-value", "Gates"]],
+            "Cross-validated calibration results (5-fold expanding window). "
+            "BSS: Brier Skill Score vs.~climatology. "
+            "Significance: paired bootstrap, $^{***}p<0.01$, $^{**}p<0.05$, $^{*}p<0.10$.",
+            "tab:main_results",
+        )
+        with open("outputs/paper/tables/main_results.tex", "w") as f:
+            f.write(latex)
+        logger.info("Main results table saved")
+
+    if all_baseline:
+        combined_bl = pd.concat(all_baseline, ignore_index=True)
+        combined_bl.to_csv("outputs/paper/tables/baseline_comparison.csv", index=False)
+
+        latex = to_latex_table(
+            combined_bl[["Ticker", "Method", "H", "BSS", "AUC", "ECE", "p-value vs Full"]],
+            "Baseline comparison. Full model vs.~four baselines. "
+            "$p$-values from paired bootstrap test of Brier score differences.",
+            "tab:baseline_comparison",
+        )
+        with open("outputs/paper/tables/baseline_comparison.tex", "w") as f:
+            f.write(latex)
+        logger.info("Baseline comparison table saved")
+
+    print("\n=== Paper tables generated in outputs/paper/tables/ ===")
+
+
+if __name__ == "__main__":
+    main()

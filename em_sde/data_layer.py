@@ -1,14 +1,16 @@
 """
 Data ingestion layer with robust yfinance fetching, CSV loading,
-synthetic generation, parquet caching, and validation.
+synthetic generation, parquet caching, validation, and provenance.
 
-All downstream modules consume only df["price"].
+Downstream consumers require df["price"] and may optionally use canonical
+OHLCV columns when available: open, high, low, volume.
 """
 
 import os
 import time
 import warnings
 import logging
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Tuple, Dict, Any, Optional
@@ -33,7 +35,8 @@ def _date_str(value: object) -> str:
 def load_data(cfg) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Load price data according to config. Returns (df, metadata).
-    df has DatetimeIndex and column 'price'.
+    df has DatetimeIndex and required column 'price'. Optional columns:
+    open, high, low, volume.
     """
     meta = {
         "ticker": cfg.data.ticker,
@@ -44,6 +47,7 @@ def load_data(cfg) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "cache_hit": False,
         "field_used": None,
         "warnings": [],
+        "strict_validation": cfg.data.strict_validation,
     }
 
     if cfg.data.source == "yfinance":
@@ -55,11 +59,17 @@ def load_data(cfg) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     else:
         raise ValueError(f"Unknown data source: {cfg.data.source}")
 
-    df, meta = _clean_and_validate(df, cfg.data.min_rows, meta)
+    df, meta = _clean_and_validate(
+        df, cfg.data.min_rows, meta, strict=cfg.data.strict_validation,
+    )
 
     meta["rows"] = len(df)
     meta["actual_start"] = _date_str(df.index[0])
     meta["actual_end"] = _date_str(df.index[-1])
+    meta["columns"] = list(df.columns)
+    meta["has_ohlc"] = all(col in df.columns for col in ("open", "high", "low"))
+    meta["has_volume"] = "volume" in df.columns
+    meta["dataset_hash"] = _dataset_hash(df)
 
     return df, meta
 
@@ -102,14 +112,12 @@ def _load_yfinance(cfg, meta: dict) -> Tuple[pd.DataFrame, dict]:
                 # Handle MultiIndex columns from yf.download
                 if isinstance(raw.columns, pd.MultiIndex):
                     raw.columns = raw.columns.get_level_values(0)
-                if "Close" in raw.columns:
-                    df = pd.DataFrame({"price": raw["Close"].values}, index=raw.index)
-                    meta["field_used"] = "Close (auto_adjust=True)"
+                try:
+                    df, field_used = _canonicalize_market_frame(raw)
+                    meta["field_used"] = f"{field_used} (auto_adjust=True)"
                     break
-                elif "Adj Close" in raw.columns:
-                    df = pd.DataFrame({"price": raw["Adj Close"].values}, index=raw.index)
-                    meta["field_used"] = "Adj Close"
-                    break
+                except ValueError:
+                    pass
         except Exception as e:
             logger.warning("yf.download attempt %d failed: %s", attempt, e)
             time.sleep(min(2 ** attempt, 30))
@@ -128,10 +136,12 @@ def _load_yfinance(cfg, meta: dict) -> Tuple[pd.DataFrame, dict]:
                     auto_adjust=True,
                 )
                 if raw is not None and len(raw) > 0:
-                    if "Close" in raw.columns:
-                        df = pd.DataFrame({"price": raw["Close"].values}, index=raw.index)
-                        meta["field_used"] = "Close (Ticker.history, auto_adjust=True)"
+                    try:
+                        df, field_used = _canonicalize_market_frame(raw)
+                        meta["field_used"] = f"{field_used} (Ticker.history, auto_adjust=True)"
                         break
+                    except ValueError:
+                        pass
             except Exception as e:
                 logger.warning("Ticker.history attempt %d failed: %s", attempt, e)
                 time.sleep(min(2 ** attempt, 30))
@@ -157,21 +167,10 @@ def _load_csv(cfg, meta: dict) -> Tuple[pd.DataFrame, dict]:
         raise FileNotFoundError(f"CSV file not found: {path}")
 
     raw = pd.read_csv(path, parse_dates=True, index_col=0)
-
-    # Look for price column
-    for col in ["price", "Price", "Close", "close", "Adj Close", "adj_close"]:
-        if col in raw.columns:
-            df = pd.DataFrame({"price": raw[col].values}, index=raw.index)
-            meta["field_used"] = col
-            return df, meta
-
-    # If single column, use it
-    if len(raw.columns) == 1:
-        df = pd.DataFrame({"price": raw.iloc[:, 0].values}, index=raw.index)
-        meta["field_used"] = raw.columns[0]
-        return df, meta
-
-    raise ValueError(f"Cannot identify price column in CSV. Columns: {list(raw.columns)}")
+    df, field_used = _canonicalize_market_frame(raw)
+    meta["field_used"] = field_used
+    meta["csv_path"] = str(path)
+    return df, meta
 
 
 def _generate_synthetic(cfg, meta: dict) -> Tuple[pd.DataFrame, dict]:
@@ -197,8 +196,45 @@ def _generate_synthetic(cfg, meta: dict) -> Tuple[pd.DataFrame, dict]:
     return df, meta
 
 
+def _canonicalize_market_frame(raw: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+    """Normalize market data columns to price/open/high/low/volume."""
+    col_map = {
+        "price": ["price", "Price", "Close", "close", "Adj Close", "adj_close"],
+        "open": ["Open", "open"],
+        "high": ["High", "high"],
+        "low": ["Low", "low"],
+        "volume": ["Volume", "volume"],
+    }
+
+    def _first_match(candidates):
+        for candidate in candidates:
+            if candidate in raw.columns:
+                return candidate
+        return None
+
+    close_col = _first_match(col_map["price"])
+    if close_col is None:
+        if len(raw.columns) == 1:
+            col = raw.columns[0]
+            return pd.DataFrame({"price": raw.iloc[:, 0].astype(float).values}, index=raw.index), str(col)
+        raise ValueError(f"Cannot identify price column in data. Columns: {list(raw.columns)}")
+
+    data = {"price": raw[close_col].astype(float).values}
+    for canon in ("open", "high", "low", "volume"):
+        matched = _first_match(col_map[canon])
+        if matched is not None:
+            data[canon] = raw[matched].astype(float).values
+    return pd.DataFrame(data, index=raw.index), str(close_col)
+
+
+def _dataset_hash(df: pd.DataFrame) -> str:
+    """Stable SHA256 hash of the canonical dataset contents."""
+    hashed = pd.util.hash_pandas_object(df, index=True).values.tobytes()
+    return hashlib.sha256(hashed).hexdigest()
+
+
 def _clean_and_validate(
-    df: pd.DataFrame, min_rows: int, meta: dict
+    df: pd.DataFrame, min_rows: int, meta: dict, strict: bool = False
 ) -> Tuple[pd.DataFrame, dict]:
     """Clean and validate price data."""
     # Drop NaN
@@ -220,14 +256,20 @@ def _clean_and_validate(
     dup_mask = np.asarray(df.index.duplicated(keep="first"), dtype=bool)
     if dup_mask.any():
         n_dups = int(dup_mask.sum())
-        meta["warnings"].append(f"Removed {n_dups} duplicate dates")
+        msg = f"Removed {n_dups} duplicate dates"
+        meta["warnings"].append(msg)
+        if strict:
+            raise ValueError(f"Strict data validation failed: {msg}")
         df = df.loc[~dup_mask].copy()
 
     # Price > 0
     neg_mask = np.asarray(df["price"].to_numpy(dtype=float) <= 0.0, dtype=bool)
     if neg_mask.any():
         n_neg = int(neg_mask.sum())
-        meta["warnings"].append(f"Removed {n_neg} non-positive prices")
+        msg = f"Removed {n_neg} non-positive prices"
+        meta["warnings"].append(msg)
+        if strict:
+            raise ValueError(f"Strict data validation failed: {msg}")
         df = df.loc[~neg_mask].copy()
 
     # Validate min rows
@@ -243,6 +285,8 @@ def _clean_and_validate(
     meta["data_quality"] = dq
     for w in dq.get("warnings", []):
         meta["warnings"].append(w)
+    if strict:
+        _raise_for_strict_quality_failures(dq)
 
     return df, meta
 
@@ -350,6 +394,58 @@ def detect_data_gaps(
     }
 
 
+def detect_split_like_moves(returns: pd.Series, tolerance: float = 0.08) -> Dict[str, Any]:
+    """
+    Detect split-like close-to-close jumps that often indicate unadjusted data.
+
+    Flags ratios near common split factors (2, 3, 4, 5, 10 and their inverses).
+    """
+    ratios = (1.0 + returns.to_numpy(dtype=float))
+    common = np.array([2.0, 3.0, 4.0, 5.0, 10.0, 0.5, 1 / 3, 0.25, 0.2, 0.1])
+    matches = []
+    for i, ratio in enumerate(ratios):
+        if ratio <= 0:
+            continue
+        rel_err = np.min(np.abs(ratio - common) / common)
+        if rel_err <= tolerance:
+            matches.append({
+                "date": _date_str(returns.index[i]),
+                "return": round(float(returns.iloc[i]), 6),
+                "ratio": round(float(ratio), 4),
+            })
+    return {
+        "n_split_like_moves": len(matches),
+        "split_like_moves": matches[:10],
+    }
+
+
+def detect_ohlc_inconsistencies(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detect impossible OHLC relationships when open/high/low are present."""
+    required = {"price", "open", "high", "low"}
+    if not required.issubset(df.columns):
+        return {"n_ohlc_issues": 0, "ohlc_issues": []}
+
+    issues = []
+    vals = df[["price", "open", "high", "low"]].astype(float)
+    tol = 1e-10 * vals.abs().max(axis=1).clip(lower=1.0)
+    bad = (
+        ((vals["high"] + tol) < vals["low"])
+        | ((vals["high"] + tol) < vals[["price", "open"]].max(axis=1))
+        | ((vals["low"] - tol) > vals[["price", "open"]].min(axis=1))
+        | (vals[["open", "high", "low"]].min(axis=1) <= 0.0)
+    )
+    for ts in vals.index[bad][:10]:
+        row = vals.loc[ts]
+        issues.append({
+            "date": _date_str(ts),
+            "open": round(float(row["open"]), 6),
+            "high": round(float(row["high"]), 6),
+            "low": round(float(row["low"]), 6),
+            "close": round(float(row["price"]), 6),
+        })
+    return {"n_ohlc_issues": int(bad.sum()), "ohlc_issues": issues}
+
+
 def run_data_quality_checks(
     df: pd.DataFrame,
     returns: pd.Series,
@@ -397,7 +493,23 @@ def run_data_quality_checks(
         )
         logger.warning("%d data gaps detected", gaps["n_gaps"])
 
-    # 4. Basic return statistics
+    # 4. Split-like move detection
+    split_like = detect_split_like_moves(returns)
+    if split_like["n_split_like_moves"] > 0:
+        warnings_list.append(
+            f"{split_like['n_split_like_moves']} split-like close jumps detected"
+        )
+        logger.warning("%d split-like moves detected", split_like["n_split_like_moves"])
+
+    # 5. OHLC consistency checks
+    ohlc_issues = detect_ohlc_inconsistencies(df)
+    if ohlc_issues["n_ohlc_issues"] > 0:
+        warnings_list.append(
+            f"{ohlc_issues['n_ohlc_issues']} OHLC consistency issues detected"
+        )
+        logger.warning("%d OHLC consistency issues detected", ohlc_issues["n_ohlc_issues"])
+
+    # 6. Basic return statistics
     ret_vals = returns.to_numpy(dtype=float)
     stats = {
         "mean_daily_return": round(float(np.mean(ret_vals)), 8),
@@ -413,9 +525,23 @@ def run_data_quality_checks(
         "outliers": outliers,
         "stale_prices": stale,
         "data_gaps": gaps,
+        "split_like_moves": split_like,
+        "ohlc_inconsistencies": ohlc_issues,
         "return_statistics": stats,
         "warnings": warnings_list,
     }
+
+
+def _raise_for_strict_quality_failures(dq: Dict[str, Any]) -> None:
+    """Raise on high-confidence data integrity failures."""
+    reasons = []
+    if dq.get("split_like_moves", {}).get("n_split_like_moves", 0) > 0:
+        reasons.append("split_like_moves")
+    if dq.get("ohlc_inconsistencies", {}).get("n_ohlc_issues", 0) > 0:
+        reasons.append("ohlc_inconsistencies")
+    if reasons:
+        joined = ", ".join(reasons)
+        raise ValueError(f"Strict data validation failed: {joined}")
 
 
 def _skewness(x: np.ndarray) -> float:

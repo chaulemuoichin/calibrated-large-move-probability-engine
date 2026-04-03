@@ -34,6 +34,8 @@ from em_sde.model_selection import (
     expanding_window_cv,
     compare_models,
     apply_promotion_gates_oof,
+    compute_benchmark_report,
+    compute_conditional_gate_report_oof,
 )
 
 
@@ -145,6 +147,8 @@ def _stage_cv_and_gates() -> None:
         t0 = time.perf_counter()
         configs = [load_config(p) for p in paths]
         names = [Path(p).stem for p in paths]
+        for cfg in configs:
+            cfg.model.store_quantiles = True
 
         df, _ = load_data(configs[0])
         cv_results, oof_df = expanding_window_cv(df, configs, names, n_folds=5)
@@ -152,11 +156,21 @@ def _stage_cv_and_gates() -> None:
         gate_report = apply_promotion_gates_oof(
             oof_df,
             gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+            density_gates={"crps_skill": 0.0, "pit_ks": 0.12, "tail_cov_error": 0.05},
+            require_overfit=configs[0].calibration.promotion_require_overfit,
+        )
+        benchmark_report = compute_benchmark_report(oof_df, n_boot=300)
+        conditional_report = compute_conditional_gate_report_oof(
+            oof_df,
+            gates={"bss_cal": 0.0, "auc_cal": 0.55, "ece_cal": 0.02},
+            density_gates={"crps_skill": 0.0, "pit_ks": 0.12, "tail_cov_error": 0.05},
         )
 
         cv_results.to_csv(OUT_DIR / f"cv_{family}_folds.csv", index=False)
         summary.to_csv(OUT_DIR / f"cv_{family}_summary.csv", index=False)
         gate_report.to_csv(OUT_DIR / f"cv_{family}_gates.csv", index=False)
+        benchmark_report.to_csv(OUT_DIR / f"cv_{family}_benchmark.csv", index=False)
+        conditional_report.to_csv(OUT_DIR / f"cv_{family}_conditional.csv", index=False)
 
         elapsed = time.perf_counter() - t0
         print(f"  {family}: {elapsed / 60.0:.1f} min")

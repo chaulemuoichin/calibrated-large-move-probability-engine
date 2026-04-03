@@ -26,7 +26,7 @@ import pandas as pd
 from numpy.random import SeedSequence
 
 from .calibration import OnlineCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator
-from .garch import fit_garch, fit_garch_ensemble, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_har_rv, HarRvResult
+from .garch import fit_garch, fit_garch_ensemble, GarchResult, project_to_stationary, garch_diagnostics as _garch_diag, ewma_volatility, garch_term_structure_vol, fit_har_rv, fit_har_ohlc, HarRvResult
 from .monte_carlo import (
     simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability,
     compute_state_dependent_jumps, QUANTILE_LEVELS,
@@ -48,6 +48,9 @@ class PendingPrediction:
     vol_of_vol: float = 0.0    # rolling std of sigma
     earnings_proximity: float = 0.0  # proximity to nearest earnings date
     implied_vol_ratio: float = 1.0   # sigma_implied / sigma_hist (1.0 = no implied data)
+    range_vol_ratio: float = 1.0     # Parkinson-style range vol / forecast vol
+    overnight_gap: float = 0.0       # abs(log(open_t / close_{t-1}))
+    intraday_range: float = 0.0      # log(high_t / low_t)
 
 
 @dataclass
@@ -92,6 +95,85 @@ class RegimeRouter:
         return len(self._vol_history) >= self._warmup
 
 
+def _blend_sigma_variance(sigma_base: float, sigma_alt: Optional[float], weight: float) -> float:
+    """Blend two daily volatility estimates in variance space."""
+    w = float(min(max(weight, 0.0), 1.0))
+    if w <= 0.0 or sigma_alt is None or not np.isfinite(sigma_alt) or sigma_alt <= 0.0:
+        return float(sigma_base)
+    if not np.isfinite(sigma_base) or sigma_base <= 0.0:
+        return float(sigma_alt)
+    return float(np.sqrt((1.0 - w) * sigma_base ** 2 + w * sigma_alt ** 2))
+
+
+def _count_scheduled_events_in_horizon(
+    trading_dates: pd.Index,
+    current_idx: int,
+    horizon: int,
+    event_dates: Optional[np.ndarray],
+) -> int:
+    """Count scheduled events from today through the horizon end date."""
+    if event_dates is None or len(event_dates) == 0:
+        return 0
+    current_day = np.datetime64(trading_dates[current_idx], "D")
+    end_idx = min(current_idx + horizon, len(trading_dates) - 1)
+    end_day = np.datetime64(trading_dates[end_idx], "D")
+    mask = (event_dates >= current_day) & (event_dates <= end_day)
+    return int(np.sum(mask))
+
+
+def _estimate_scheduled_event_variance(
+    trading_dates: pd.Index,
+    returns: npt.NDArray[np.float64],
+    event_dates: Optional[np.ndarray],
+    current_idx: int,
+    sigma_daily: float,
+    lookback_events: int,
+    min_events: int,
+    scale: float,
+) -> float:
+    """
+    Estimate residual daily variance contributed by scheduled event jumps.
+
+    Uses the largest absolute close-to-close move around each past event date,
+    then subtracts the current diffusive daily variance anchor.
+    """
+    if event_dates is None or len(event_dates) == 0 or current_idx <= 1:
+        return 0.0
+
+    current_day = np.datetime64(trading_dates[current_idx], "D")
+    past_events = np.unique(event_dates[event_dates < current_day])
+    if len(past_events) == 0:
+        return 0.0
+
+    trade_days = np.asarray(trading_dates.values, dtype="datetime64[D]")
+    event_moves: List[float] = []
+    used_return_idx = set()
+
+    for event_day in past_events[::-1]:
+        pos = int(np.searchsorted(trade_days, event_day))
+        candidate_idx: List[int] = []
+        if 0 <= pos - 1 < current_idx:
+            candidate_idx.append(pos - 1)
+        if 0 <= pos < current_idx:
+            candidate_idx.append(pos)
+        if not candidate_idx:
+            continue
+        best_idx = max(candidate_idx, key=lambda j: abs(float(returns[j])))
+        if best_idx in used_return_idx:
+            continue
+        used_return_idx.add(best_idx)
+        event_moves.append(float(returns[best_idx]))
+        if len(event_moves) >= lookback_events:
+            break
+
+    if len(event_moves) < min_events:
+        return 0.0
+
+    event_var = float(np.mean(np.square(event_moves)))
+    residual_var = max(event_var - max(sigma_daily, 0.0) ** 2, 0.0)
+    return float(scale * residual_var)
+
+
 def run_walkforward(
     df: pd.DataFrame,
     cfg,
@@ -112,6 +194,14 @@ def run_walkforward(
         Complete results with all columns per the spec.
     """
     prices: npt.NDArray[np.float64] = df["price"].to_numpy(dtype=np.float64, copy=True)
+    open_prices: Optional[npt.NDArray[np.float64]] = None
+    high_prices: Optional[npt.NDArray[np.float64]] = None
+    low_prices: Optional[npt.NDArray[np.float64]] = None
+    has_ohlc = all(col in df.columns for col in ("open", "high", "low"))
+    if has_ohlc:
+        open_prices = df["open"].to_numpy(dtype=np.float64, copy=True)
+        high_prices = df["high"].to_numpy(dtype=np.float64, copy=True)
+        low_prices = df["low"].to_numpy(dtype=np.float64, copy=True)
     dates = df.index
     n = len(prices)
 
@@ -179,6 +269,9 @@ def run_walkforward(
     har_rv_min_window = cfg.model.har_rv_min_window
     har_rv_refit_interval = cfg.model.har_rv_refit_interval
     har_rv_ridge_alpha = cfg.model.har_rv_ridge_alpha
+    har_rv_variant = getattr(cfg.model, "har_rv_variant", "rv")
+    hybrid_variance_enabled = cfg.model.hybrid_variance_enabled
+    hybrid_range_blend = cfg.model.hybrid_range_blend
     fixed_pct_by_horizon = cfg.model.regime_gated_fixed_pct_by_horizon or {}
     fhs_enabled = cfg.model.fhs_enabled
     garch_ensemble_enabled = cfg.model.garch_ensemble
@@ -186,6 +279,11 @@ def run_walkforward(
     implied_vol_enabled = cfg.model.implied_vol_enabled
     implied_vol_blend = cfg.model.implied_vol_blend
     implied_vol_as_feature = cfg.model.implied_vol_as_feature
+    scheduled_jump_variance_enabled = cfg.model.scheduled_jump_variance
+    scheduled_jump_lookback_events = cfg.model.scheduled_jump_lookback_events
+    scheduled_jump_min_events = cfg.model.scheduled_jump_min_events
+    scheduled_jump_scale = cfg.model.scheduled_jump_scale
+    ohlc_features_enabled = cfg.model.ohlc_features_enabled and has_ohlc
 
     # Regime-gated threshold router
     regime_router: Optional[RegimeRouter] = None
@@ -203,12 +301,13 @@ def run_walkforward(
 
     # Load earnings dates if enabled
     earnings_dates = None
-    if earnings_calendar_enabled:
+    if earnings_calendar_enabled or scheduled_jump_variance_enabled:
         from .data_layer import load_earnings_dates, compute_earnings_proximity
         earnings_dates = load_earnings_dates(cfg.data.ticker)
         if earnings_dates is None:
-            logger.warning("Earnings calendar enabled but no dates found for %s", cfg.data.ticker)
+            logger.warning("Earnings dates unavailable for %s; disabling earnings-linked features", cfg.data.ticker)
             earnings_calendar_enabled = False
+            scheduled_jump_variance_enabled = False
 
     # Load implied vol data if enabled
     iv_df = None
@@ -248,6 +347,7 @@ def run_walkforward(
         post_cal_method=post_cal_method,
         beta_calibration=beta_calibration,
         implied_vol_aware=implied_vol_enabled and implied_vol_as_feature,
+        ohlc_aware=ohlc_features_enabled,
     )
     if multi_feature and multi_feature_regime_conditional:
         calibrators_mf = {
@@ -397,11 +497,29 @@ def run_walkforward(
         # === HAR-RV sigma override (refit every har_rv_refit_interval days) ===
         if har_rv_enabled:
             if har_rv_result is None or (idx - last_har_rv_fit) >= har_rv_refit_interval:
-                har_rv_result = fit_har_rv(
-                    available_returns,
-                    min_window=har_rv_min_window,
-                    ridge_alpha=har_rv_ridge_alpha,
-                )
+                if har_rv_variant in ("range", "rvx") and has_ohlc and open_prices is not None and high_prices is not None and low_prices is not None:
+                    har_rv_result = fit_har_ohlc(
+                        available_returns,
+                        close_prices=prices[:idx + 1],
+                        high_prices=high_prices[:idx + 1],
+                        low_prices=low_prices[:idx + 1],
+                        open_prices=open_prices[:idx + 1],
+                        min_window=har_rv_min_window,
+                        ridge_alpha=har_rv_ridge_alpha,
+                        variant=har_rv_variant,
+                    )
+                    if har_rv_result is None:
+                        har_rv_result = fit_har_rv(
+                            available_returns,
+                            min_window=har_rv_min_window,
+                            ridge_alpha=har_rv_ridge_alpha,
+                        )
+                else:
+                    har_rv_result = fit_har_rv(
+                        available_returns,
+                        min_window=har_rv_min_window,
+                        ridge_alpha=har_rv_ridge_alpha,
+                    )
                 last_har_rv_fit = idx
 
             if har_rv_result is not None:
@@ -410,6 +528,67 @@ def run_walkforward(
                 row["sigma_har_rv_5d"] = har_rv_result.sigma_5d
                 row["sigma_har_rv_22d"] = har_rv_result.sigma_22d
                 row["har_rv_r2"] = har_rv_result.r_squared_1d
+                row["har_rv_variant"] = har_rv_variant
+
+        sigma_range_20d: Optional[float] = None
+        range_vol_ratio = 1.0
+        overnight_gap = 0.0
+        intraday_range = 0.0
+        if ohlc_features_enabled and open_prices is not None and high_prices is not None and low_prices is not None:
+            if idx > 0 and open_prices[idx] > 0 and prices[idx - 1] > 0:
+                overnight_gap = float(abs(np.log(open_prices[idx] / prices[idx - 1])))
+            if high_prices[idx] > 0 and low_prices[idx] > 0:
+                intraday_range = float(np.log(high_prices[idx] / low_prices[idx]))
+
+            win_start = max(0, idx - 19)
+            highs = high_prices[win_start:idx + 1]
+            lows = low_prices[win_start:idx + 1]
+            valid_range = (highs > 0.0) & (lows > 0.0) & (highs >= lows)
+            if valid_range.any():
+                park_var = np.log(highs[valid_range] / lows[valid_range]) ** 2 / (4.0 * np.log(2.0))
+                sigma_range_20d = float(np.sqrt(np.mean(park_var))) if len(park_var) > 0 else None
+                if sigma_range_20d is not None:
+                    row["sigma_range_20d"] = sigma_range_20d
+
+        # Build the physical horizon sigma curve before implied-vol blending.
+        sigma_per_h: Dict[int, float] = {}
+        if har_rv_enabled and har_rv_result is not None:
+            for H in horizons:
+                if H <= 1:
+                    sigma_per_h[H] = har_rv_result.sigma_1d
+                elif H < 5:
+                    w = (H - 1) / (5 - 1)
+                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_1d + w * har_rv_result.sigma_5d
+                elif H < 22:
+                    w = (H - 5) / (22 - 5)
+                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_5d + w * har_rv_result.sigma_22d
+                else:
+                    sigma_per_h[H] = har_rv_result.sigma_22d
+        else:
+            for H in horizons:
+                if mc_vol_term_structure and garch_result.omega is not None:
+                    sigma_per_h[H] = garch_term_structure_vol(
+                        sigma_1d, garch_result.omega, garch_result.alpha,
+                        garch_result.beta, garch_result.gamma, H,
+                        model_type=garch_result.model_type,
+                    )
+                else:
+                    sigma_per_h[H] = sigma_1d
+
+        if hybrid_variance_enabled and sigma_range_20d is not None and sigma_range_20d > 0.0:
+            sigma_1d_pre_hybrid = sigma_1d
+            sigma_1d = _blend_sigma_variance(sigma_1d_pre_hybrid, sigma_range_20d, hybrid_range_blend)
+            row["sigma_hybrid_1d"] = sigma_1d
+            for H in horizons:
+                range_sigma_h = sigma_range_20d
+                if sigma_1d_pre_hybrid > 0.0:
+                    range_sigma_h = sigma_range_20d * (sigma_per_h[H] / sigma_1d_pre_hybrid)
+                sigma_per_h[H] = _blend_sigma_variance(sigma_per_h[H], range_sigma_h, hybrid_range_blend)
+                row[f"sigma_physical_{H}"] = sigma_per_h[H]
+        else:
+            row["sigma_hybrid_1d"] = sigma_1d
+            for H in horizons:
+                row[f"sigma_physical_{H}"] = sigma_per_h[H]
 
         # Compute auxiliary features for multi-feature calibration (walk-forward safe)
         sigma_history.append(sigma_1d)
@@ -426,9 +605,15 @@ def run_walkforward(
             vol_of_vol = float(np.std(list(sigma_history)[-60:]))
         else:
             vol_of_vol = 0.0
+        if sigma_range_20d is not None and sigma_1d > 0:
+            range_vol_ratio = sigma_range_20d / sigma_1d
+
         row["delta_sigma"] = delta_sigma
         row["vol_ratio"] = vol_ratio
         row["vol_of_vol"] = vol_of_vol
+        row["range_vol_ratio"] = range_vol_ratio
+        row["overnight_gap"] = overnight_gap
+        row["intraday_range"] = intraday_range
 
         # Earnings proximity feature
         if earnings_calendar_enabled and earnings_dates is not None:
@@ -493,35 +678,6 @@ def run_walkforward(
             step_jump_mean = jump_mean
             step_jump_vol = jump_vol
 
-        # === Step 5b: Per-horizon sigma (term structure) and regime t_df ===
-        sigma_per_h: Dict[int, float] = {}
-        if har_rv_enabled and har_rv_result is not None:
-            # HAR-RV provides horizon-specific sigma directly
-            for H in horizons:
-                if H <= 1:
-                    sigma_per_h[H] = har_rv_result.sigma_1d
-                elif H < 5:
-                    # Interpolate between 1d and 5d
-                    w = (H - 1) / (5 - 1)
-                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_1d + w * har_rv_result.sigma_5d
-                elif H < 22:
-                    # H=5: w=0 → sigma_5d; H>5: interpolate 5d→22d
-                    w = (H - 5) / (22 - 5)
-                    sigma_per_h[H] = (1 - w) * har_rv_result.sigma_5d + w * har_rv_result.sigma_22d
-                else:
-                    sigma_per_h[H] = har_rv_result.sigma_22d
-        else:
-            # WS1: Use GARCH term-structure average vol per horizon
-            for H in horizons:
-                if mc_vol_term_structure and garch_result.omega is not None:
-                    sigma_per_h[H] = garch_term_structure_vol(
-                        sigma_1d, garch_result.omega, garch_result.alpha,
-                        garch_result.beta, garch_result.gamma, H,
-                        model_type=garch_result.model_type,
-                    )
-                else:
-                    sigma_per_h[H] = sigma_1d
-
         # === Step 5c: Implied vol blending ===
         implied_vol_ratios: Dict[int, float] = {H: 1.0 for H in horizons}
         if implied_vol_enabled and iv_df is not None:
@@ -532,10 +688,39 @@ def run_walkforward(
                     sigma_implied_daily = iv_val / np.sqrt(252.0)
                     sigma_hist = sigma_per_h[H]
                     implied_vol_ratios[H] = sigma_implied_daily / sigma_hist if sigma_hist > 0 else 1.0
-                    # Blend: weighted average of historical and implied
-                    sigma_per_h[H] = (1 - implied_vol_blend) * sigma_hist + implied_vol_blend * sigma_implied_daily
+                    sigma_per_h[H] = _blend_sigma_variance(sigma_hist, sigma_implied_daily, implied_vol_blend)
                     row[f"iv_implied_{H}"] = iv_val
                     row[f"iv_ratio_{H}"] = implied_vol_ratios[H]
+
+        scheduled_event_var = 0.0
+        if scheduled_jump_variance_enabled and earnings_dates is not None:
+            scheduled_event_var = _estimate_scheduled_event_variance(
+                dates,
+                all_returns,
+                earnings_dates,
+                idx,
+                sigma_1d,
+                lookback_events=scheduled_jump_lookback_events,
+                min_events=scheduled_jump_min_events,
+                scale=scheduled_jump_scale,
+            )
+            row["scheduled_jump_var_daily"] = scheduled_event_var
+
+        for H in horizons:
+            event_count = 0
+            if scheduled_jump_variance_enabled and earnings_dates is not None:
+                event_count = _count_scheduled_events_in_horizon(dates, idx, H, earnings_dates)
+            if event_count > 0 and scheduled_event_var > 0.0:
+                iv_shrink = 1.0
+                if implied_vol_enabled and implied_vol_ratios.get(H, 1.0) != 1.0:
+                    iv_shrink = max(0.0, 1.0 - implied_vol_blend)
+                total_event_var = scheduled_event_var * event_count * iv_shrink
+                sigma_per_h[H] = float(np.sqrt(sigma_per_h[H] ** 2 + total_event_var / max(H, 1)))
+                row[f"scheduled_jump_events_{H}"] = event_count
+                row[f"scheduled_jump_var_{H}"] = total_event_var
+            else:
+                row[f"scheduled_jump_events_{H}"] = event_count
+                row[f"scheduled_jump_var_{H}"] = 0.0
 
         # Persist the effective horizon sigma actually fed into MC so
         # downstream OOF gating can bucket on the true forecast state.
@@ -598,7 +783,8 @@ def run_walkforward(
             if calibrators_mf is not None:
                 p_cal = calibrators_mf[H].calibrate(
                     p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-                    earnings_prox, implied_vol_ratios.get(H, 1.0))
+                    earnings_prox, implied_vol_ratios.get(H, 1.0),
+                    range_vol_ratio, overnight_gap, intraday_range)
                 state = calibrators_mf[H].state()
             else:
                 assert calibrators_online is not None
@@ -635,6 +821,9 @@ def run_walkforward(
                 vol_of_vol=vol_of_vol,
                 earnings_proximity=earnings_prox,
                 implied_vol_ratio=implied_vol_ratios.get(H, 1.0),
+                range_vol_ratio=range_vol_ratio,
+                overnight_gap=overnight_gap,
+                intraday_range=intraday_range,
             ))
 
         # === Step 7: Ensemble (optional) ===
@@ -777,6 +966,7 @@ def _resolve_predictions_mf(
                     pred.p_raw, y, pred.sigma_1d,
                     pred.delta_sigma, pred.vol_ratio, pred.vol_of_vol,
                     pred.earnings_proximity, pred.implied_vol_ratio,
+                    pred.range_vol_ratio, pred.overnight_gap, pred.intraday_range,
                 )
                 resolved_labels[H].append(y)
 

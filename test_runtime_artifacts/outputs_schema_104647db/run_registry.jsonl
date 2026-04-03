@@ -1,0 +1,1 @@
+{"run_id": "test_run", "timestamp": "2026-03-09T08:09:40.309456Z", "ticker": "SPY", "data_source": "synthetic", "dataset_hash": null, "artifact_manifest_sha256": "cf4e053204751b948a6145f84a1070b1f98fe4c609df3d99c9f22ed309c4dfda", "prediction_rows": 249, "horizons": [5, 10, 20], "output_root": "test_runtime_artifacts/outputs_schema_104647db/test_run"}

@@ -600,6 +600,153 @@ def fit_har_rv(
         return None
 
 
+def _rolling_mean_feature(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    """Rolling mean helper for HAR-range style feature blocks."""
+    return pd.Series(values, dtype=np.float64).rolling(window, min_periods=1).mean().to_numpy(dtype=np.float64)
+
+
+def _compute_parkinson_variance(
+    high_prices: NDArray[np.float64],
+    low_prices: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Daily Parkinson variance estimator from OHLC high/low data."""
+    highs = np.asarray(high_prices, dtype=np.float64)
+    lows = np.asarray(low_prices, dtype=np.float64)
+    valid = (highs > 0.0) & (lows > 0.0) & (highs >= lows)
+    out = np.full(len(highs), np.nan, dtype=np.float64)
+    out[valid] = np.log(highs[valid] / lows[valid]) ** 2 / (4.0 * np.log(2.0))
+    return out
+
+
+def _compute_overnight_gap_variance(
+    close_prices: NDArray[np.float64],
+    open_prices: Optional[NDArray[np.float64]],
+) -> NDArray[np.float64]:
+    """Variance proxy from overnight close-to-open gaps aligned to returns."""
+    n = len(close_prices) - 1
+    if open_prices is None or len(open_prices) != len(close_prices):
+        return np.zeros(max(n, 0), dtype=np.float64)
+    prev_close = np.asarray(close_prices[:-1], dtype=np.float64)
+    next_open = np.asarray(open_prices[1:], dtype=np.float64)
+    valid = (prev_close > 0.0) & (next_open > 0.0)
+    out = np.zeros(len(prev_close), dtype=np.float64)
+    out[valid] = np.log(next_open[valid] / prev_close[valid]) ** 2
+    return out
+
+
+def _build_har_feature_dataset(
+    returns: NDArray[np.float64],
+    feature_blocks: list[NDArray[np.float64]],
+) -> tuple:
+    """Build a HAR-style design matrix from one or more daily variance blocks."""
+    n = len(returns)
+    if n == 0:
+        return None, None, None, None, None
+
+    r2 = returns ** 2
+    start = 21
+    max_t_22d = n - 23
+    if max_t_22d <= start:
+        return None, None, None, None, None
+
+    idx = np.arange(start, max_t_22d + 1)
+    columns = [np.ones(len(idx), dtype=np.float64)]
+    latest = [1.0]
+
+    for block in feature_blocks:
+        values = np.asarray(block, dtype=np.float64)
+        if len(values) != n or not np.isfinite(values[idx]).all():
+            return None, None, None, None, None
+        mean_5 = _rolling_mean_feature(values, 5)
+        mean_22 = _rolling_mean_feature(values, 22)
+        columns.extend([values[idx], mean_5[idx], mean_22[idx]])
+        latest.extend([float(values[-1]), float(mean_5[-1]), float(mean_22[-1])])
+
+    X = np.column_stack(columns)
+    y_1d = r2[idx + 1]
+    y_5d = np.array([np.mean(r2[t + 1:t + 6]) for t in idx], dtype=np.float64)
+    y_22d = np.array([np.mean(r2[t + 1:t + 23]) for t in idx], dtype=np.float64)
+    return X, y_1d, y_5d, y_22d, np.asarray(latest, dtype=np.float64)
+
+
+def fit_har_ohlc(
+    returns: NDArray[np.float64],
+    close_prices: NDArray[np.float64],
+    high_prices: NDArray[np.float64],
+    low_prices: NDArray[np.float64],
+    open_prices: Optional[NDArray[np.float64]] = None,
+    min_window: int = 252,
+    ridge_alpha: float = 0.01,
+    variant: str = "range",
+) -> Optional[HarRvResult]:
+    """
+    Fit an OHLC-aware HAR family model.
+
+    `variant="range"` uses Parkinson range variance only.
+    `variant="rvx"` uses Parkinson range variance plus close-to-close RV and
+    overnight-gap variance as exogenous blocks.
+    """
+    n = len(returns)
+    if n < min_window:
+        logger.debug("HAR-%s: insufficient data (%d < %d)", variant, n, min_window)
+        return None
+
+    close_arr = np.asarray(close_prices, dtype=np.float64)
+    high_arr = np.asarray(high_prices, dtype=np.float64)
+    low_arr = np.asarray(low_prices, dtype=np.float64)
+    if len(close_arr) != n + 1 or len(high_arr) != n + 1 or len(low_arr) != n + 1:
+        logger.debug("HAR-%s: OHLC arrays misaligned with returns", variant)
+        return None
+
+    park = _compute_parkinson_variance(high_arr[1:], low_arr[1:])
+    if variant == "rvx":
+        gap = _compute_overnight_gap_variance(close_arr, np.asarray(open_prices, dtype=np.float64) if open_prices is not None else None)
+        feature_blocks = [park, np.asarray(returns, dtype=np.float64) ** 2, gap]
+    else:
+        feature_blocks = [park]
+
+    X, y_1d, y_5d, y_22d, x_now = _build_har_feature_dataset(np.asarray(returns, dtype=np.float64), feature_blocks)
+    if X is None or len(X) < 44:
+        logger.debug("HAR-%s: insufficient samples after feature construction", variant)
+        return None
+
+    try:
+        beta_1d = _ridge_fit(X, y_1d, alpha=ridge_alpha)
+        beta_5d = _ridge_fit(X, y_5d, alpha=ridge_alpha)
+        beta_22d = _ridge_fit(X, y_22d, alpha=ridge_alpha)
+
+        var_1d = max(float(x_now @ beta_1d), 1e-16)
+        var_5d = max(float(x_now @ beta_5d), 1e-16)
+        var_22d = max(float(x_now @ beta_22d), 1e-16)
+
+        sigma_1d = min(max(float(np.sqrt(var_1d)), 1e-8), 1.0)
+        sigma_5d = min(max(float(np.sqrt(var_5d)), 1e-8), 1.0)
+        sigma_22d = min(max(float(np.sqrt(var_22d)), 1e-8), 1.0)
+
+        y_pred = X @ beta_1d
+        ss_res = np.sum((y_1d - y_pred) ** 2)
+        ss_tot = np.sum((y_1d - np.mean(y_1d)) ** 2)
+        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+        logger.info(
+            "HAR-%s fit: sigma_1d=%.4f, sigma_5d=%.4f, sigma_22d=%.4f, R2=%.3f",
+            variant, sigma_1d, sigma_5d, sigma_22d, r_squared,
+        )
+
+        return HarRvResult(
+            sigma_1d=sigma_1d,
+            sigma_5d=sigma_5d,
+            sigma_22d=sigma_22d,
+            coefficients_1d=beta_1d,
+            coefficients_5d=beta_5d,
+            coefficients_22d=beta_22d,
+            r_squared_1d=r_squared,
+        )
+    except Exception as e:
+        logger.debug("HAR-%s fit failed: %s", variant, e)
+        return None
+
+
 def fit_garch_ensemble(
     returns: NDArray[np.float64],
     window: int = 756,

@@ -61,30 +61,35 @@ At every step, the system only uses data available up to today. It never peeks a
 
 ### What goes in
 
-Daily closing prices for a single ticker. Three sources are supported:
+Daily price data for a single ticker. Three sources are supported:
 
 | Source | Description |
 |--------|-------------|
 | `yfinance` | Downloads from Yahoo Finance with retry logic and local Parquet cache |
-| `csv` | Reads a local CSV file (auto-detects column names like `Close`, `Price`, `Adj Close`) |
+| `csv` | Reads a local CSV file (auto-detects `Close` / `Adj Close` / `Price`, and preserves OHLCV when present) |
 | `synthetic` | Generates fake GBM prices for testing |
 
 ### What comes out
 
-A DataFrame with a `price` column (positive floats) indexed by date. Minimum 756 rows (~3 years of trading days).
+A DataFrame with a canonical `price` column indexed by date. When available, `open`, `high`, `low`, and `volume` are preserved for OHLC-aware features. Minimum 756 rows (~3 years of trading days).
 
-### Quality checks (warnings, not blocking)
+### Quality checks (warning-only by default, blocking when `strict_validation: true`)
 
 | Check | What it catches |
 |-------|----------------|
 | Outlier detection | Returns beyond 5x the interquartile range |
 | Stale prices | 5+ consecutive identical closes (data feed issue) |
 | Data gaps | More than 5 missing business days in a row |
+| Split-like moves | Unadjusted corporate actions / bad vendor adjustments |
+| OHLC consistency | Impossible bars (e.g. `high < low`, close outside range) |
 | Return statistics | Reports skewness, kurtosis, min/max for manual review |
+
+The loader also records a dataset hash and can persist a research snapshot / artifact manifest for run lineage.
 
 ### Where to look for problems
 
 - If the ticker has stock splits that Yahoo didn't adjust, volatility estimates will be wrong.
+- If a CSV only contains `price`, OHLC-derived features and hybrid variance are automatically inactive.
 - If `min_rows` is set too low, GARCH fitting may be unstable.
 - The cache has a 7-day expiration. Stale cache during fast-moving markets could matter.
 
@@ -402,6 +407,12 @@ Learning rate decays over time: $\eta_t = \eta_0/\sqrt{1+n_{\mathrm{updates}}}$.
 
 The calibrator only starts adjusting after `min_updates` (default 50) outcomes have arrived.
 
+### Offline Pooled Calibration (`offline_pooled_calibration`)
+
+For research mode, the system can fit a batch calibrator on each **train fold only** and apply it to the held-out fold. This keeps the walk-forward split honest while reducing the noise of purely online updates on sparse event horizons.
+
+The offline calibrator uses the same feature family as the online multi-feature calibrator, but solves a penalized logistic problem with IRLS on resolved train rows only. Optional features that are missing on a given ticker (earnings, implied-vol ratio, OHLC realized-state features) fall back to neutral defaults instead of propagating NaNs into the calibrated probability.
+
 ### Multi-Feature Calibrator
 
 Uses 6 features instead of just `logit(p_raw)` (7 features when earnings calendar is active for the horizon):
@@ -535,6 +546,22 @@ model:
 ```
 
 **File:** `em_sde/data_layer.py` (`load_implied_vol`, `get_implied_vol_for_horizon`), `em_sde/backtest.py` (blending + feature wiring)
+
+### Scheduled Jump Variance (`scheduled_jump_variance`)
+
+When enabled, the forecast distribution adds a residual scheduled-event variance term when an earnings date falls inside the prediction horizon:
+
+$$\mathrm{Var}_{\mathrm{total}}(H) = \mathrm{Var}_{\mathrm{diffusive}}(H) + \mathrm{Var}_{\mathrm{scheduled}}(H)$$
+
+`Var_scheduled` is estimated from trailing historical earnings events for that ticker. If there are too few past events, the term falls back to zero. This lets the generator, not just the calibrator, react to known scheduled jump risk.
+
+### Hybrid Variance Blend (`hybrid_variance_enabled`)
+
+When OHLC data is available, the engine can blend the physical sigma forecast with a 20-day Parkinson-style range anchor in variance space:
+
+$$\sigma_{\mathrm{hybrid}}^{2} = (1-w)\sigma_{\mathrm{physical}}^{2} + w\sigma_{\mathrm{range}}^{2}$$
+
+This is only active when the dataset actually contains `open/high/low`. On close-only CSVs, the hybrid path is a no-op by design.
 
 ### Where to look for problems
 
@@ -672,36 +699,53 @@ Each fold runs a full walk-forward backtest. Metrics are computed on the test po
 
 ### Promotion Gates (U5)
 
-Hard go/no-go criteria applied per volatility regime bucket (base mode: `promotion_pooled_gate: false`):
+The active governance path is **row-level pooled OOF gating**. CV folds are pooled at the row level, and when `promotion_pooled_gate: true` the pooled row becomes the primary pass/fail gate while per-regime slices remain diagnostic:
 
 ```
 Pool all out-of-fold (OOF) row-level predictions across CV folds.
 Assign each row to low / mid / high vol regime using its own sigma_1d tercile.
 
-In EACH regime bucket, the model must pass ALL of:
+Primary point-metric gates:
   BSS  >= 0.00    (must beat climatology)
   AUC  >= 0.55    (must have some discrimination)
   ECE  <= 0.02    (must be reasonably calibrated)
 
+Optional density gates:
+  CRPS skill       >= 0.00
+  PIT KS statistic <= 0.12
+  Tail cov error   <= 0.05
+
+Optional robustness gate:
+  worst overfit status <= YELLOW
+
 Minimum sample guards per regime:
-  n_samples >= 30
-  n_events  >= 5   (positive labels)
-  n_nonevents >= 5 (negative labels)
+  n_samples >= 100
+  n_events  >= 30   (positive labels)
+  n_nonevents >= 30 (negative labels)
 Insufficiency reason is tracked: too_few_samples, too_few_events, too_few_nonevents.
 
-Tri-state promotion decision:
+With pooled mode enabled:
   PASS       — all regimes evaluated, all gates pass
   FAIL       — any evaluated gate fails
   UNDECIDED  — any regime has insufficient data for evaluation
 
-If FAIL or UNDECIDED: model is BLOCKED from promotion.
+Diagnostic regime rows do not block promotion.
 ```
 
 Row-level regime assignment gives ~500-700 OOF rows per regime (vs 1-2 fold-level means in the legacy approach). Bootstrap confidence intervals for ECE are reported for defensibility.
 
+**N_eff tracking (2026-03-10):** Every gate report row now includes `n_eff` (= min(events, nonevents) × 2), `neff_ratio` (= n_eff / n_bo_params), and `neff_warning` (GREEN >100x, YELLOW 50-100x, RED <50x). This makes statistical power visible per-horizon, per-regime.
+
+**ECE confidence annotations:** When ECE is evaluated, bootstrap CI determines a confidence tag:
+
+- `solid_pass`: ECE passes and upper CI bound is also below the gate threshold
+- `fragile_pass`: ECE passes but upper CI bound exceeds the gate threshold (could flip with more data)
+- `solid_fail`: ECE fails and lower CI bound is also above the gate threshold
+- `fragile_fail`: ECE fails but lower CI bound is below the gate threshold (close to passing)
+
 Implementation note:
-- `python -m em_sde.run --compare ...` currently uses **legacy fold-level** gates (`apply_promotion_gates`).
-- `scripts/run_gate_recheck.py` uses **row-level OOF** gates (`apply_promotion_gates_oof`) and sets `pooled_gate=True` as the primary governance path.
+- `python -m em_sde.run --compare ...` uses **row-level OOF** gates (`apply_promotion_gates_oof`) and respects `promotion_pooled_gate`.
+- `scripts/run_gate_recheck.py` and `scripts/run_full_institutional.py` use the same pooled OOF governance path and can also enforce density / overfit gates.
 
 ### Pooled ECE Gate (`promotion_pooled_gate`)
 
@@ -711,7 +755,7 @@ When `promotion_pooled_gate: true`, the gate evaluator adds a **pooled** regime 
 
 ```text
 With pooled_gate=True:
-  1. Compute BSS, AUC, ECE on ALL OOF samples (regime="pooled")
+  1. Compute BSS, AUC, ECE, and any enabled density gates on ALL OOF samples (regime="pooled")
   2. Pooled rows have status="evaluated" → determine pass/fail
   3. Per-regime rows have status="diagnostic" → reported but not blocking
   4. Insufficient per-regime data does NOT trigger UNDECIDED
@@ -786,7 +830,7 @@ Adaptive (quantile-based) bins are the default. Equal-width bins over [0, 1] are
 
 ## 12. Known Limitations and Assumptions
 
-1. **Close-to-close returns only.** No intraday path — a stock could breach the threshold intraday and close within it, and the system would label it as a non-event.
+1. **Many bundled datasets are still close-only.** OHLC-aware features and hybrid variance only activate when `open/high/low` are actually present. With close-only data, the engine falls back to close-based behavior.
 
 2. **No transaction costs or market impact.** This is a probability engine, not a trading simulator.
 
@@ -812,18 +856,21 @@ The system includes an [Optuna](https://optuna.org/)-based [Bayesian optimizatio
 
 ### Search Space
 
-**Lean mode (default, 6 params)** — recommended for anti-overfitting:
-- **Thresholds**: per-horizon `thr_5`, `thr_10`, `thr_20` (data-adaptive ranges from return percentiles)
+**Lean mode (default, 3 params with frozen threshold panel)** — recommended for anti-overfitting:
 - **Calibration**: `multi_feature_lr` [0.002, 0.05], `multi_feature_l2` [1e-5, 1e-2]
 - **GARCH**: `garch_target_persistence` [0.95, 0.995]
 
-**Full mode (`--full`, 10 params)** — adds:
+If `lock_threshold_panel: false` or `--tune-thresholds` is explicitly used, the optimizer also tunes per-horizon thresholds `thr_5`, `thr_10`, `thr_20`.
+
+**Full mode (`--full`, 7 params with frozen thresholds)** — adds:
 - **HAR-RV**: `har_rv` (on/off), `har_rv_ridge` [0.001, 0.1], `har_rv_refit` [5, 63]
 - **Student-t df**: `t_df_low` [5, 15], `t_df_mid` [3, 8], `t_df_high` [2.5, 6]
 
 ### Objective
 
 Minimize **mean pooled ECE across all horizons** via 5-fold expanding-window CV. The optimizer uses Optuna's TPE (Tree-structured Parzen Estimator) sampler with SQLite-backed persistence for resume capability.
+
+**N_eff soft penalty (2026-03-10):** After computing mean ECE, the objective checks the minimum N_eff/N_params ratio across all horizons. If below 100x (GREEN threshold), a quadratic penalty is added: `mean_ece += 0.01 × ((100 - ratio) / 100)²`. This steers BO toward threshold/parameter combinations with adequate statistical power, without hard-rejecting borderline trials.
 
 ### Usage
 
@@ -855,6 +902,11 @@ This computes 5 metrics with GREEN/YELLOW/RED thresholds:
 
 Key insight: the **N_eff / N_params ratio** is the most fundamental constraint. With ~70-120 large-move events per horizon and 12-14 BO parameters, the ratio is only 10-20x, well below the 100x rule of thumb. This means BO has limited statistical budget and must be used conservatively.
 
+**Direction-aware scoring (2026-03-10 fixes):**
+
+- **Generalization gap**: Uses `max(gap_ratio, 0.0)` instead of `abs(gap_ratio)`. A negative gap means the model *improves* on full data (more training data helps) — this is expected and healthy, so it maps to GREEN rather than being falsely flagged.
+- **Temporal stability**: Uses `max(raw_gap, 0.0)` so that late folds being *better* than early folds (model improves with more data) maps to GREEN. Only flags when late folds are worse, which indicates genuine degradation.
+
 ### 13.2 Adaptive Event-Rate Guard
 
 **File:** `scripts/run_bayesian_opt.py`, `objective()` function
@@ -864,7 +916,7 @@ Key insight: the **N_eff / N_params ratio** is the most fundamental constraint. 
 **Solution:** After CV completes in each trial, the objective function computes the minimum event rate needed for N_eff/N_params >= 100x (GREEN zone), adapting to the actual dataset size and number of BO parameters:
 
 ```python
-n_params = 6 if lean else 14
+n_params = max(len(trial.params), 1)
 n_oof = len(oof_df)
 min_er_target = max((100 * n_params) / (2 * n_oof), 0.03)
 
@@ -879,7 +931,7 @@ if float(er_by_horizon.min()) < min_er_target:
 - Solving: event_rate >= (100 × n_params) / (2 × n_samples)
 - Floor at 3% absolute minimum (below this, calibration is meaningless regardless of dataset size)
 
-**Examples by dataset size (lean mode, 6 params):**
+**Examples by dataset size (legacy 6-parameter threshold-tuning case):**
 
 | Dataset | OOF samples | Adaptive min ER | Events at min | N_eff/N_params |
 |---------|-------------|-----------------|---------------|----------------|
@@ -905,15 +957,15 @@ if float(er_by_horizon.min()) < min_er_target:
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
 | `em_sde/calibration.py` | Online/multi-feature/regime-MF calibrators, histogram post-calibration, safety gates |
 | `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, implied vol blending |
-| `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, all scoring metrics |
-| `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates |
+| `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, PIT, tail coverage, paired bootstrap tests |
+| `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates, density gates, benchmark/conditional reports |
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
 | `em_sde/run.py` | CLI entry point |
 | `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
 | `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
-| `tests/test_framework.py` | 229 unit tests |
+| `tests/test_framework.py` | 296 unit tests |
 
 ---
 

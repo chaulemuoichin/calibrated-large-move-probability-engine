@@ -1,0 +1,18 @@
+calibration:
+  ensemble_weights:
+  - 0.5
+  - 0.3
+  - 0.2
+data:
+  end: '2024-12-31'
+  source: synthetic
+  start: '2015-01-01'
+model:
+  horizons:
+  - 5
+  - 10
+  - 20
+  scheduled_jump_lookback_events: 8
+  scheduled_jump_min_events: 4
+  scheduled_jump_scale: 1.25
+  scheduled_jump_variance: true

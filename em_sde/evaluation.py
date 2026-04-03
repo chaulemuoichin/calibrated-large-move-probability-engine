@@ -1,6 +1,5 @@
 """
-Evaluation metrics: Brier score, LogLoss, AUC-ROC, and separation for both
-overlapping (all days) and non-overlapping (every H days) windows.
+Evaluation metrics: calibration, discrimination, and density diagnostics.
 """
 
 import numpy as np
@@ -232,6 +231,152 @@ def crps_from_quantiles(
             crps_i += (cdf_mid - ind) ** 2 * width
         total_crps += crps_i
     return float(total_crps / n)
+
+
+def crps_per_sample_from_quantiles(
+    quantiles: np.ndarray,
+    q_levels: np.ndarray,
+    realized: np.ndarray,
+) -> np.ndarray:
+    """Return one approximate CRPS value per observation."""
+    quantiles = np.asarray(quantiles, dtype=np.float64)
+    q_levels = np.asarray(q_levels, dtype=np.float64)
+    realized = np.asarray(realized, dtype=np.float64).reshape(-1)
+    if quantiles.ndim != 2 or quantiles.shape[0] != len(realized):
+        raise ValueError("quantiles must have shape (n_samples, n_quantiles)")
+    values = np.full(len(realized), np.nan, dtype=np.float64)
+    for i, obs in enumerate(realized):
+        if np.isnan(obs):
+            continue
+        q = quantiles[i]
+        crps_i = 0.0
+        for j in range(len(q_levels) - 1):
+            z_lo, z_hi = q[j], q[j + 1]
+            cdf_lo, cdf_hi = q_levels[j], q_levels[j + 1]
+            width = z_hi - z_lo
+            if width <= 0:
+                continue
+            z_mid = (z_lo + z_hi) / 2.0
+            ind = 1.0 if z_mid >= obs else 0.0
+            cdf_mid = (cdf_lo + cdf_hi) / 2.0
+            crps_i += (cdf_mid - ind) ** 2 * width
+        values[i] = crps_i
+    return values
+
+
+def pit_from_quantiles(
+    quantiles: np.ndarray,
+    q_levels: np.ndarray,
+    realized: np.ndarray,
+) -> np.ndarray:
+    """
+    Approximate PIT values from stored quantiles by piecewise-linear inversion.
+
+    Returns one PIT value per observation in [0, 1].
+    """
+    quantiles = np.asarray(quantiles, dtype=np.float64)
+    q_levels = np.asarray(q_levels, dtype=np.float64).reshape(-1)
+    realized = np.asarray(realized, dtype=np.float64).reshape(-1)
+    if quantiles.ndim != 2 or quantiles.shape[1] != len(q_levels):
+        raise ValueError("quantiles must have shape (n_samples, len(q_levels))")
+    if quantiles.shape[0] != len(realized):
+        raise ValueError("quantiles and realized must have the same number of rows")
+
+    pit = np.full(len(realized), np.nan, dtype=np.float64)
+    for i, obs in enumerate(realized):
+        if np.isnan(obs):
+            continue
+        q = quantiles[i]
+        finite = np.isfinite(q)
+        if finite.sum() < 2:
+            continue
+        q = q[finite]
+        levels = q_levels[finite]
+        if obs <= q[0]:
+            pit[i] = float(levels[0])
+            continue
+        if obs >= q[-1]:
+            pit[i] = float(levels[-1])
+            continue
+        idx = int(np.searchsorted(q, obs, side="right") - 1)
+        idx = min(max(idx, 0), len(q) - 2)
+        z_lo, z_hi = q[idx], q[idx + 1]
+        p_lo, p_hi = levels[idx], levels[idx + 1]
+        if z_hi <= z_lo:
+            pit[i] = float(0.5 * (p_lo + p_hi))
+        else:
+            w = (obs - z_lo) / (z_hi - z_lo)
+            pit[i] = float(p_lo + w * (p_hi - p_lo))
+    return pit
+
+
+def pit_ks_statistic(pit: np.ndarray) -> float:
+    """Kolmogorov-Smirnov distance of PIT values from Uniform(0,1)."""
+    pit = np.asarray(pit, dtype=np.float64)
+    pit = pit[np.isfinite(pit)]
+    n = len(pit)
+    if n == 0:
+        return np.nan
+    pit = np.sort(np.clip(pit, 0.0, 1.0))
+    empirical_cdf = np.arange(1, n + 1, dtype=np.float64) / n
+    empirical_cdf_left = np.arange(0, n, dtype=np.float64) / n
+    d_plus = np.max(empirical_cdf - pit)
+    d_minus = np.max(pit - empirical_cdf_left)
+    return float(max(d_plus, d_minus))
+
+
+def central_interval_coverage_error(
+    quantiles: np.ndarray,
+    q_levels: np.ndarray,
+    realized: np.ndarray,
+    lower_q: float,
+    upper_q: float,
+) -> float:
+    """
+    Absolute error between observed and nominal central interval coverage.
+    """
+    quantiles = np.asarray(quantiles, dtype=np.float64)
+    realized = np.asarray(realized, dtype=np.float64).reshape(-1)
+    q_levels = np.asarray(q_levels, dtype=np.float64).reshape(-1)
+    lower_idx = np.where(np.isclose(q_levels, lower_q))[0]
+    upper_idx = np.where(np.isclose(q_levels, upper_q))[0]
+    if len(lower_idx) == 0 or len(upper_idx) == 0:
+        return np.nan
+    lo = quantiles[:, int(lower_idx[0])]
+    hi = quantiles[:, int(upper_idx[0])]
+    mask = np.isfinite(realized) & np.isfinite(lo) & np.isfinite(hi)
+    if mask.sum() == 0:
+        return np.nan
+    covered = (realized[mask] >= lo[mask]) & (realized[mask] <= hi[mask])
+    nominal = float(upper_q - lower_q)
+    return float(abs(np.mean(covered) - nominal))
+
+
+def paired_bootstrap_loss_diff_pvalue(
+    model_loss: np.ndarray,
+    baseline_loss: np.ndarray,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> float:
+    """
+    One-sided paired bootstrap p-value for model beating baseline.
+
+    Null: mean(model_loss - baseline_loss) >= 0.
+    Alternative: model loss is lower than baseline loss.
+    """
+    model_loss = np.asarray(model_loss, dtype=np.float64).reshape(-1)
+    baseline_loss = np.asarray(baseline_loss, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(model_loss) & np.isfinite(baseline_loss)
+    if mask.sum() == 0:
+        return np.nan
+    diff = model_loss[mask] - baseline_loss[mask]
+    n = len(diff)
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot_means[b] = float(np.mean(diff[idx]))
+    return float(np.mean(boot_means >= 0.0))
 
 
 # ---------------------------------------------------------------------------

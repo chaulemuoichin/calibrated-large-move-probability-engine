@@ -15,7 +15,9 @@ If calibration is degrading performance, automatically falls back to raw.
 """
 
 import numpy as np
+import pandas as pd
 from collections import deque
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 # Clipping bounds to avoid log(0) and overflow
@@ -189,6 +191,358 @@ def _make_post_calibrator(method: str, n_bins: int, min_samples: int,
         return None
     else:
         raise ValueError(f"Unknown post_cal_method: {method!r}")
+
+
+def _sigmoid_array(x: np.ndarray) -> np.ndarray:
+    """Vectorized sigmoid with clipping for numerical stability."""
+    x_clip = np.clip(np.asarray(x, dtype=np.float64), -50.0, 50.0)
+    return 1.0 / (1.0 + np.exp(-x_clip))
+
+
+def _identity_weights(
+    multi_feature: bool,
+    beta_calibration: bool,
+    earnings_aware: bool,
+    implied_vol_aware: bool,
+    ohlc_aware: bool,
+) -> np.ndarray:
+    """Return identity mapping weights for the requested feature layout."""
+    if multi_feature:
+        n_base = 7 if beta_calibration else 6
+        n_optional = (
+            (1 if earnings_aware else 0)
+            + (1 if implied_vol_aware else 0)
+            + (3 if ohlc_aware else 0)
+        )
+        n_features = n_base + n_optional
+    else:
+        n_features = 3 if beta_calibration else 2
+
+    w = np.zeros(n_features, dtype=np.float64)
+    if beta_calibration:
+        w[1] = 1.0
+        w[2] = -1.0
+    else:
+        w[1] = 1.0
+    return w
+
+
+def _build_feature_vector(
+    p_raw: float,
+    sigma_1d: float = 0.0,
+    delta_sigma: float = 0.0,
+    vol_ratio: float = 1.0,
+    vol_of_vol: float = 0.0,
+    earnings_proximity: float = 0.0,
+    implied_vol_ratio: float = 1.0,
+    range_vol_ratio: float = 1.0,
+    overnight_gap: float = 0.0,
+    intraday_range: float = 0.0,
+    *,
+    multi_feature: bool,
+    beta_calibration: bool,
+    earnings_aware: bool,
+    implied_vol_aware: bool,
+    ohlc_aware: bool,
+) -> np.ndarray:
+    """Build a feature vector for online or offline calibration."""
+    p_clipped = np.clip(p_raw, _CLIP_LO, _CLIP_HI)
+
+    if multi_feature:
+        if beta_calibration:
+            features = [
+                1.0,
+                float(np.log(p_clipped)),
+                float(np.log1p(-p_clipped)),
+                sigma_1d * 100.0,
+                delta_sigma * 100.0,
+                vol_ratio,
+                vol_of_vol * 100.0,
+            ]
+        else:
+            features = [
+                1.0,
+                logit(p_raw),
+                sigma_1d * 100.0,
+                delta_sigma * 100.0,
+                vol_ratio,
+                vol_of_vol * 100.0,
+            ]
+        if earnings_aware:
+            features.append(earnings_proximity)
+        if implied_vol_aware:
+            features.append(implied_vol_ratio)
+        if ohlc_aware:
+            features.extend([
+                range_vol_ratio,
+                overnight_gap * 100.0,
+                intraday_range * 100.0,
+            ])
+    else:
+        if beta_calibration:
+            features = [
+                1.0,
+                float(np.log(p_clipped)),
+                float(np.log1p(-p_clipped)),
+            ]
+        else:
+            features = [1.0, logit(p_raw)]
+
+    return np.asarray(features, dtype=np.float64)
+
+
+def _results_sigma_column(results: pd.DataFrame, horizon: int) -> str | None:
+    """Return the best available sigma column for a horizon in backtest results."""
+    candidates = (
+        f"sigma_forecast_{horizon}",
+        "sigma_har_rv_1d",
+        "sigma_garch_1d",
+    )
+    for col in candidates:
+        if col in results.columns:
+            return col
+    return None
+
+
+def _results_column(
+    results: pd.DataFrame,
+    column: str,
+    default: float,
+) -> np.ndarray:
+    """Fetch a float column from backtest results with a scalar default."""
+    if column in results.columns:
+        values = results[column].to_numpy(dtype=np.float64, copy=False)
+        if np.isfinite(values).all():
+            return values
+        filled = values.copy()
+        filled[~np.isfinite(filled)] = default
+        return filled
+    return np.full(len(results), default, dtype=np.float64)
+
+
+def _build_feature_matrix_from_results(
+    results: pd.DataFrame,
+    horizon: int,
+    *,
+    multi_feature: bool,
+    beta_calibration: bool,
+    earnings_aware: bool,
+    implied_vol_aware: bool,
+    ohlc_aware: bool,
+) -> np.ndarray:
+    """Construct a calibration design matrix from walk-forward results."""
+    p_raw = results[f"p_raw_{horizon}"].to_numpy(dtype=np.float64, copy=False)
+    sigma_col = _results_sigma_column(results, horizon)
+    sigma = (
+        results[sigma_col].to_numpy(dtype=np.float64, copy=False)
+        if sigma_col is not None
+        else np.zeros(len(results), dtype=np.float64)
+    )
+    delta_sigma = _results_column(results, "delta_sigma", 0.0)
+    vol_ratio = _results_column(results, "vol_ratio", 1.0)
+    vol_of_vol = _results_column(results, "vol_of_vol", 0.0)
+    earnings = _results_column(results, "earnings_proximity", 0.0)
+    implied = _results_column(results, f"iv_ratio_{horizon}", 1.0)
+    range_ratio = _results_column(results, "range_vol_ratio", 1.0)
+    overnight = _results_column(results, "overnight_gap", 0.0)
+    intraday = _results_column(results, "intraday_range", 0.0)
+
+    rows = [
+        _build_feature_vector(
+            float(p),
+            float(sig),
+            float(ds),
+            float(vr),
+            float(vov),
+            float(ep),
+            float(ivr),
+            float(rr),
+            float(og),
+            float(ir),
+            multi_feature=multi_feature,
+            beta_calibration=beta_calibration,
+            earnings_aware=earnings_aware,
+            implied_vol_aware=implied_vol_aware,
+            ohlc_aware=ohlc_aware,
+        )
+        for p, sig, ds, vr, vov, ep, ivr, rr, og, ir in zip(
+            p_raw, sigma, delta_sigma, vol_ratio, vol_of_vol, earnings,
+            implied, range_ratio, overnight, intraday,
+        )
+    ]
+    return np.vstack(rows) if rows else np.empty((0, 0), dtype=np.float64)
+
+
+def _fit_logistic_irls(
+    X: np.ndarray,
+    y: np.ndarray,
+    w_init: np.ndarray,
+    l2_reg: float,
+    max_iter: int,
+    tol: float = 1e-8,
+) -> np.ndarray:
+    """Penalized logistic regression via IRLS."""
+    w = np.asarray(w_init, dtype=np.float64).copy()
+    penalty = np.ones(X.shape[1], dtype=np.float64)
+    penalty[0] = 0.0
+
+    for _ in range(max_iter):
+        eta = X @ w
+        p = _sigmoid_array(eta)
+        w_diag = np.clip(p * (1.0 - p), 1e-6, None)
+        z = eta + (y - p) / w_diag
+        xtw = X.T * w_diag
+        lhs = xtw @ X + l2_reg * np.diag(penalty)
+        rhs = xtw @ z
+        try:
+            w_new = np.linalg.solve(lhs, rhs)
+        except np.linalg.LinAlgError:
+            w_new = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
+        if np.linalg.norm(w_new - w) <= tol * (1.0 + np.linalg.norm(w)):
+            w = w_new
+            break
+        w = w_new
+
+    return w
+
+
+@dataclass
+class OfflinePooledCalibrator:
+    """Batch calibrator fit on train rows and applied to held-out fold rows."""
+
+    weights: np.ndarray
+    multi_feature: bool
+    beta_calibration: bool
+    earnings_aware: bool
+    implied_vol_aware: bool
+    ohlc_aware: bool
+    histogram_calibrator: Optional[HistogramCalibrator] = None
+    n_train: int = 0
+    event_rate: float = np.nan
+
+    def calibrate_frame(self, results: pd.DataFrame, horizon: int) -> np.ndarray:
+        """Apply the fitted offline calibrator to a results slice."""
+        if len(results) == 0:
+            return np.empty(0, dtype=np.float64)
+        X = _build_feature_matrix_from_results(
+            results,
+            horizon,
+            multi_feature=self.multi_feature,
+            beta_calibration=self.beta_calibration,
+            earnings_aware=self.earnings_aware,
+            implied_vol_aware=self.implied_vol_aware,
+            ohlc_aware=self.ohlc_aware,
+        )
+        p = _sigmoid_array(X @ self.weights)
+        if self.histogram_calibrator is not None:
+            p = np.asarray(
+                [self.histogram_calibrator.calibrate(float(v)) for v in p],
+                dtype=np.float64,
+            )
+        return np.clip(p, 0.0, 1.0)
+
+
+def fit_offline_pooled_calibrator(
+    train_results: pd.DataFrame,
+    horizon: int,
+    *,
+    multi_feature: bool,
+    l2_reg: float,
+    max_iter: int,
+    beta_calibration: bool,
+    earnings_aware: bool,
+    implied_vol_aware: bool,
+    ohlc_aware: bool,
+    post_cal_method: str,
+    histogram_n_bins: int,
+    histogram_min_samples: int,
+    histogram_prior_strength: float,
+    histogram_monotonic: bool,
+    histogram_interpolate: bool,
+) -> OfflinePooledCalibrator:
+    """Fit a batch calibrator on walk-forward-safe train rows."""
+    identity = _identity_weights(
+        multi_feature,
+        beta_calibration,
+        earnings_aware,
+        implied_vol_aware,
+        ohlc_aware,
+    )
+    y_col = f"y_{horizon}"
+    p_col = f"p_raw_{horizon}"
+    if y_col not in train_results.columns or p_col not in train_results.columns:
+        return OfflinePooledCalibrator(
+            weights=identity,
+            multi_feature=multi_feature,
+            beta_calibration=beta_calibration,
+            earnings_aware=earnings_aware,
+            implied_vol_aware=implied_vol_aware,
+            ohlc_aware=ohlc_aware,
+        )
+
+    mask = (
+        train_results[y_col].notna()
+        & train_results[p_col].notna()
+    )
+    train = train_results.loc[mask].copy()
+    if len(train) == 0:
+        return OfflinePooledCalibrator(
+            weights=identity,
+            multi_feature=multi_feature,
+            beta_calibration=beta_calibration,
+            earnings_aware=earnings_aware,
+            implied_vol_aware=implied_vol_aware,
+            ohlc_aware=ohlc_aware,
+        )
+
+    X = _build_feature_matrix_from_results(
+        train,
+        horizon,
+        multi_feature=multi_feature,
+        beta_calibration=beta_calibration,
+        earnings_aware=earnings_aware,
+        implied_vol_aware=implied_vol_aware,
+        ohlc_aware=ohlc_aware,
+    )
+    y = train[y_col].to_numpy(dtype=np.float64, copy=False)
+    if len(np.unique(y)) < 2 or len(train) < max(X.shape[1] * 5, 30):
+        return OfflinePooledCalibrator(
+            weights=identity,
+            multi_feature=multi_feature,
+            beta_calibration=beta_calibration,
+            earnings_aware=earnings_aware,
+            implied_vol_aware=implied_vol_aware,
+            ohlc_aware=ohlc_aware,
+            n_train=int(len(train)),
+            event_rate=float(np.mean(y)) if len(y) else np.nan,
+        )
+
+    weights = _fit_logistic_irls(X, y, identity, l2_reg=l2_reg, max_iter=max_iter)
+
+    histogram_calibrator = _make_post_calibrator(
+        post_cal_method,
+        histogram_n_bins,
+        histogram_min_samples,
+        histogram_prior_strength,
+        histogram_monotonic,
+        interpolate=histogram_interpolate,
+    )
+    if histogram_calibrator is not None:
+        train_p = _sigmoid_array(X @ weights)
+        for p_i, y_i in zip(train_p, y):
+            histogram_calibrator.update(float(p_i), float(y_i))
+
+    return OfflinePooledCalibrator(
+        weights=weights,
+        multi_feature=multi_feature,
+        beta_calibration=beta_calibration,
+        earnings_aware=earnings_aware,
+        implied_vol_aware=implied_vol_aware,
+        ohlc_aware=ohlc_aware,
+        histogram_calibrator=histogram_calibrator,
+        n_train=int(len(train)),
+        event_rate=float(np.mean(y)),
+    )
 
 
 class OnlineCalibrator:
@@ -434,25 +788,33 @@ class RegimeMultiFeatureCalibrator:
                   delta_sigma: float, vol_ratio: float,
                   vol_of_vol: float,
                   earnings_proximity: float = 0.0,
-                  implied_vol_ratio: float = 1.0) -> float:
+                  implied_vol_ratio: float = 1.0,
+                  range_vol_ratio: float = 1.0,
+                  overnight_gap: float = 0.0,
+                  intraday_range: float = 0.0) -> float:
         """Apply regime-specific multi-feature calibration."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         return self.calibrators[regime].calibrate(
             p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-            earnings_proximity, implied_vol_ratio)
+            earnings_proximity, implied_vol_ratio,
+            range_vol_ratio, overnight_gap, intraday_range)
 
     def update(self, p_raw: float, y: float, sigma_1d: float,
                delta_sigma: float, vol_ratio: float,
                vol_of_vol: float,
                earnings_proximity: float = 0.0,
-               implied_vol_ratio: float = 1.0) -> None:
+               implied_vol_ratio: float = 1.0,
+               range_vol_ratio: float = 1.0,
+               overnight_gap: float = 0.0,
+               intraday_range: float = 0.0) -> None:
         """Update the regime-specific multi-feature calibrator."""
         self._init_calibrators()
         regime = self._get_regime(sigma_1d)
         self.calibrators[regime].update(
             p_raw, y, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-            earnings_proximity, implied_vol_ratio)
+            earnings_proximity, implied_vol_ratio,
+            range_vol_ratio, overnight_gap, intraday_range)
 
     def state(self) -> Dict:
         """Return state of the currently active regime calibrator."""
@@ -509,13 +871,19 @@ class MultiFeatureCalibrator:
                  post_cal_method: str = "",
                  earnings_aware: bool = False,
                  beta_calibration: bool = False,
-                 implied_vol_aware: bool = False):
+                 implied_vol_aware: bool = False,
+                 ohlc_aware: bool = False):
         self.earnings_aware = earnings_aware
         self.beta_calibration = beta_calibration
         self.implied_vol_aware = implied_vol_aware
+        self.ohlc_aware = ohlc_aware
         # Beta cal splits logit(p) into log(p) + log(1-p), adding 1 feature
         n_base = 7 if beta_calibration else 6
-        n_optional = (1 if earnings_aware else 0) + (1 if implied_vol_aware else 0)
+        n_optional = (
+            (1 if earnings_aware else 0)
+            + (1 if implied_vol_aware else 0)
+            + (3 if ohlc_aware else 0)
+        )
         self.N_FEATURES = n_base + n_optional
         self.w = np.zeros(self.N_FEATURES)
         if beta_calibration:
@@ -564,12 +932,15 @@ class MultiFeatureCalibrator:
                         delta_sigma: float, vol_ratio: float,
                         vol_of_vol: float,
                         earnings_proximity: float = 0.0,
-                        implied_vol_ratio: float = 1.0) -> np.ndarray:
+                        implied_vol_ratio: float = 1.0,
+                        range_vol_ratio: float = 1.0,
+                        overnight_gap: float = 0.0,
+                        intraday_range: float = 0.0) -> np.ndarray:
         """Build feature vector from raw inputs.
 
         Standard mode (6 features): [1, logit(p), sigma, delta_sigma, vol_ratio, vol_of_vol]
         Beta calibration (7 features): [1, log(p), log(1-p), sigma, delta_sigma, vol_ratio, vol_of_vol]
-        + optional: earnings_proximity, implied_vol_ratio
+        + optional: earnings_proximity, implied_vol_ratio, OHLC realized-state features
         """
         p_clipped = np.clip(p_raw, _CLIP_LO, _CLIP_HI)
         if self.beta_calibration:
@@ -595,28 +966,42 @@ class MultiFeatureCalibrator:
             features.append(earnings_proximity)  # 0=far from earnings, 1=earnings day
         if self.implied_vol_aware:
             features.append(implied_vol_ratio)   # sigma_implied / sigma_hist (centered ~1.0)
+        if self.ohlc_aware:
+            features.extend([
+                range_vol_ratio,
+                overnight_gap * 100.0,
+                intraday_range * 100.0,
+            ])
         return np.array(features)
 
     def _compute_cal(self, p_raw: float, sigma_1d: float,
                      delta_sigma: float, vol_ratio: float,
                      vol_of_vol: float,
                      earnings_proximity: float = 0.0,
-                     implied_vol_ratio: float = 1.0) -> float:
+                     implied_vol_ratio: float = 1.0,
+                     range_vol_ratio: float = 1.0,
+                     overnight_gap: float = 0.0,
+                     intraday_range: float = 0.0) -> float:
         """Apply the logistic mapping (internal, ignoring gate)."""
         if self.n_updates < self.min_updates:
             return p_raw
         x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-                                 earnings_proximity, implied_vol_ratio)
+                                 earnings_proximity, implied_vol_ratio,
+                                 range_vol_ratio, overnight_gap, intraday_range)
         return sigmoid(float(self.w @ x))
 
     def calibrate(self, p_raw: float, sigma_1d: float,
                   delta_sigma: float, vol_ratio: float,
                   vol_of_vol: float,
                   earnings_proximity: float = 0.0,
-                  implied_vol_ratio: float = 1.0) -> float:
+                  implied_vol_ratio: float = 1.0,
+                  range_vol_ratio: float = 1.0,
+                  overnight_gap: float = 0.0,
+                  intraday_range: float = 0.0) -> float:
         """Apply calibration. Falls back to raw if safety gate triggers."""
         p_cal = self._compute_cal(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-                                  earnings_proximity, implied_vol_ratio)
+                                  earnings_proximity, implied_vol_ratio,
+                                  range_vol_ratio, overnight_gap, intraday_range)
         if self.safety_gate and self._gate_active:
             return p_raw
         if self.gate_on_discrimination and self._discrimination_gate_active:
@@ -629,10 +1014,14 @@ class MultiFeatureCalibrator:
                delta_sigma: float, vol_ratio: float,
                vol_of_vol: float,
                earnings_proximity: float = 0.0,
-               implied_vol_ratio: float = 1.0) -> None:
+               implied_vol_ratio: float = 1.0,
+               range_vol_ratio: float = 1.0,
+               overnight_gap: float = 0.0,
+               intraday_range: float = 0.0) -> None:
         """Update weights via SGD on label resolution."""
         x = self._build_features(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol,
-                                 earnings_proximity, implied_vol_ratio)
+                                 earnings_proximity, implied_vol_ratio,
+                                 range_vol_ratio, overnight_gap, intraday_range)
         p_cal = sigmoid(float(self.w @ x))
         error = y - p_cal
 

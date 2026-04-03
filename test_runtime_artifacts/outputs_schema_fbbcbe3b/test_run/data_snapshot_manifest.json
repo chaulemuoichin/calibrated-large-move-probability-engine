@@ -1,0 +1,12 @@
+{
+  "run_id": "test_run",
+  "ticker": "SPY",
+  "rows": 501,
+  "columns": [
+    "price"
+  ],
+  "dataset_hash": null,
+  "source_requested": null,
+  "field_used": null,
+  "strict_validation": null
+}

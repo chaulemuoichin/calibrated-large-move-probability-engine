@@ -15,6 +15,7 @@ import re
 import tempfile
 import subprocess
 import io
+import uuid
 from contextlib import contextmanager
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -30,10 +31,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from em_sde.monte_carlo import simulate_gbm_terminal, simulate_garch_terminal, compute_move_probability, QUANTILE_LEVELS
 from em_sde.calibration import OnlineCalibrator, MultiFeatureCalibrator, RegimeMultiFeatureCalibrator, sigmoid, logit
-from em_sde.garch import fit_har_rv, HarRvResult, compute_realized_variance
+from em_sde.garch import fit_har_rv, fit_har_ohlc, HarRvResult, compute_realized_variance
 from em_sde.evaluation import (
     brier_score, log_loss, auc_roc, separation, compute_metrics,
     brier_skill_score, effective_sample_size, crps_from_quantiles,
+    pit_from_quantiles, pit_ks_statistic, central_interval_coverage_error,
     value_at_risk, conditional_var, return_skewness, return_kurtosis,
     max_drawdown, compute_risk_report,
 )
@@ -42,7 +44,11 @@ from em_sde.garch import fit_garch, GarchResult, project_to_stationary, garch_te
 from em_sde.monte_carlo import compute_state_dependent_jumps
 from em_sde.evaluation import expected_calibration_error
 from em_sde.calibration import HistogramCalibrator
-from em_sde.model_selection import apply_promotion_gates, apply_promotion_gates_oof
+from em_sde.model_selection import (
+    apply_promotion_gates, apply_promotion_gates_oof,
+    compute_benchmark_report, compute_pairwise_significance_report,
+    compute_conditional_gate_report_oof,
+)
 from em_sde.backtest import run_walkforward
 from em_sde.output import write_outputs
 from em_sde.evaluation import compute_reliability
@@ -66,6 +72,15 @@ def p_and_se(terminal_prices: np.ndarray, s0: float, threshold: float) -> tuple[
     """Extract (p_raw, se) from a 2-or-3 tuple return."""
     result = compute_move_probability(terminal_prices, s0, threshold)
     return float(result[0]), float(result[1])
+
+
+def workspace_temp_dir(prefix: str) -> Path:
+    """Create a temp directory under the repo workspace, not the OS temp root."""
+    root = Path("test_runtime_artifacts")
+    root.mkdir(exist_ok=True)
+    path = root / f"{prefix}_{uuid.uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 # ============================================================
@@ -413,7 +428,7 @@ class TestOutputsSchema:
         dates = pd.bdate_range("2020-01-01", periods=n_days + 1)
         df = pd.DataFrame({"price": prices}, index=dates)
 
-        out_dir = tempfile.mkdtemp()
+        out_dir = workspace_temp_dir("outputs_schema")
         cfg = PipelineConfig(
             data=DataConfig(source="synthetic", min_rows=252),
             model=ModelConfig(
@@ -429,15 +444,17 @@ class TestOutputsSchema:
                 ensemble_enabled=True,
                 ensemble_weights=[0.5, 0.3, 0.2],
             ),
-            output=OutputConfig(base_dir=out_dir, charts=True),
+            output=OutputConfig(base_dir=str(out_dir), charts=True),
         )
 
         results = run_walkforward(df, cfg)
         metrics = compute_metrics(results, cfg.model.horizons)
         reliability = compute_reliability(results, cfg.model.horizons)
         run_id = "test_run"
-        final_dir = write_outputs(results, reliability, metrics,
-                                  {"ticker": "SYNTH"}, cfg, run_id)
+        final_dir = write_outputs(
+            results, reliability, metrics,
+            {"ticker": "SYNTH"}, cfg, run_id, prices=df,
+        )
         return results, final_dir, cfg
 
     def test_results_csv_columns(self):
@@ -487,6 +504,38 @@ class TestOutputsSchema:
         assert "sigma_1d" in uc
         assert "sigma_year" in uc
         assert "simulation_dt" in uc
+
+    def test_data_snapshot_artifacts_written(self):
+        """Institutional outputs should include data snapshot + manifest."""
+        _, out_dir, _ = self._run_mini_pipeline()
+
+        snapshot_path = out_dir / "data_snapshot.csv"
+        manifest_path = out_dir / "data_snapshot_manifest.json"
+        assert snapshot_path.exists(), "data_snapshot.csv not found"
+        assert manifest_path.exists(), "data_snapshot_manifest.json not found"
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        assert "dataset_hash" in manifest
+        assert "columns" in manifest
+
+    def test_artifact_manifest_and_run_registry_written(self):
+        """Outputs should include immutable artifact hashes and append the run registry."""
+        _, out_dir, _ = self._run_mini_pipeline()
+
+        artifact_manifest = out_dir / "artifact_manifest.json"
+        registry_path = out_dir.parent / "run_registry.jsonl"
+        assert artifact_manifest.exists(), "artifact_manifest.json not found"
+        assert registry_path.exists(), "run_registry.jsonl not found"
+
+        with open(artifact_manifest) as f:
+            manifest = json.load(f)
+        assert "files" in manifest and len(manifest["files"]) > 0
+        assert all("sha256" in row for row in manifest["files"])
+
+        with open(registry_path) as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        assert any(entry.get("run_id") == "test_run" for entry in entries)
 
     def test_charts_generated(self):
         """All 4 required chart PNGs must be generated."""
@@ -539,6 +588,42 @@ class TestOutputsSchema:
 
             assert np.all(lo[mask] <= p[mask] + 1e-10), f"ci_low > p_raw for H={H}"
             assert np.all(hi[mask] >= p[mask] - 1e-10), f"ci_high < p_raw for H={H}"
+
+    def test_walkforward_records_ohlc_state_features(self):
+        """When OHLC is present, walk-forward should emit realized-state features."""
+        rng = np.random.default_rng(42)
+        n_days = 320
+        returns = rng.normal(0.0002, 0.01, size=n_days)
+        prices = 100.0 * np.exp(np.concatenate([[0], np.cumsum(returns)]))
+        opens = prices * np.exp(rng.normal(0.0, 0.002, size=n_days + 1))
+        highs = np.maximum(opens, prices) * 1.01
+        lows = np.minimum(opens, prices) * 0.99
+        dates = pd.bdate_range("2020-01-01", periods=n_days + 1)
+        df = pd.DataFrame({
+            "price": prices,
+            "open": opens,
+            "high": highs,
+            "low": lows,
+        }, index=dates)
+
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=252),
+            model=ModelConfig(
+                horizons=[5],
+                garch_window=252,
+                garch_min_window=252,
+                mc_base_paths=500,
+                mc_boost_paths=500,
+                seed=42,
+                ohlc_features_enabled=True,
+            ),
+            calibration=CalibrationConfig(multi_feature=True, multi_feature_min_updates=5),
+            output=OutputConfig(base_dir=str(workspace_temp_dir("ohlc_walkforward")), charts=False),
+        )
+
+        results = run_walkforward(df, cfg)
+        for col in ["range_vol_ratio", "overnight_gap", "intraday_range"]:
+            assert col in results.columns
 
 
 # ============================================================
@@ -1231,6 +1316,34 @@ class TestCRPS:
         assert crps_narrow < crps_wide, \
             f"Narrow CRPS ({crps_narrow:.6f}) should beat wide ({crps_wide:.6f})"
 
+    def test_pit_ks_detects_better_calibrated_quantiles(self):
+        """Better-aligned quantiles should have lower PIT KS distance."""
+        q_levels = QUANTILE_LEVELS
+        rng = np.random.default_rng(42)
+        realized = rng.normal(0.0, 0.02, 400)
+        calibrated = np.array([
+            np.quantile(rng.normal(0.0, 0.02, 4000), q_levels) for _ in realized
+        ])
+        miscalibrated = np.array([
+            np.quantile(rng.normal(0.03, 0.005, 4000), q_levels) for _ in realized
+        ])
+
+        pit_good = pit_from_quantiles(calibrated, q_levels, realized)
+        pit_bad = pit_from_quantiles(miscalibrated, q_levels, realized)
+
+        assert pit_ks_statistic(pit_good) < pit_ks_statistic(pit_bad)
+
+    def test_central_interval_coverage_error_zero_when_exact(self):
+        """Coverage error should be near zero when realized points match the interval."""
+        q_levels = QUANTILE_LEVELS
+        quantiles = np.array([
+            [-0.10, -0.05, -0.03, -0.01, 0.00, 0.01, 0.03, 0.05, 0.10],
+            [-0.10, -0.05, -0.03, -0.01, 0.00, 0.01, 0.03, 0.05, 0.10],
+        ])
+        realized = np.array([0.0, 0.02])
+        err = central_interval_coverage_error(quantiles, q_levels, realized, 0.05, 0.95)
+        assert err < 0.11
+
 
 # ============================================================
 # Test: Quantile Storage (Phase 3D)
@@ -1299,6 +1412,28 @@ class TestModelSelection:
         rank_values = np.asarray(summary.loc[summary["config_name"] == "B", "rank"], dtype=int)
         assert rank_values.size == 1
         assert int(rank_values[0]) == 1
+
+    def test_compare_models_keeps_nan_rank_nullable(self):
+        """compare_models should not crash when a config has non-finite BSS."""
+        from em_sde.model_selection import compare_models
+
+        cv_data = pd.DataFrame([
+            {"config_name": "A", "fold": 0, "horizon": 5, "bss_cal": np.nan, "auc_cal": 0.55,
+             "brier_cal": 0.04, "logloss_cal": 0.18, "separation_cal": 0.01, "brier_raw": 0.04,
+             "bss_raw": 0.0, "auc_raw": 0.50, "event_rate": 0.05, "n": 100},
+            {"config_name": "B", "fold": 0, "horizon": 5, "bss_cal": 0.05, "auc_cal": 0.65,
+             "brier_cal": 0.035, "logloss_cal": 0.16, "separation_cal": 0.02, "brier_raw": 0.04,
+             "bss_raw": 0.0, "auc_raw": 0.50, "event_rate": 0.05, "n": 100},
+        ])
+
+        summary = compare_models(cv_data)
+
+        assert len(summary) == 2
+        assert str(summary["rank"].dtype) == "Int64"
+        rank_a = summary.loc[summary["config_name"] == "A", "rank"].iloc[0]
+        rank_b = summary.loc[summary["config_name"] == "B", "rank"].iloc[0]
+        assert pd.isna(rank_a)
+        assert int(rank_b) == 1
 
 
 # ============================================================
@@ -1400,6 +1535,74 @@ class TestDataQuality:
         assert "skewness" in stats
         assert "kurtosis" in stats
         assert "n_trading_days" in stats
+
+    def test_load_csv_preserves_ohlcv_columns(self):
+        """CSV loader should preserve canonical OHLCV columns when present."""
+        from em_sde.data_layer import load_data
+
+        temp_dir = workspace_temp_dir("ohlcv_loader")
+        csv_path = temp_dir / "ohlcv.csv"
+        csv_path.write_text(
+            "Date,Open,High,Low,Close,Volume\n"
+            "2020-01-02,100,102,99,101,1000\n"
+            "2020-01-03,101,103,100,102,1100\n"
+            "2020-01-06,102,104,101,103,1200\n"
+            "2020-01-07,103,105,102,104,1300\n"
+            "2020-01-08,104,106,103,105,1400\n"
+            "2020-01-09,105,107,104,106,1500\n"
+            "2020-01-10,106,108,105,107,1600\n"
+            "2020-01-13,107,109,106,108,1700\n"
+            "2020-01-14,108,110,107,109,1800\n"
+            "2020-01-15,109,111,108,110,1900\n"
+        )
+        cfg = PipelineConfig(
+            data=DataConfig(source="csv", csv_path=str(csv_path), min_rows=5),
+        )
+        df, meta = load_data(cfg)
+
+        for col in ["price", "open", "high", "low", "volume"]:
+            assert col in df.columns, f"Missing canonical column: {col}"
+        assert meta["has_ohlc"] is True
+        assert meta["has_volume"] is True
+        assert meta["dataset_hash"]
+
+    def test_strict_validation_rejects_split_like_moves(self):
+        """Strict validation should hard-fail obvious split-like jumps."""
+        from em_sde.data_layer import load_data
+
+        temp_dir = workspace_temp_dir("split_like")
+        csv_path = temp_dir / "split_like.csv"
+        csv_path.write_text(
+            "Date,Close\n"
+            "2020-01-02,100\n"
+            "2020-01-03,101\n"
+            "2020-01-06,50\n"
+            "2020-01-07,51\n"
+            "2020-01-08,52\n"
+        )
+        cfg = PipelineConfig(
+            data=DataConfig(
+                source="csv", csv_path=str(csv_path), min_rows=5,
+                strict_validation=True,
+            ),
+        )
+        with assert_raises(ValueError, "split_like_moves"):
+            load_data(cfg)
+
+    def test_detect_ohlc_inconsistencies_ignores_float_equality_noise(self):
+        """Boundary-equality OHLC rows should not fail on tiny float noise."""
+        from em_sde.data_layer import detect_ohlc_inconsistencies
+
+        dates = pd.bdate_range("2020-01-01", periods=3)
+        df = pd.DataFrame({
+            "price": [100.0, 101.0, 102.0],
+            "open": [100.0, 100.5, 101.5],
+            "high": [100.0 - 1e-12, 101.0 + 1e-12, 102.0 - 1e-12],
+            "low": [100.0, 100.5 - 1e-12, 101.5],
+        }, index=dates)
+
+        issues = detect_ohlc_inconsistencies(df)
+        assert issues["n_ohlc_issues"] == 0
 
 
 # ============================================================
@@ -2243,14 +2446,21 @@ class TestPromotionGatesOOF:
         y = (rng.random(n) < event_rate).astype(float)
         p_cal = np.clip(y * 0.3 + (1 - y) * 0.05 + bias + rng.normal(0, 0.02, n), 0.01, 0.99)
         sigma = rng.uniform(0.01, 0.03, n)
-        return pd.DataFrame({
+        realized = rng.normal(0.0, 0.02, n)
+        q_base = np.quantile(rng.normal(0.0, 0.02, 6000), QUANTILE_LEVELS)
+        quantiles = np.repeat(q_base.reshape(1, -1), n, axis=0)
+        data = pd.DataFrame({
             "config_name": "test",
             "fold": np.repeat(range(5), n // 5),
             "horizon": 5,
             "p_cal": p_cal,
             "y": y,
             "sigma_1d": sigma,
+            "realized_return": realized,
         })
+        for i, q in enumerate(QUANTILE_LEVELS):
+            data[f"q{int(q * 100):02d}"] = quantiles[:, i]
+        return data
 
     def test_oof_gates_passing(self):
         """Well-calibrated OOF predictions should pass gates."""
@@ -2379,6 +2589,119 @@ class TestPromotionGatesOOF:
         assert all(report["status"] == "insufficient_data")
         assert all(report["insufficient_reason"] == "too_few_nonevents")
         assert all(report["promotion_status"] == "UNDECIDED")
+
+    def test_oof_density_gates_add_metrics(self):
+        """Density gates should append CRPS/PIT/tail metrics when quantiles exist."""
+        oof = self._make_oof(n=300)
+        report = apply_promotion_gates_oof(
+            oof,
+            min_samples=30,
+            min_events=5,
+            min_nonevents=5,
+            density_gates={"crps_skill": -1.0, "pit_ks": 1.0, "tail_cov_error": 1.0},
+            pooled_gate=True,
+        )
+        metrics = set(report["metric"].unique())
+        assert "crps_skill" in metrics
+        assert "pit_ks" in metrics
+        assert "tail_cov_error" in metrics
+
+    def test_oof_density_unavailable_blocks_promotion(self):
+        """If density gates are required but quantiles are missing, promotion is UNDECIDED."""
+        oof = self._make_oof(n=300).drop(columns=["realized_return", "q01", "q05", "q10", "q25", "q50", "q75", "q90", "q95", "q99"])
+        report = apply_promotion_gates_oof(
+            oof,
+            min_samples=30,
+            min_events=5,
+            min_nonevents=5,
+            density_gates={"crps_skill": 0.0},
+            pooled_gate=True,
+        )
+        density_rows = report[report["metric"] == "crps_skill"]
+        assert (density_rows["status"] == "unavailable_density").any()
+        assert (report["promotion_status"] == "UNDECIDED").all()
+
+    def test_oof_overfit_red_fails_promotion(self):
+        """A RED overfit horizon should fail promotion when overfit is required."""
+        oof = self._make_oof(n=300)
+        overfit = pd.DataFrame([
+            {"metric": "gen_gap", "horizon": 5, "status": "RED"},
+        ])
+        report = apply_promotion_gates_oof(
+            oof,
+            min_samples=30,
+            min_events=5,
+            min_nonevents=5,
+            density_gates={"crps_skill": -1.0},
+            overfit_report=overfit,
+            require_overfit=True,
+            pooled_gate=True,
+        )
+        overfit_rows = report[report["metric"] == "overfit_status"]
+        assert len(overfit_rows) == 1
+        assert bool(overfit_rows.iloc[0]["passed"]) is False
+        assert (report["promotion_status"] == "FAIL").all()
+
+
+class TestBenchmarkAndConditionalReports:
+    """Tests for benchmark/significance and conditional slice diagnostics."""
+
+    def _make_oof(self, n=200, seed=42):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2020-01-01", periods=n)
+        y = (rng.random(n) < 0.1).astype(float)
+        sigma = rng.uniform(0.01, 0.03, n)
+        realized = rng.normal(0.0, 0.02, n)
+        q_base = np.quantile(rng.normal(0.0, 0.02, 5000), QUANTILE_LEVELS)
+        quantiles = np.repeat(q_base.reshape(1, -1), n, axis=0)
+
+        frames = []
+        for name, offset in [("good", 0.0), ("bad", 0.08)]:
+            p_cal = np.clip(y * 0.25 + (1 - y) * 0.05 + offset + rng.normal(0, 0.01, n), 0.01, 0.99)
+            df = pd.DataFrame({
+                "config_name": name,
+                "fold": np.repeat(range(5), n // 5),
+                "horizon": 5,
+                "date": dates,
+                "p_cal": p_cal,
+                "y": y,
+                "sigma_1d": sigma,
+                "realized_return": realized,
+                "earnings_proximity": np.where(np.arange(n) % 7 == 0, 0.8, 0.0),
+            })
+            for i, q in enumerate(QUANTILE_LEVELS):
+                df[f"q{int(q * 100):02d}"] = quantiles[:, i]
+            frames.append(df)
+        return pd.concat(frames, ignore_index=True)
+
+    def test_benchmark_report_has_climatology_skill(self):
+        oof = self._make_oof()
+        report = compute_benchmark_report(oof, n_boot=100)
+        assert "brier_skill" in report.columns
+        assert "brier_pvalue" in report.columns
+        assert set(report["baseline"]) == {"climatology"}
+
+    def test_pairwise_significance_report_runs(self):
+        oof = self._make_oof()
+        report = compute_pairwise_significance_report(oof, n_boot=100)
+        assert len(report) > 0
+        assert "better_config" in report.columns
+
+    def test_conditional_gate_report_emits_era_and_event_slices(self):
+        oof = self._make_oof()
+        report = compute_conditional_gate_report_oof(
+            oof,
+            gates={"bss_cal": -1.0, "auc_cal": 0.0, "ece_cal": 1.0},
+            density_gates={"crps_skill": -1.0},
+            min_samples=10,
+            min_events=1,
+            min_nonevents=1,
+        )
+        assert len(report) > 0
+        assert "slice_type" in report.columns
+        assert "slice_value" in report.columns
+        assert "era" in set(report["slice_type"])
+        assert "event_state" in set(report["slice_type"])
 
 
 class TestRegimeMultiFeatureCalibrator:
@@ -2593,6 +2916,43 @@ class TestCvEffectiveSigma:
         assert len(oof_df) > 0
         assert np.allclose(oof_df["sigma_1d"].to_numpy(dtype=float), 0.02)
         assert not np.allclose(oof_df["sigma_1d"].to_numpy(dtype=float), 0.01)
+
+    def test_expanding_window_cv_exports_density_columns(self):
+        """OOF export should carry realized returns and quantile summaries when present."""
+        import em_sde.model_selection as ms
+
+        dates = pd.bdate_range("2024-01-01", periods=60)
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, len(dates))}, index=dates)
+        results = pd.DataFrame({
+            "date": dates,
+            "y_5": np.ones(len(dates)),
+            "p_raw_5": np.full(len(dates), 0.10),
+            "p_cal_5": np.full(len(dates), 0.12),
+            "sigma_forecast_5": np.full(len(dates), 0.02),
+            "realized_return_5": np.full(len(dates), 0.01),
+            "q01_5": np.full(len(dates), -0.05),
+            "q05_5": np.full(len(dates), -0.03),
+            "q10_5": np.full(len(dates), -0.02),
+            "q25_5": np.full(len(dates), -0.01),
+            "q50_5": np.full(len(dates), 0.00),
+            "q75_5": np.full(len(dates), 0.01),
+            "q90_5": np.full(len(dates), 0.02),
+            "q95_5": np.full(len(dates), 0.03),
+            "q99_5": np.full(len(dates), 0.05),
+        })
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=20),
+            model=ModelConfig(horizons=[5], garch_min_window=20),
+            calibration=CalibrationConfig(),
+            output=OutputConfig(charts=False),
+        )
+
+        with patch.object(ms, "run_walkforward", return_value=results):
+            _, oof_df = ms.expanding_window_cv(df, [cfg], ["test_cfg"], n_folds=2)
+
+        assert "realized_return" in oof_df.columns
+        assert "q05" in oof_df.columns
+        assert "q95" in oof_df.columns
 
 
 class TestRegimeTdfConfig:
@@ -2827,6 +3187,87 @@ class TestGateRecheckShadowGate:
 
         assert pooled_flags == [True, True]
 
+
+class TestOfflinePooledCalibration:
+    """Regression tests for the flagged offline pooled calibration path."""
+
+    def test_expanding_window_cv_uses_offline_calibrator_outputs(self):
+        """OOF probabilities should come from the batch calibrator when enabled."""
+        import em_sde.model_selection as ms
+
+        cfg = PipelineConfig()
+        cfg.model.horizons = [5]
+        cfg.calibration.offline_pooled_calibration = True
+        dates = pd.bdate_range("2024-01-01", periods=80)
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, len(dates))}, index=dates)
+        results = pd.DataFrame({
+            "date": dates,
+            "p_raw_5": np.linspace(0.05, 0.95, len(dates)),
+            "p_cal_5": np.full(len(dates), 0.91),
+            "y_5": np.tile([0.0, 1.0], len(dates) // 2),
+            "sigma_garch_1d": np.full(len(dates), 0.02),
+            "delta_sigma": np.zeros(len(dates)),
+            "vol_ratio": np.ones(len(dates)),
+            "vol_of_vol": np.zeros(len(dates)),
+        })
+
+        class DummyCalibrator:
+            def calibrate_frame(self, frame, horizon):
+                return np.full(len(frame), 0.42)
+
+        with patch.object(ms, "run_walkforward", return_value=results), \
+                patch.object(ms, "fit_offline_pooled_calibrator", return_value=DummyCalibrator()) as fit_mock:
+            _, oof_df = ms.expanding_window_cv(df, [cfg], ["cfg"], n_folds=2, min_train_pct=0.5)
+
+        assert fit_mock.call_count == 2
+        assert len(oof_df) > 0
+        assert np.allclose(oof_df["p_cal"].to_numpy(dtype=float), 0.42)
+        assert "p_raw" in oof_df.columns
+        assert not np.allclose(
+            oof_df["p_cal"].to_numpy(dtype=float),
+            oof_df["p_raw"].to_numpy(dtype=float),
+        )
+
+    def test_optional_feature_nans_do_not_poison_offline_calibration(self):
+        """Missing optional features should fall back to defaults, not yield NaN probs."""
+        from em_sde.calibration import fit_offline_pooled_calibrator
+
+        train = pd.DataFrame({
+            "p_raw_5": np.linspace(0.1, 0.9, 12),
+            "y_5": np.array([0, 1] * 6, dtype=float),
+            "sigma_garch_1d": np.full(12, 0.02),
+            "delta_sigma": np.zeros(12),
+            "vol_ratio": np.ones(12),
+            "vol_of_vol": np.zeros(12),
+            "earnings_proximity": np.full(12, np.nan),
+            "iv_ratio_5": np.full(12, np.nan),
+            "range_vol_ratio": np.full(12, np.nan),
+            "overnight_gap": np.full(12, np.nan),
+            "intraday_range": np.full(12, np.nan),
+        })
+
+        calibrator = fit_offline_pooled_calibrator(
+            train,
+            5,
+            multi_feature=True,
+            l2_reg=1e-4,
+            max_iter=10,
+            beta_calibration=False,
+            earnings_aware=True,
+            implied_vol_aware=True,
+            ohlc_aware=True,
+            post_cal_method="none",
+            histogram_n_bins=10,
+            histogram_min_samples=5,
+            histogram_prior_strength=5.0,
+            histogram_monotonic=True,
+            histogram_interpolate=False,
+        )
+
+        p = calibrator.calibrate_frame(train, 5)
+        assert np.isfinite(p).all()
+        assert np.all((p >= 0.0) & (p <= 1.0))
+
 class TestHarRvContinued(TestHarRv):
     def test_har_rv_r_squared_range(self):
         """R-squared should be in a reasonable range."""
@@ -2853,6 +3294,14 @@ class TestHarRvContinued(TestHarRv):
         assert mc.har_rv_min_window == 252
         assert mc.har_rv_refit_interval == 21
         assert mc.har_rv_ridge_alpha == 0.01
+        assert mc.har_rv_variant == "rv"
+
+    def test_offline_calibration_config_fields(self):
+        """CalibrationConfig should expose offline pooled calibration controls."""
+        from em_sde.config import CalibrationConfig
+        cc = CalibrationConfig()
+        assert cc.offline_pooled_calibration is False
+        assert cc.offline_calibration_max_iter == 50
 
     def test_har_rv_config_validation(self):
         """Validation should catch invalid HAR-RV config."""
@@ -2876,6 +3325,60 @@ class TestHarRvContinued(TestHarRv):
             norm_low = np.linalg.norm(result_low.coefficients_1d[1:])
             norm_high = np.linalg.norm(result_high.coefficients_1d[1:])
             assert norm_high < norm_low
+
+    def _make_ohlc(self, n=1000, seed=123):
+        """Generate a simple OHLC path aligned with synthetic returns."""
+        returns = self._make_returns(n, seed=seed)
+        close = np.empty(n + 1)
+        close[0] = 100.0
+        close[1:] = close[0] * np.cumprod(1.0 + returns)
+
+        rng = np.random.RandomState(seed + 7)
+        gap = rng.normal(0.0, 0.002, size=n)
+        open_prices = close.copy()
+        open_prices[1:] = close[:-1] * np.exp(gap)
+        open_prices[0] = close[0]
+
+        span = 0.01 + 0.5 * np.abs(returns)
+        high = close.copy()
+        low = close.copy()
+        high[1:] = np.maximum(open_prices[1:], close[1:]) * (1.0 + span)
+        low[1:] = np.minimum(open_prices[1:], close[1:]) * np.maximum(1e-6, 1.0 - span)
+        high[0] = close[0]
+        low[0] = close[0]
+        return returns, open_prices, high, low, close
+
+    def test_fit_har_range_returns_result(self):
+        """HAR-range should fit from daily OHLC and emit a valid forecast."""
+        returns, open_prices, high, low, close = self._make_ohlc()
+        result = fit_har_ohlc(
+            returns,
+            close_prices=close,
+            high_prices=high,
+            low_prices=low,
+            open_prices=open_prices,
+            min_window=252,
+            variant="range",
+        )
+        assert result is not None
+        assert result.sigma_1d > 0
+        assert len(result.coefficients_1d) == 4
+
+    def test_fit_har_rvx_uses_extra_blocks(self):
+        """HAR-RV-X should add range/RV/gap blocks beyond classic HAR-RV."""
+        returns, open_prices, high, low, close = self._make_ohlc()
+        result = fit_har_ohlc(
+            returns,
+            close_prices=close,
+            high_prices=high,
+            low_prices=low,
+            open_prices=open_prices,
+            min_window=252,
+            variant="rvx",
+        )
+        assert result is not None
+        assert result.sigma_22d > 0
+        assert len(result.coefficients_1d) == 10
 
 
 class TestOverfitDiagnostics:
@@ -3248,6 +3751,38 @@ class TestBayesianOptStudyLookup:
 
         assert study_name is None
 
+    def test_study_version_key_changes_with_har_variant(self):
+        """HAR variant changes should invalidate old Optuna studies."""
+        import scripts.run_bayesian_opt as bo
+
+        cfg_rv = PipelineConfig()
+        cfg_rv.model.har_rv_variant = "rv"
+        cfg_range = PipelineConfig()
+        cfg_range.model.har_rv_variant = "range"
+
+        with patch.object(bo, "load_config", return_value=cfg_rv):
+            key_rv = bo._study_version_key(Path("cfg.yaml"), lean=False)
+        with patch.object(bo, "load_config", return_value=cfg_range):
+            key_range = bo._study_version_key(Path("cfg.yaml"), lean=False)
+
+        assert key_rv != key_range
+
+    def test_study_version_key_changes_with_offline_calibration(self):
+        """Offline pooled calibration should be part of the study version key."""
+        import scripts.run_bayesian_opt as bo
+
+        cfg_online = PipelineConfig()
+        cfg_online.calibration.offline_pooled_calibration = False
+        cfg_offline = PipelineConfig()
+        cfg_offline.calibration.offline_pooled_calibration = True
+
+        with patch.object(bo, "load_config", return_value=cfg_online):
+            key_online = bo._study_version_key(Path("cfg.yaml"), lean=True)
+        with patch.object(bo, "load_config", return_value=cfg_offline):
+            key_offline = bo._study_version_key(Path("cfg.yaml"), lean=True)
+
+        assert key_online != key_offline
+
 
 # ============================================================
 # Test: Earnings Calendar Feature
@@ -3503,6 +4038,26 @@ class TestImpliedVolFeature:
         cal_both = MultiFeatureCalibrator(earnings_aware=True, implied_vol_aware=True)
         assert cal_both.N_FEATURES == 8
 
+    def test_mf_calibrator_ohlc_aware(self):
+        """OHLC-aware calibrator appends realized-state features."""
+        from em_sde.calibration import MultiFeatureCalibrator
+        cal = MultiFeatureCalibrator(ohlc_aware=True)
+        assert cal.N_FEATURES == 9
+        p = cal.calibrate(
+            0.15, 0.01, 0.0, 1.0, 0.0, 0.0,
+            implied_vol_ratio=1.0, range_vol_ratio=1.2,
+            overnight_gap=0.01, intraday_range=0.02,
+        )
+        assert 0.0 <= p <= 1.0
+
+    def test_mf_calibrator_all_optional_features(self):
+        """Earnings + IV + OHLC should all expand the feature vector."""
+        from em_sde.calibration import MultiFeatureCalibrator
+        cal = MultiFeatureCalibrator(
+            earnings_aware=True, implied_vol_aware=True, ohlc_aware=True,
+        )
+        assert cal.N_FEATURES == 11
+
     def test_mf_calibrator_implied_vol_identity_init(self):
         """Implied vol feature starts with 0 weight (no effect initially)."""
         from em_sde.calibration import MultiFeatureCalibrator
@@ -3639,6 +4194,180 @@ class TestHarRvHorizonMapping:
             prev = val
 
 
+class TestHybridVarianceAndScheduledJumps:
+    """Regression tests for the new physical+event variance path."""
+
+    @staticmethod
+    def _make_price_frame(n_days: int = 320) -> pd.DataFrame:
+        rng = np.random.default_rng(123)
+        returns = rng.normal(0.0002, 0.008, size=n_days)
+        prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
+        opens = prices * np.exp(rng.normal(0.0, 0.001, size=n_days + 1))
+        highs = np.maximum(opens, prices) * 1.05
+        lows = np.minimum(opens, prices) * 0.95
+        dates = pd.bdate_range("2020-01-01", periods=n_days + 1)
+        return pd.DataFrame(
+            {"price": prices, "open": opens, "high": highs, "low": lows},
+            index=dates,
+        )
+
+    def test_blend_sigma_variance_uses_variance_space(self):
+        import em_sde.backtest as backtest
+
+        expected = np.sqrt(0.75 * 0.02 ** 2 + 0.25 * 0.04 ** 2)
+        actual = backtest._blend_sigma_variance(0.02, 0.04, 0.25)
+        assert abs(actual - expected) < 1e-12
+
+    def test_estimate_scheduled_event_variance_positive(self):
+        import em_sde.backtest as backtest
+
+        dates = pd.bdate_range("2020-01-01", periods=80)
+        returns = np.full(79, 0.01)
+        event_locs = [10, 20, 30, 40, 50]
+        for loc in event_locs[:-1]:
+            returns[loc - 1] = 0.10
+        event_dates = dates[event_locs].values.astype("datetime64[D]")
+
+        event_var = backtest._estimate_scheduled_event_variance(
+            dates,
+            returns,
+            event_dates,
+            current_idx=60,
+            sigma_daily=0.01,
+            lookback_events=5,
+            min_events=4,
+            scale=1.0,
+        )
+
+        assert event_var > 0.0
+
+    def test_walkforward_hybrid_variance_inflates_sigma(self):
+        import em_sde.backtest as backtest
+
+        df = self._make_price_frame()
+        har_result = HarRvResult(
+            sigma_1d=0.01,
+            sigma_5d=0.012,
+            sigma_22d=0.015,
+            coefficients_1d=np.zeros(4),
+            coefficients_5d=np.zeros(4),
+            coefficients_22d=np.zeros(4),
+            r_squared_1d=0.1,
+        )
+        garch_result = GarchResult(sigma_1d=0.01, source="stub", model_type="garch")
+        cfg_base = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=252),
+            model=ModelConfig(
+                horizons=[5],
+                garch_window=252,
+                garch_min_window=252,
+                mc_base_paths=500,
+                mc_boost_paths=500,
+                seed=42,
+                har_rv=True,
+                ohlc_features_enabled=True,
+            ),
+            calibration=CalibrationConfig(multi_feature=False),
+            output=OutputConfig(base_dir=str(workspace_temp_dir("hybrid_sigma")), charts=False),
+        )
+        cfg_hybrid = PipelineConfig(
+            data=cfg_base.data,
+            model=ModelConfig(**{**cfg_base.model.__dict__, "hybrid_variance_enabled": True, "hybrid_range_blend": 0.5}),
+            calibration=cfg_base.calibration,
+            output=cfg_base.output,
+        )
+
+        with patch.object(backtest, "fit_garch", return_value=garch_result), \
+                patch.object(backtest, "fit_har_rv", return_value=har_result), \
+                patch.object(backtest, "_simulate_horizon", return_value=(0.1, 0.01)):
+            results_off = run_walkforward(df, cfg_base)
+            results_on = run_walkforward(df, cfg_hybrid)
+
+        assert results_on["sigma_hybrid_1d"].iloc[0] > results_off["sigma_hybrid_1d"].iloc[0]
+        assert results_on["sigma_forecast_5"].iloc[0] > results_off["sigma_forecast_5"].iloc[0]
+
+    def test_walkforward_uses_har_ohlc_variant_when_enabled(self):
+        """HAR range variants should route through the OHLC-aware fitter."""
+        import em_sde.backtest as backtest
+
+        df = self._make_price_frame()
+        har_result = HarRvResult(
+            sigma_1d=0.011,
+            sigma_5d=0.013,
+            sigma_22d=0.016,
+            coefficients_1d=np.zeros(4),
+            coefficients_5d=np.zeros(4),
+            coefficients_22d=np.zeros(4),
+            r_squared_1d=0.2,
+        )
+        garch_result = GarchResult(sigma_1d=0.01, source="stub", model_type="garch")
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=252),
+            model=ModelConfig(
+                horizons=[5],
+                garch_window=252,
+                garch_min_window=252,
+                mc_base_paths=500,
+                mc_boost_paths=500,
+                seed=42,
+                har_rv=True,
+                har_rv_variant="range",
+                ohlc_features_enabled=True,
+            ),
+            calibration=CalibrationConfig(multi_feature=False),
+            output=OutputConfig(base_dir=str(workspace_temp_dir("har_range_walkforward")), charts=False),
+        )
+
+        with patch.object(backtest, "fit_garch", return_value=garch_result), \
+                patch.object(backtest, "fit_har_ohlc", return_value=har_result) as har_ohlc_mock, \
+                patch.object(backtest, "_simulate_horizon", return_value=(0.1, 0.01)):
+            results = run_walkforward(df, cfg)
+
+        assert har_ohlc_mock.called
+        assert len(results) > 0
+        assert results["sigma_har_rv_1d"].iloc[0] == har_result.sigma_1d
+
+    def test_walkforward_scheduled_jump_variance_inflates_forecast(self):
+        import em_sde.backtest as backtest
+
+        n_days = 320
+        returns = np.full(n_days, 0.001)
+        event_locs = [40, 90, 140, 190, 255]
+        for loc in event_locs[:-1]:
+            returns[loc - 1] = 0.12
+        prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
+        dates = pd.bdate_range("2020-01-01", periods=n_days + 1)
+        df = pd.DataFrame({"price": prices}, index=dates)
+        earnings_dates = dates[event_locs].values.astype("datetime64[D]")
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", ticker="TEST", min_rows=252),
+            model=ModelConfig(
+                horizons=[5],
+                garch_window=252,
+                garch_min_window=252,
+                mc_base_paths=500,
+                mc_boost_paths=500,
+                seed=42,
+                scheduled_jump_variance=True,
+                scheduled_jump_lookback_events=5,
+                scheduled_jump_min_events=4,
+            ),
+            calibration=CalibrationConfig(multi_feature=False),
+            output=OutputConfig(base_dir=str(workspace_temp_dir("sched_jump")), charts=False),
+        )
+        garch_result = GarchResult(sigma_1d=0.01, source="stub", model_type="garch")
+
+        with patch("em_sde.data_layer.load_earnings_dates", return_value=earnings_dates), \
+                patch.object(backtest, "fit_garch", return_value=garch_result), \
+                patch.object(backtest, "_simulate_horizon", return_value=(0.1, 0.01)):
+            results = run_walkforward(df, cfg)
+
+        first = results.iloc[0]
+        assert first["scheduled_jump_events_5"] == 1
+        assert first["scheduled_jump_var_5"] > 0.0
+        assert first["sigma_forecast_5"] > first["sigma_physical_5"]
+
+
 class TestStudyVersionImpliedVol:
     """Regression tests for Optuna study versioning with implied-vol settings."""
 
@@ -3768,6 +4497,108 @@ class TestStudyVersionImpliedVol:
             )
 
         assert result is None, "Stale studies must not be reused after IV settings change"
+
+    def test_hybrid_variance_changes_version_key(self):
+        """Changing hybrid variance settings must invalidate prior BO studies."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        temp_dir = workspace_temp_dir("hybrid_key")
+        cfg_a = temp_dir / "a.yaml"
+        cfg_b = temp_dir / "b.yaml"
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20]},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        with open(cfg_a, "w") as f:
+            yaml.dump(base, f)
+        with open(cfg_b, "w") as f:
+            yaml.dump({
+                **base,
+                "model": {**base["model"], "hybrid_variance_enabled": True, "hybrid_range_blend": 0.5},
+            }, f)
+
+        assert bo._study_version_key(cfg_a, lean=True) != bo._study_version_key(cfg_b, lean=True)
+
+    def test_scheduled_jump_changes_version_key(self):
+        """Changing scheduled-jump settings must invalidate prior BO studies."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        temp_dir = workspace_temp_dir("sched_jump_key")
+        cfg_a = temp_dir / "a.yaml"
+        cfg_b = temp_dir / "b.yaml"
+        base = {
+            "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+            "model": {"horizons": [5, 10, 20]},
+            "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+        }
+        with open(cfg_a, "w") as f:
+            yaml.dump(base, f)
+        with open(cfg_b, "w") as f:
+            yaml.dump({
+                **base,
+                "model": {
+                    **base["model"],
+                    "scheduled_jump_variance": True,
+                    "scheduled_jump_lookback_events": 8,
+                    "scheduled_jump_min_events": 4,
+                    "scheduled_jump_scale": 1.25,
+                },
+            }, f)
+
+        assert bo._study_version_key(cfg_a, lean=True) != bo._study_version_key(cfg_b, lean=True)
+
+
+class TestThresholdLocking:
+    """Regression tests for frozen-threshold Bayesian optimization."""
+
+    def test_locked_threshold_panel_not_tuned(self):
+        """Default BO should preserve configured thresholds and skip thr_* params."""
+        import scripts.run_bayesian_opt as bo
+        import optuna
+        import yaml
+
+        cfg_path = workspace_temp_dir("thr_lock") / "cfg.yaml"
+        with open(cfg_path, "w") as f:
+            yaml.dump({
+                "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+                "model": {
+                    "horizons": [5, 10, 20],
+                    "lock_threshold_panel": True,
+                    "regime_gated_fixed_pct_by_horizon": {5: 0.04, 10: 0.06, 20: 0.08},
+                },
+                "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+            }, f)
+
+        study = optuna.create_study(direction="minimize")
+        trial = study.ask()
+        cfg = bo.build_trial_config(trial, str(cfg_path), lean=True, tune_thresholds=False)
+
+        assert "thr_5" not in trial.params
+        assert cfg.model.regime_gated_fixed_pct_by_horizon == {5: 0.04, 10: 0.06, 20: 0.08}
+
+    def test_threshold_tuning_mode_changes_version_key(self):
+        """Locked and tuned-threshold studies must not share a version key."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        cfg_path = workspace_temp_dir("thr_version") / "cfg.yaml"
+        with open(cfg_path, "w") as f:
+            yaml.dump({
+                "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+                "model": {
+                    "horizons": [5, 10, 20],
+                    "lock_threshold_panel": True,
+                    "regime_gated_fixed_pct_by_horizon": {5: 0.04, 10: 0.06, 20: 0.08},
+                },
+                "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+            }, f)
+
+        key_locked = bo._study_version_key(cfg_path, lean=True, tune_thresholds=False)
+        key_tuned = bo._study_version_key(cfg_path, lean=True, tune_thresholds=True)
+        assert key_locked != key_tuned
 
 
 # ============================================================

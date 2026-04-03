@@ -14,7 +14,7 @@ Build an **institutional-grade calibrated large-move probability engine** that c
 4. **No leakage.** Train/test splits are strictly chronological. Expanding-window CV only.
 5. **Always check N_eff, not raw N.** Overlapping predictions create correlated samples. Effective sample size governs all statistical conclusions.
 6. **Backward compatibility behind flags.** New features use flags (e.g., `lean` mode in BO). Don't break existing configs or tests.
-7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (241+ tests).
+7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (296+ tests).
 8. **Adaptive event-rate guard in BO.** `min_rate = max((100 × n_params) / (2 × n_oof), 3%)`. Adapts to dataset size — larger datasets get a looser guard, smaller ones stricter. Ensures N_eff/N_params >= 100x (GREEN). Floor at 3% absolute minimum. Per Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
 9. **Use all available data from IPO/inception.** All configs must use the earliest available data for the ticker. Never truncate history arbitrarily.
 10. **Always update docs after any change.** When making code changes, results, or architectural decisions, update ALL relevant docs: `CLAUDE.md` (current state, rules, context for next session), `METHODOLOGY.md` (technical details), `RESULTS.md` (honest numbers), `README.md` (if user-facing). Never leave docs stale — the next Claude session depends on accurate CLAUDE.md.
@@ -35,8 +35,8 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `monte_carlo.py` | GBM/GARCH-in-sim, Merton jump-diffusion, Student-t fat tails, state-dependent jumps |
 | `calibration.py` | Online Platt, multi-feature (6-8 features + L2), regime-conditional multi-feature, histogram post-cal |
 | `backtest.py` | Walk-forward engine, resolution queue, regime-gated thresholds, implied vol blending |
-| `evaluation.py` | Brier, BSS, AUC, ECE (adaptive bins), VaR, CVaR, CRPS, N_eff |
-| `model_selection.py` | Expanding-window CV (5-fold), OOF row-level promotion gates (pooled + per-regime) |
+| `evaluation.py` | Brier, BSS, AUC, ECE (adaptive bins), VaR, CVaR, CRPS, PIT, tail coverage, N_eff |
+| `model_selection.py` | Expanding-window CV (5-fold), OOF row-level promotion gates (pooled + per-regime), density gates, benchmark reports, conditional gate reports |
 | `output.py` | CSV/JSON results, reliability curves, charts |
 | `run.py` | CLI entry point, single-run and --compare modes |
 
@@ -54,8 +54,9 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 
 - Preset configs: `spy_fixed.yaml`, `goog_fixed.yaml`, `tsla_fixed.yaml`
 - Experimental/BO-tuned: `configs/exp_suite/exp_{ticker}_regime_gated.yaml`
-- Real ticker data: SPY (from 1993), AAPL (from 2000), GOOGL (from 2004-08-19)
+- Real ticker data: SPY (from 1993), AAPL (from 2000), GOOGL (from 2004-08-19), AMZN (from 1997), NVDA (from 1999)
 - Threshold modes: `fixed_pct` (recommended), `regime_gated`, `anchored_vol`
+- Threshold locking: `lock_threshold_panel: true` (default) freezes thresholds in BO; `--tune-thresholds` opts back in
 
 ## Key Technical Concepts
 
@@ -63,7 +64,11 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 - Row-level OOF: pool all out-of-fold predictions across 5 CV folds
 - Pooled ECE gate is primary; per-regime is diagnostic
 - Must pass ALL: BSS >= 0.0, AUC >= 0.55, ECE <= 0.02
+- Optional density gates: CRPS skill >= 0, PIT KS <= 0.12, tail coverage error <= 0.05
+- Optional robustness gate: worst overfit status <= YELLOW
 - Minimum guards: n >= 100, events >= 30, non-events >= 30
+- Each gate row reports: N_eff, neff_ratio, neff_warning (GREEN/YELLOW/RED)
+- ECE gates report confidence annotations: solid_pass, fragile_pass, solid_fail, fragile_fail (based on bootstrap CI)
 
 **N_eff / N_params Ratio (overfitting constraint):**
 - N_eff = min(events, non-events) * 2 (corrected for overlap)
@@ -133,35 +138,55 @@ python scripts/run_overfit_check.py all
 python -u scripts/run_full_institutional.py
 ```
 
-## Current State (2026-03-09)
+## Current State (2026-03-10)
 
-### Ticker Status
+### Ticker Status (Legacy Point-Metric Gates)
 
 - **SPY**: 6538 rows (2000-2025), **2/3 gates PASS** (H=5, H=10). Thresholds: H=5 3.72%, H=10 5.54%, H=20 7.05%. H=20 ECE=0.024 barely fails. BSS positive across all horizons.
-- **GOOGL**: 5376 rows (2004-2025), **3/3 gates PASS**. FHS + earnings + implied vol (VIX proxy) enabled. Thresholds: H=5 5.22%, H=10 9.24%, H=20 12.65%. Implied vol was the key unlock — H=5 ECE dropped 0.022→0.0076.
+- **GOOGL**: 5376 rows (2004-2025), **3/3 gates PASS**. Earnings + implied vol (VIX proxy) enabled. Thresholds: H=5 5.22%, H=10 9.24%, H=20 12.65%. Implied vol was the key unlock — H=5 ECE dropped 0.022→0.0076.
 - **AMZN**: 7202 rows (1997-2025), **3/3 gates PASS**. Earnings + implied vol enabled. Thresholds: H=5 8.52%, H=10 15.99%, H=20 20.50%. Best calibration: H=10 ECE=0.0029. AUC >0.70 all horizons.
 - **NVDA**: 6777 rows (1999-2025), **1/3 gates PASS** (H=5 only). Earnings + implied vol enabled. Thresholds: H=5 9.84%, H=10 18.04%, H=20 23.68%. H=10/H=20 BSS negative. Only 5 BO trials — needs more.
 
-### Recent Changes (2026-03-09)
+**Density governance (CRPS/PIT/tail) mostly failing.** Even best tickers fail CRPS skill at longer horizons. The MC engine produces calibrated binary probabilities but the full return distribution needs work.
 
-1. **AMZN 3/3 gates PASS** on first attempt. ECE: H=5 0.0070, H=10 0.0029, H=20 0.0118. AUC >0.70 across all horizons.
-2. **NVDA 1/3 gates PASS** (H=5). H=10/H=20 BSS negative — thresholds too aggressive from 5-trial BO.
-3. **New tickers added**: AMZN (7202 rows, 1997-2025) and NVDA (6777 rows, 1999-2025). Configs, BO, and gate rechecks complete.
-4. AMZN and NVDA registered in `run_bayesian_opt.py` CONFIGS and `run_gate_recheck.py`.
+### Recent Changes (2026-03-10)
+
+**Anti-overfitting methodology improvements:**
+
+1. **Gen gap sign fix** (`run_overfit_check.py`): `abs(gap_ratio)` → `max(gap_ratio, 0.0)`. Negative gaps (model improving on full data) no longer falsely flagged RED.
+2. **Temporal stability direction fix** (`run_overfit_check.py`): Only flags when late folds are worse; improvement (late < early) maps to GREEN.
+3. **N_eff columns in gate reports** (`model_selection.py`): Every gate row now reports `n_eff`, `neff_ratio`, `neff_warning` (GREEN/YELLOW/RED).
+4. **ECE confidence annotations** (`model_selection.py`): Bootstrap CI determines `solid_pass`, `fragile_pass`, `solid_fail`, `fragile_fail`.
+5. **N_eff soft penalty in BO** (`run_bayesian_opt.py`): When min N_eff ratio < 100x, adds `0.01 * shortfall²` to objective — steers BO toward statistically robust regions.
+6. **Holdout min_events raised** (`run_bayesian_opt.py`): `min_events=2` → `min_events=10`, `min_nonevents=2` → `min_nonevents=10`.
+
+**Density governance stack (via Codex):**
+
+1. **Density gates**: CRPS skill, PIT KS statistic, tail coverage error — optional stricter gates beyond point metrics.
+2. **Benchmark reports**: Bootstrap p-value testing model vs climatology.
+3. **Conditional gate reports**: Per-era (pre-covid, covid-2020, tightening, post-2023) and per-event-state breakdowns.
+4. **Threshold locking**: `lock_threshold_panel: true` by default; `--tune-thresholds` to opt in.
+5. **Offline pooled calibration**: Research path — batch calibrator on train rows, apply to held-out fold.
+6. **Overfit report integration**: Overfit diagnostic status can block promotion via `require_overfit` flag.
+7. **Scheduled jump variance**: Earnings-driven jump variance injection (research, not yet proven).
+8. **296 tests passing** (was 241).
+
+### Previous Changes (2026-03-09)
+
+1. AMZN 3/3 gates PASS. NVDA 1/3 gates PASS (H=5).
+2. New tickers: AMZN (7202 rows, 1997-2025) and NVDA (6777 rows, 1999-2025).
 
 ### Previous Changes (2026-03-08)
 
 1. GOOGL 3/3 gates PASS with implied vol enabled.
-2. VIX data downloaded: `data/vix_history.csv` (5421 rows, 2004-2025).
-3. Bug fixes: IV horizon mapping, HAR-RV sigma interpolation, BO study versioning. 11 regression tests added.
-4. 241 tests passing.
+2. VIX data: `data/vix_history.csv` (5421 rows, 2004-2025).
 
 ### Next Steps
 
-1. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → higher event rates → positive BSS
-2. **Gate recheck SPY** with implied vol enabled — VIX data already available
-3. SPY H=20: ECE=0.024 — implied vol may push it under 0.02
-4. Consider BO re-tuning GOOGL with implied vol enabled (current thresholds tuned without IV)
+1. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
+2. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
+3. **Fresh gate rechecks** on all tickers with density gates + N_eff tracking for current baseline
+4. **Density calibration frontier** — CRPS/PIT failures are the main gap; may need tail modeling or quantile recalibration
 
 ### Standard Workflow
 ```bash

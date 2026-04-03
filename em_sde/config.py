@@ -18,6 +18,7 @@ class DataConfig:
     csv_path: Optional[str] = None
     synthetic_days: int = 2520
     synthetic_seed: int = 12345
+    strict_validation: bool = True
 
 
 @dataclass
@@ -62,6 +63,7 @@ class ModelConfig:
     regime_gated_warmup: int = 252
     regime_gated_vol_window: int = 252
     regime_gated_fixed_pct_by_horizon: Optional[dict] = None  # per-horizon override: {5: 0.03, 10: 0.04}
+    lock_threshold_panel: bool = True  # freeze thresholds during BO; treat them as product design, not model params
     # MC vol term structure: use GARCH h-step average vol instead of 1-step forecast
     mc_vol_term_structure: bool = False
     # Regime-conditional Student-t degrees of freedom for MC innovations
@@ -74,6 +76,9 @@ class ModelConfig:
     har_rv_min_window: int = 252          # Minimum returns for HAR-RV fitting
     har_rv_refit_interval: int = 21       # Refit HAR-RV every N trading days
     har_rv_ridge_alpha: float = 0.01      # Ridge regularization strength
+    har_rv_variant: str = "rv"            # "rv" | "range" | "rvx" using daily OHLC when available
+    hybrid_variance_enabled: bool = False  # blend physical sigma with OHLC range anchor
+    hybrid_range_blend: float = 0.25       # variance weight on range-based anchor
     store_quantiles: bool = False      # store MC return quantiles for CRPS evaluation
     # Filtered Historical Simulation: use GARCH standardized residuals instead of parametric t
     fhs_enabled: bool = False
@@ -86,6 +91,11 @@ class ModelConfig:
     implied_vol_csv_path: Optional[str] = None  # CSV with date index + iv columns
     implied_vol_blend: float = 0.3              # weight on implied vol in sigma blend (0=pure hist, 1=pure implied)
     implied_vol_as_feature: bool = True         # add implied_vol_ratio as MF calibration feature
+    scheduled_jump_variance: bool = False       # add scheduled event jump variance (currently earnings-driven)
+    scheduled_jump_lookback_events: int = 12    # trailing events used to estimate jump variance
+    scheduled_jump_min_events: int = 4          # minimum historical events required
+    scheduled_jump_scale: float = 1.0           # scale multiplier on estimated residual jump variance
+    ohlc_features_enabled: bool = True          # add OHLC-derived realized state features when open/high/low data exists
 
 
 @dataclass
@@ -106,6 +116,8 @@ class CalibrationConfig:
     multi_feature_l2: float = 1e-4   # L2 regularization strength
     multi_feature_min_updates: int = 100  # warmup for multi-feature calibrator
     multi_feature_regime_conditional: bool = False  # per-regime MF calibrators (requires multi_feature=true)
+    offline_pooled_calibration: bool = False  # research path: fit batch calibrator on train rows, apply to held-out fold
+    offline_calibration_max_iter: int = 50   # IRLS iterations for batch calibration
     histogram_post_calibration: bool = True  # legacy flag; use post_cal_method instead
     post_cal_method: str = ""               # "histogram" | "isotonic" | "none"; overrides histogram_post_calibration when set
     histogram_n_bins: int = 10               # number of equal-width bins for histogram/isotonic post-cal
@@ -124,12 +136,17 @@ class CalibrationConfig:
     promotion_auc_min: float = 0.55
     promotion_ece_max: float = 0.02
     promotion_pooled_gate: bool = False  # use pooled ECE gate (all regimes combined) as primary
+    promotion_crps_min: Optional[float] = 0.0
+    promotion_pit_ks_max: Optional[float] = 0.12
+    promotion_tail_cov_error_max: Optional[float] = 0.05
+    promotion_require_overfit: bool = False
 
 
 @dataclass
 class OutputConfig:
     base_dir: str = "outputs"
     charts: bool = True
+    store_data_snapshot: bool = True
 
 
 @dataclass
@@ -187,6 +204,15 @@ def _validate(cfg: PipelineConfig):
             "ensemble_weights length must match horizons"
         assert abs(sum(cfg.calibration.ensemble_weights) - 1.0) < 1e-6, \
             "ensemble_weights must sum to 1.0"
+    if cfg.calibration.promotion_crps_min is not None:
+        assert cfg.calibration.promotion_crps_min <= 1.0, \
+            "promotion_crps_min must be <= 1.0"
+    if cfg.calibration.promotion_pit_ks_max is not None:
+        assert 0.0 <= cfg.calibration.promotion_pit_ks_max <= 1.0, \
+            "promotion_pit_ks_max must be in [0, 1]"
+    if cfg.calibration.promotion_tail_cov_error_max is not None:
+        assert 0.0 <= cfg.calibration.promotion_tail_cov_error_max <= 1.0, \
+            "promotion_tail_cov_error_max must be in [0, 1]"
 
     if cfg.calibration.multi_feature_regime_conditional:
         assert cfg.calibration.multi_feature, \
@@ -195,6 +221,8 @@ def _validate(cfg: PipelineConfig):
     if cfg.calibration.post_cal_method:
         assert cfg.calibration.post_cal_method in ("histogram", "none"), \
             f"post_cal_method must be 'histogram' or 'none', got {cfg.calibration.post_cal_method!r}"
+    assert cfg.calibration.offline_calibration_max_iter >= 1, \
+        "offline_calibration_max_iter must be >= 1"
 
     assert cfg.model.threshold_mode in ("fixed_pct", "anchored_vol", "regime_gated"), \
         f"threshold_mode must be 'fixed_pct', 'anchored_vol', or 'regime_gated', got {cfg.model.threshold_mode}"
@@ -209,11 +237,22 @@ def _validate(cfg: PipelineConfig):
         assert cfg.model.regime_gated_high_mode in _valid_sub, \
             f"regime_gated_high_mode must be one of {_valid_sub}"
         assert cfg.model.regime_gated_warmup >= 50, "regime_gated_warmup must be >= 50"
+    assert isinstance(cfg.model.lock_threshold_panel, bool), "lock_threshold_panel must be boolean"
 
     if cfg.model.har_rv:
         assert cfg.model.har_rv_min_window >= 66, "har_rv_min_window must be >= 66"
         assert cfg.model.har_rv_refit_interval >= 1, "har_rv_refit_interval must be >= 1"
         assert cfg.model.har_rv_ridge_alpha > 0, "har_rv_ridge_alpha must be positive"
+    assert cfg.model.har_rv_variant in ("rv", "range", "rvx"), \
+        "har_rv_variant must be one of ('rv', 'range', 'rvx')"
+    assert 0.0 <= cfg.model.hybrid_range_blend <= 1.0, \
+        "hybrid_range_blend must be in [0, 1]"
+    assert cfg.model.scheduled_jump_lookback_events >= 1, \
+        "scheduled_jump_lookback_events must be >= 1"
+    assert cfg.model.scheduled_jump_min_events >= 1, \
+        "scheduled_jump_min_events must be >= 1"
+    assert cfg.model.scheduled_jump_scale >= 0.0, \
+        "scheduled_jump_scale must be non-negative"
 
     assert cfg.model.garch_model_type in ("garch", "gjr"), \
         f"garch_model_type must be 'garch' or 'gjr', got {cfg.model.garch_model_type}"
