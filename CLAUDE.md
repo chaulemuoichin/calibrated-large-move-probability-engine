@@ -14,7 +14,7 @@ Build an **institutional-grade calibrated large-move probability engine** that c
 4. **No leakage.** Train/test splits are strictly chronological. Expanding-window CV only.
 5. **Always check N_eff, not raw N.** Overlapping predictions create correlated samples. Effective sample size governs all statistical conclusions.
 6. **Backward compatibility behind flags.** New features use flags (e.g., `lean` mode in BO). Don't break existing configs or tests.
-7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (296+ tests).
+7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (312+ tests).
 8. **Adaptive event-rate guard in BO.** `min_rate = max((100 × n_params) / (2 × n_oof), 3%)`. Adapts to dataset size — larger datasets get a looser guard, smaller ones stricter. Ensures N_eff/N_params >= 100x (GREEN). Floor at 3% absolute minimum. Per Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
 9. **Use all available data from IPO/inception.** All configs must use the earliest available data for the ticker. Never truncate history arbitrarily.
 10. **Always update docs after any change.** When making code changes, results, or architectural decisions, update ALL relevant docs: `CLAUDE.md` (current state, rules, context for next session), `METHODOLOGY.md` (technical details), `RESULTS.md` (honest numbers), `README.md` (if user-facing). Never leave docs stale — the next Claude session depends on accurate CLAUDE.md.
@@ -38,7 +38,9 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `evaluation.py` | Brier, BSS, AUC, ECE (adaptive bins), VaR, CVaR, CRPS, PIT, tail coverage, N_eff |
 | `model_selection.py` | Expanding-window CV (5-fold), OOF row-level promotion gates (pooled + per-regime), density gates, benchmark reports, conditional gate reports |
 | `output.py` | CSV/JSON results, reliability curves, charts |
-| `run.py` | CLI entry point, single-run and --compare modes |
+| `predict.py` | Live prediction engine with state checkpoint loading |
+| `resolve.py` | Async label resolution for live predictions |
+| `run.py` | CLI entry point, single-run, --compare, and --predict-now modes |
 
 ### Scripts (`scripts/`)
 
@@ -55,6 +57,7 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `run_paper_results.py` | Generate LaTeX-ready tables with p-values and CIs |
 | `run_economic_significance.py` | Risk-managed portfolio and selective hedging analysis |
 | `generate_paper_figures.py` | Publication-quality reliability diagrams, heatmaps, charts |
+| `daily_predict.py` | Daily prediction runner with scheduling support |
 
 ### Config System (`configs/`)
 
@@ -162,9 +165,19 @@ python scripts/generate_paper_figures.py
 
 # Full paper reproduction (all of the above)
 python paper/reproduce.py --all
+
+# --- Live Prediction ---
+# Generate prediction for today (uses checkpoint if available)
+python -m em_sde.run --predict-now --config configs/spy_fixed.yaml --state-dir outputs/state/spy
+
+# Build checkpoint from backtest, then predict
+python -m em_sde.run --predict-now --config configs/spy_fixed.yaml --save-state
+
+# Daily scheduled predictions for all tickers
+python scripts/daily_predict.py
 ```
 
-## Current State (2026-04-03)
+## Current State (2026-04-04)
 
 ### Ticker Status (Legacy Point-Metric Gates)
 
@@ -175,19 +188,37 @@ python paper/reproduce.py --all
 
 **Density governance (CRPS/PIT/tail) mostly failing.** Even best tickers fail CRPS skill at longer horizons. The MC engine produces calibrated binary probabilities but the full return distribution needs work.
 
-### Recent Changes (2026-04-03)
+### Recent Changes (2026-04-04)
+
+**Statistical rigor + live prediction mode + honest scoping:**
+
+1. **N_eff fix** (`evaluation.py`): ACF now computed on prediction residuals `(p_cal - y)` instead of binary labels. Removes upward bias in effective sample size estimates.
+2. **Bootstrap CIs** (`evaluation.py`): BCa bootstrap CIs for BSS, AUC, and ECE. All paper tables now report `metric [95% CI]`.
+3. **FDR correction** (`evaluation.py`, `run_paper_results.py`, `run_ablation_study.py`): Benjamini-Hochberg FDR correction across all hypothesis tests. Tables show both raw and adjusted p-values.
+4. **ECE detailed** (`evaluation.py`): Per-bin sample counts reported alongside ECE for reviewer transparency.
+5. **Gradient Boosting baseline** (`baselines.py`): HistGradientBoostingClassifier on vol features — strongest fair baseline. Walk-forward expanding-window, same splits.
+6. **Calibrator serialization** (`calibration.py`): `export_state()`/`from_state()` on OnlineCalibrator, MultiFeatureCalibrator, HistogramCalibrator. JSON format.
+7. **GARCH state persistence** (`garch.py`): `export_state()`/`from_state()` on GarchResult.
+8. **Backtest state checkpoint** (`backtest.py`): Final calibrator and GARCH states saved in `result_df.attrs`.
+9. **Live prediction engine** (`predict.py`): Loads checkpoint, fetches latest prices, runs MC, applies calibrators, returns `PredictionResult` per horizon.
+10. **Async label resolution** (`resolve.py`): Resolves past predictions as outcomes become available.
+11. **`--predict-now` CLI** (`run.py`): Generate live predictions from CLI. Loads checkpoint or runs backtest first.
+12. **Transaction cost model** (`run_economic_significance.py`): Sensitivity sweep at 0/5/10/20 bps per trade.
+13. **Daily scheduling** (`scripts/daily_predict.py`): Cron-ready script for daily predictions with logging.
+14. **312 tests passing** (was 296). 16 new tests for all Phase 1-2 features.
+
+### Previous Changes (2026-04-03)
 
 **Academic paper infrastructure (Phase 1-3):**
 
-1. **Baselines module** (`scripts/baselines.py`): Four formal baseline models — Historical Frequency (rolling event rate), GARCH-CDF (parametric, no MC), Implied-Vol Black-Scholes, Feature Logistic Regression. All run through the same evaluation pipeline.
-2. **Ablation study** (`scripts/run_ablation_study.py`): Systematic 7-variant ablation (Base GBM → +GARCH-in-Sim → +Student-t → +MF Cal → +Histogram → +Implied Vol → Full). Paired bootstrap significance vs base variant.
-3. **Temporal hold-out** (`scripts/run_temporal_holdout.py`): Train through 2019-12-31, test 2020-2025. Per-era breakdown (COVID, tightening, post-2023). Runs baselines on same split.
-4. **Significance testing** (`scripts/run_paper_results.py`): Generates LaTeX-ready tables with paired bootstrap p-values, confidence intervals, gate pass/fail. Tables output to `outputs/paper/tables/`.
-5. **Economic significance** (`scripts/run_economic_significance.py`): Risk-managed portfolio (reduce weight when p > threshold) and selective hedging analysis. Sharpe, max drawdown, CVaR comparisons.
-6. **Publication figures** (`scripts/generate_paper_figures.py`): Multi-panel reliability diagrams, ablation heatmaps, baseline comparison charts, rolling ECE plots. Publication-quality PDF/PNG.
-7. **Full LaTeX paper** (`paper/main.tex`): ~16-page paper with abstract, intro, related work (20 citations), methodology, experimental setup, results, discussion, conclusion. BibTeX references in `paper/references.bib`.
-8. **Reproducibility package** (`paper/reproduce.py`): Single script to regenerate all paper tables and figures. `--all` flag or individual `--main-results`, `--ablation`, `--holdout`, `--economic`, `--figures`.
-9. **296 tests still passing.**
+1. **Baselines module** (`scripts/baselines.py`): Five formal baseline models — Historical Frequency, GARCH-CDF, Implied-Vol Black-Scholes, Feature Logistic Regression, Gradient Boosting. All walk-forward.
+2. **Ablation study** (`scripts/run_ablation_study.py`): Systematic 7-variant ablation with FDR-corrected paired bootstrap significance.
+3. **Temporal hold-out** (`scripts/run_temporal_holdout.py`): Train through 2019-12-31, test 2020-2025. Per-era breakdown.
+4. **Significance testing** (`scripts/run_paper_results.py`): LaTeX tables with bootstrap CIs, FDR-adjusted p-values.
+5. **Economic significance** (`scripts/run_economic_significance.py`): Risk-managed portfolio + selective hedging + transaction cost sensitivity.
+6. **Publication figures** (`scripts/generate_paper_figures.py`): Multi-panel reliability diagrams, ablation heatmaps, charts.
+7. **Full LaTeX paper** (`paper/main.tex`): ~16-page paper with references.
+8. **Reproducibility package** (`paper/reproduce.py`): Single script to regenerate all paper artifacts.
 
 ### Previous Changes (2026-03-10)
 
@@ -224,9 +255,9 @@ python paper/reproduce.py --all
 ### Next Steps
 
 1. **Run paper reproduction** — `python paper/reproduce.py --all` to generate all tables/figures with real numbers
-2. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
-3. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
-4. **Update paper tables** with actual reproduction numbers (current tables have representative values from RESULTS.md)
+2. **Update paper/main.tex** — Reframe scope to H=5/H=10 primary, H=20 as limitation. Add "From Backtest to Production" section.
+3. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
+4. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
 5. **Submit to IJF or Quantitative Finance** — best venue fit for calibration + walk-forward methodology
 
 ### Standard Workflow

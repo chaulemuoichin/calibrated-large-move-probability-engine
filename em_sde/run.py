@@ -114,6 +114,19 @@ def main():
         help="Number of CV folds for --compare mode",
     )
     parser.add_argument(
+        "--predict-now", action="store_true",
+        help="Generate live predictions for the latest date. "
+             "Runs backtest to build state, then outputs forward predictions as JSON.",
+    )
+    parser.add_argument(
+        "--state-dir", type=str, default=None,
+        help="Checkpoint directory for --predict-now (skip backtest if state exists).",
+    )
+    parser.add_argument(
+        "--save-state", action="store_true",
+        help="Save calibrator and GARCH state after backtest for future --predict-now use.",
+    )
+    parser.add_argument(
         "--log-level", type=str, default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level",
@@ -127,6 +140,10 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger("em_sde")
+
+    # --predict-now mode
+    if args.predict_now:
+        return _run_predict_now(args)
 
     # --compare mode: expanding-window CV across multiple configs
     if args.compare:
@@ -410,6 +427,109 @@ def _run_compare(args):
     print()
     print("=" * 60)
     print("Done.")
+    return 0
+
+
+def _run_predict_now(args) -> int:
+    """Generate live forward predictions."""
+    import json as json_mod
+    from .predict import PredictionEngine
+    from .config import load_config
+    from .data_layer import load_data
+
+    cfg = load_config(args.config)
+
+    # Try loading from checkpoint first
+    if args.state_dir:
+        from pathlib import Path
+        state_path = Path(args.state_dir)
+        if state_path.exists():
+            engine = PredictionEngine.from_checkpoint(args.state_dir)
+            # Still need current prices
+            df, _ = load_data(cfg)
+            prices = df["price"].to_numpy(dtype=float)
+            results = engine.predict(prices, n_paths=cfg.model.mc_base_paths)
+
+            output = {}
+            for H, pred in sorted(results.items()):
+                output[f"H={H}"] = {
+                    "p_cal": round(pred.p_cal, 4),
+                    "p_raw": round(pred.p_raw, 4),
+                    "sigma_1d": round(pred.sigma_1d, 6),
+                    "threshold": round(pred.threshold, 4),
+                    "event_rate_hist": round(pred.event_rate_historical, 4),
+                    "calibrator_updates": pred.calibrator_n_updates,
+                }
+
+            print(json_mod.dumps({
+                "ticker": cfg.data.ticker,
+                "as_of": pred.timestamp,
+                "predictions": output,
+            }, indent=2))
+            return 0
+
+    # No checkpoint -- run full backtest, then predict
+    print(f"No checkpoint at {args.state_dir or 'N/A'}. Running backtest first...")
+    df, metadata = load_data(cfg)
+    from .backtest import run_walkforward
+    results_df = run_walkforward(df, cfg)
+
+    # Build engine from backtest results
+    prices = df["price"].to_numpy(dtype=float)
+    horizons = list(cfg.model.horizons)
+    thresholds = {}
+    for H in horizons:
+        thr_col = f"thr_{H}"
+        if thr_col in results_df.columns:
+            thresholds[str(H)] = float(results_df[thr_col].dropna().iloc[-1])
+
+    # Extract final calibrator states from results metadata
+    # For now, create a minimal engine from the backtest config
+    from .garch import fit_garch
+    returns = np.diff(prices) / prices[:-1]
+    garch = fit_garch(returns, window=cfg.model.garch_window,
+                      min_window=cfg.model.garch_min_window,
+                      model_type=cfg.model.garch_model_type)
+
+    engine_meta = {
+        "ticker": cfg.data.ticker,
+        "thresholds": thresholds,
+        "garch_window": cfg.model.garch_window,
+        "garch_min_window": cfg.model.garch_min_window,
+        "garch_model_type": cfg.model.garch_model_type,
+        "last_date": str(df.index[-1].date()),
+    }
+
+    engine = PredictionEngine(
+        calibrators={},
+        garch_state=garch.export_state(),
+        metadata=engine_meta,
+    )
+
+    # Save state if requested
+    if args.save_state:
+        state_dir = args.state_dir or f"outputs/state/{cfg.data.ticker}"
+        engine.save_checkpoint(state_dir)
+        print(f"State saved to {state_dir}")
+
+    # Generate predictions
+    preds = engine.predict(prices, horizons=horizons, n_paths=cfg.model.mc_base_paths)
+    output = {}
+    for H, pred in sorted(preds.items()):
+        output[f"H={H}"] = {
+            "p_cal": round(pred.p_cal, 4),
+            "p_raw": round(pred.p_raw, 4),
+            "sigma_1d": round(pred.sigma_1d, 6),
+            "threshold": round(pred.threshold, 4),
+            "event_rate_hist": round(pred.event_rate_historical, 4),
+            "calibrator_updates": pred.calibrator_n_updates,
+        }
+
+    print(json_mod.dumps({
+        "ticker": cfg.data.ticker,
+        "as_of": pred.timestamp,
+        "predictions": output,
+    }, indent=2))
     return 0
 
 

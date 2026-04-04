@@ -423,6 +423,7 @@ def run_walkforward(
         n, warmup, horizons,
     )
 
+    last_garch = None
     for idx in range(warmup, n):
         row = {"date": dates[idx]}
 
@@ -490,6 +491,7 @@ def run_walkforward(
                 projected = True
 
         sigma_1d = garch_result.sigma_1d
+        last_garch = garch_result
         row["sigma_garch_1d"] = sigma_1d
         row["sigma_source"] = garch_result.source
         row["garch_projected"] = projected
@@ -872,7 +874,21 @@ def run_walkforward(
             )
 
     logger.info("Walk-forward complete: %d prediction rows", len(results_list))
-    return pd.DataFrame(results_list)
+    result_df = pd.DataFrame(results_list)
+
+    # Attach final calibrator states for checkpoint export
+    cal_states = {}
+    if calibrators_mf is not None:
+        for h, cal in calibrators_mf.items():
+            cal_states[h] = cal.export_state()
+    elif calibrators_online is not None:
+        for h, cal in calibrators_online.items():
+            cal_states[h] = cal.export_state()
+    result_df.attrs["calibrator_states"] = cal_states
+    if last_garch is not None:
+        result_df.attrs["garch_state"] = last_garch.export_state()
+
+    return result_df
 
 
 def _simulate_horizon(

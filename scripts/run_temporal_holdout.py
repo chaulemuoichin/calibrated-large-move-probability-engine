@@ -69,7 +69,7 @@ def run_temporal_holdout(ticker: str, cutoff: str = "2019-12-31") -> pd.DataFram
         raise ValueError(f"Unknown ticker: {ticker}")
 
     cfg = load_config(config_path)
-    df = load_data(cfg.data)
+    df, _ = load_data(cfg)
     cutoff_date = pd.Timestamp(cutoff)
     horizons = cfg.model.horizons
 

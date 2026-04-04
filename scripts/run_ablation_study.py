@@ -34,7 +34,7 @@ from em_sde.data_layer import load_data
 from em_sde.model_selection import expanding_window_cv, apply_promotion_gates_oof
 from em_sde.evaluation import (
     brier_score, brier_skill_score, auc_roc, expected_calibration_error,
-    paired_bootstrap_loss_diff_pvalue,
+    paired_bootstrap_loss_diff_pvalue, apply_fdr_correction,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -176,7 +176,7 @@ def run_ablation(ticker: str, n_folds: int = 5) -> pd.DataFrame:
         raise ValueError(f"Unknown ticker: {ticker}. Available: {list(TICKER_CONFIGS.keys())}")
 
     base_cfg = load_config(config_path)
-    df = load_data(base_cfg.data)
+    df, _ = load_data(base_cfg)
     horizons = base_cfg.model.horizons
 
     logger.info("=== Ablation Study: %s (%d rows, %d folds) ===", ticker.upper(), len(df), n_folds)
@@ -248,6 +248,12 @@ def run_ablation(ticker: str, n_folds: int = 5) -> pd.DataFrame:
             })
 
     results_df = pd.DataFrame(results_rows)
+
+    # Apply FDR correction across all ablation p-values
+    raw_pvals = results_df["p_value_vs_base"].tolist()
+    adj_pvals, reject = apply_fdr_correction(raw_pvals, alpha=0.05)
+    results_df["p_value_fdr"] = adj_pvals
+    results_df["fdr_reject"] = reject
 
     # Save
     os.makedirs("outputs/paper", exist_ok=True)

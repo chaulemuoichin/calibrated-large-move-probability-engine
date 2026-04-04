@@ -1,0 +1,66 @@
+{
+  "created_at": "2026-04-04T05:20:10.615949Z",
+  "root": "test_runtime_artifacts/outputs_schema_e42c27d2/test_run",
+  "files": [
+    {
+      "path": "charts/probability_timeseries.png",
+      "size_bytes": 887344,
+      "sha256": "bf3d1d3e624b6b678bfb9115ee82087bb0d97864681b0cb4a2ba7ae6b2a41a17"
+    },
+    {
+      "path": "charts/probability_vs_price.png",
+      "size_bytes": 212936,
+      "sha256": "e08a3c0b30806dad28102ad86a9dc08137ad07d473d90b93626c5e074afb1262"
+    },
+    {
+      "path": "charts/realized_return_hist.png",
+      "size_bytes": 68973,
+      "sha256": "6fe5371bac55812fa88fc7932f8062401432fb2b3ef6f989956f0a6a1dffc5c6"
+    },
+    {
+      "path": "charts/reliability_diagram.png",
+      "size_bytes": 134744,
+      "sha256": "3d0e221537cd7f15a004a9d87fb0b6e9cf5f9d749bedd41cdfd1891284949a5f"
+    },
+    {
+      "path": "charts/rolling_brier.png",
+      "size_bytes": 116763,
+      "sha256": "4db158be554b72e777cf97204781b3fcda6581e281c44a62b0f0cfa72b09d698"
+    },
+    {
+      "path": "charts/signal_heatmap.png",
+      "size_bytes": 45361,
+      "sha256": "78e59ecda021fd27944bb543e44a953d329bf065aee07852cf1c98edeea4740d"
+    },
+    {
+      "path": "charts/volatility_regime.png",
+      "size_bytes": 135700,
+      "sha256": "193d2ccb5b60a85d25333b1f1e77a93f110dde3477fa499caa34e46f4d352814"
+    },
+    {
+      "path": "data_snapshot.csv",
+      "size_bytes": 15215,
+      "sha256": "a16839c4e9376f36e6ea97e29c64fd2ba7e34cefac75c5b509668b09e30291b3"
+    },
+    {
+      "path": "data_snapshot_manifest.json",
+      "size_bytes": 206,
+      "sha256": "bec4f9de18f507d83453ce19a73283b30ee20147bacff7a5fceb66cbd199653d"
+    },
+    {
+      "path": "reliability.csv",
+      "size_bytes": 1629,
+      "sha256": "33bcccd38e03fbfcdd981aed0a09c2c4f4d41b083bc208b0fc97334cb293f07b"
+    },
+    {
+      "path": "results.csv",
+      "size_bytes": 204123,
+      "sha256": "a221b370e19f9fbbab1da6a79f8574b5c13e56d59953e4b9987fd55d1fa47108"
+    },
+    {
+      "path": "summary.json",
+      "size_bytes": 4450,
+      "sha256": "283356394eec0605dfd7ef99a0ab2219089d76907c66edc8ea5d48a49fda96b9"
+    }
+  ]
+}

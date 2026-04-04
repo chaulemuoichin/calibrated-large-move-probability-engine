@@ -66,6 +66,7 @@ def risk_managed_portfolio(
     H: int = 5,
     p_threshold: float = 0.20,
     reduced_weight: float = 0.5,
+    cost_bps: float = 0.0,
 ) -> dict:
     """
     Risk-managed portfolio: reduce exposure when P(large move) > threshold.
@@ -123,6 +124,14 @@ def risk_managed_portfolio(
         bh_ret = ret
         rm_ret = weight * ret
 
+        # Transaction cost when weight changes
+        if i > 0:
+            prev_date = dates[i] if i < len(dates) else dates[-1]
+            prev_p = p_by_date.get(prev_date, last_p)
+            prev_weight = reduced_weight if prev_p >= p_threshold else 1.0
+            if abs(weight - prev_weight) > 0.01 and cost_bps > 0:
+                rm_ret -= abs(weight - prev_weight) * cost_bps / 10000.0
+
         bh_returns.append(bh_ret)
         rm_returns.append(rm_ret)
         bh_equity.append(bh_equity[-1] * (1 + bh_ret))
@@ -138,6 +147,7 @@ def risk_managed_portfolio(
         "horizon": H,
         "p_threshold": p_threshold,
         "reduced_weight": reduced_weight,
+        "cost_bps": cost_bps,
         "bh_sharpe": _annualized_sharpe(bh_returns),
         "rm_sharpe": _annualized_sharpe(rm_returns),
         "sharpe_improvement": _annualized_sharpe(rm_returns) - _annualized_sharpe(bh_returns),
@@ -244,7 +254,7 @@ def run_economic_analysis(ticker: str) -> pd.DataFrame:
         raise ValueError(f"Unknown ticker: {ticker}")
 
     cfg = load_config(config_path)
-    df = load_data(cfg.data)
+    df, _meta = load_data(cfg)
     prices = df["price"].to_numpy(dtype=float)
 
     logger.info("Running walk-forward for %s...", ticker.upper())
@@ -254,15 +264,17 @@ def run_economic_analysis(ticker: str) -> pd.DataFrame:
 
     for H in cfg.model.horizons:
         for p_thr in [0.15, 0.20, 0.25, 0.30]:
-            # Risk management
-            rm = risk_managed_portfolio(
-                results, prices, df.index, H=H, p_threshold=p_thr,
-            )
-            if rm:
-                rm["ticker"] = ticker.upper()
-                all_results.append(rm)
+            # Risk management with transaction cost sensitivity
+            for cost in [0, 5, 10, 20]:
+                rm = risk_managed_portfolio(
+                    results, prices, df.index, H=H, p_threshold=p_thr,
+                    cost_bps=cost,
+                )
+                if rm:
+                    rm["ticker"] = ticker.upper()
+                    all_results.append(rm)
 
-            # Selective hedging
+            # Selective hedging (no cost sweep needed -- hedge cost is built in)
             sh = selective_hedging_analysis(
                 results, prices, df.index, H=H, p_threshold=p_thr,
             )

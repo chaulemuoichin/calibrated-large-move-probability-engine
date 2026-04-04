@@ -9,7 +9,7 @@
 \usepackage{multirow}
 \usepackage{hyperref}
 \usepackage{cleveref}
-\usepackage{natbib}
+% natbib removed — references inlined via thebibliography
 \usepackage{algorithm}
 \usepackage{algorithmic}
 \usepackage[margin=1in]{geometry}
@@ -72,9 +72,9 @@ High-probability large moves warrant smaller positions or protective hedges; low
 Existing approaches to this problem have significant limitations:
 \begin{itemize}
   \item \textbf{Value-at-Risk (VaR)} estimates one-sided tail quantiles, not two-sided move probabilities. VaR answers ``How bad can it get?'' not ``How much will it move?''
-  \item \textbf{Implied volatility} from options markets captures risk-neutral expectations, which systematically overstate physical probabilities due to the variance risk premium \citep{bollerslev2009expected}.
+  \item \textbf{Implied volatility} from options markets captures risk-neutral expectations, which systematically overstate physical probabilities due to the variance risk premium \cite{bollerslev2009expected}.
   \item \textbf{GARCH-family models} provide conditional variance forecasts but translating these into calibrated binary event probabilities is non-trivial and rarely validated.
-  \item \textbf{Machine learning classifiers} can predict binary outcomes but often sacrifice calibration for discrimination, producing confident but poorly calibrated probabilities \citep{guo2017calibration}.
+  \item \textbf{Machine learning classifiers} can predict binary outcomes but often sacrifice calibration for discrimination, producing confident but poorly calibrated probabilities \cite{guo2017calibration}.
 \end{itemize}
 
 We address this gap with a complete framework that:
@@ -103,44 +103,44 @@ Our contributions are:
 \subsection{Probability Calibration}
 
 Probability calibration ensures that predicted probabilities match observed frequencies.
-\citet{platt1999probabilistic} introduced sigmoid-based calibration for SVM outputs.
-\citet{niculescu2005predicting} compared Platt scaling with isotonic regression and histogram binning.
-\citet{guo2017calibration} showed that modern neural networks are poorly calibrated despite high accuracy, motivating post-hoc calibration as standard practice.
+\cite{platt1999probabilistic} introduced sigmoid-based calibration for SVM outputs.
+\cite{niculescu2005predicting} compared Platt scaling with isotonic regression and histogram binning.
+\cite{guo2017calibration} showed that modern neural networks are poorly calibrated despite high accuracy, motivating post-hoc calibration as standard practice.
 
-In the forecasting literature, proper scoring rules \citep{gneiting2007strictly} provide the theoretical foundation: the Brier score decomposes into calibration, resolution, and uncertainty components.
-\citet{brocker2007increasing} demonstrated that reliability and sharpness jointly determine forecast quality.
+In the forecasting literature, proper scoring rules \cite{gneiting2007strictly} provide the theoretical foundation: the Brier score decomposes into calibration, resolution, and uncertainty components.
+\cite{brocker2007increasing} demonstrated that reliability and sharpness jointly determine forecast quality.
 
 Our work extends online Platt calibration to a multi-feature setting with regime conditioning and histogram post-calibration, specifically designed for non-stationary financial time series where batch calibration methods would require lookahead.
 
 \subsection{Volatility Modeling and GARCH}
 
-The GARCH(1,1) model \citep{bollerslev1986generalized} and its asymmetric extension GJR-GARCH \citep{glosten1993relation} remain the workhorses of financial volatility estimation.
-\citet{hansen2005forecast} showed that simple GARCH(1,1) is difficult to beat in out-of-sample forecasting, despite the proliferation of complex variants.
+The GARCH(1,1) model \cite{bollerslev1986generalized} and its asymmetric extension GJR-GARCH \cite{glosten1993relation} remain the workhorses of financial volatility estimation.
+\cite{hansen2005forecast} showed that simple GARCH(1,1) is difficult to beat in out-of-sample forecasting, despite the proliferation of complex variants.
 
 For multi-step forecasting, the GARCH conditional variance mean-reverts toward the unconditional level at a rate determined by persistence $\phi = \alpha + \beta$ (or $\alpha + \beta + \gamma/2$ for GJR).
 We address this through GARCH-in-simulation, where vol dynamics evolve within each MC path rather than using a static multi-step forecast.
 
 \subsection{Monte Carlo Simulation in Finance}
 
-Monte Carlo simulation for financial risk assessment dates to \citet{boyle1977options}.
-Merton jump-diffusion \citep{merton1976option} adds discontinuous price changes to capture crash risk.
-Student-$t$ innovations \citep{bollerslev1987conditionally} provide heavier tails than the Gaussian assumption.
+Monte Carlo simulation for financial risk assessment dates to \cite{boyle1977options}.
+Merton jump-diffusion \cite{merton1976option} adds discontinuous price changes to capture crash risk.
+Student-$t$ innovations \cite{bollerslev1987conditionally} provide heavier tails than the Gaussian assumption.
 
 Our innovation is using the MC simulation not as a pricing tool but as a \emph{probability generation} layer: the fraction of simulated paths exceeding a threshold becomes the raw probability input to calibration.
 This approach naturally handles the non-linear mapping from volatility to event probability, including asymmetric effects from GJR leverage and jump-diffusion.
 
 \subsection{Walk-Forward Evaluation}
 
-\citet{tashman2000out} established walk-forward (rolling origin) evaluation as the standard for time-series forecast validation.
-\citet{bergmeir2012use} analyzed cross-validation strategies for time series, showing that expanding-window approaches maintain temporal ordering.
+\cite{tashman2000out} established walk-forward (rolling origin) evaluation as the standard for time-series forecast validation.
+\cite{bergmeir2012use} analyzed cross-validation strategies for time series, showing that expanding-window approaches maintain temporal ordering.
 
 Our resolution queue mechanism extends standard walk-forward by explicitly tracking which predictions have been resolved and preventing any data leakage through the calibration update process.
 
 \subsection{Binary Event Prediction in Finance}
 
-\citet{christoffersen1998evaluating} proposed tests for conditional coverage of VaR exceedances.
-\citet{engle2004caviar} introduced CAViaR for quantile regression of tail risk.
-\citet{patton2015good} developed tests for optimal VaR and ES forecasts.
+\cite{christoffersen1998evaluating} proposed tests for conditional coverage of VaR exceedances.
+\cite{engle2004caviar} introduced CAViaR for quantile regression of tail risk.
+\cite{patton2015good} developed tests for optimal VaR and ES forecasts.
 
 Unlike these approaches which focus on one-sided tail risk, our framework targets two-sided large moves---a fundamentally different prediction target relevant to position sizing and hedging decisions where the direction of the move matters less than its magnitude.
 
@@ -175,7 +175,7 @@ where $\epsilon_t = r_t - \mu$ is the return innovation and $\gamma$ captures th
 When fitted persistence $\phi = \alpha + \beta + \gamma/2 \geq 1$, we project to a target persistence $\phi^* = 0.98$ by scaling: $\alpha' = s\alpha$, $\beta' = s\beta$, $\gamma' = s\gamma$ where $s = \phi^*/\phi$, and set $\omega' = \sigma_t^2(1 - \phi^*)$ to anchor the unconditional variance to the current forecast.
 
 \textbf{EWMA fallback.}
-If GARCH fitting fails (optimizer non-convergence), we use Exponentially Weighted Moving Average volatility with a 252-day span \citep{jp1996riskmetrics}.
+If GARCH fitting fails (optimizer non-convergence), we use Exponentially Weighted Moving Average volatility with a 252-day span \cite{jp1996riskmetrics}.
 
 \subsection{Monte Carlo Simulation}
 
@@ -269,7 +269,7 @@ ECE $< 0.02$ is our promotion threshold.
 
 \textbf{Effective Sample Size:} We account for overlap-induced autocorrelation in H-step predictions via Bartlett-type correction: $\Neff = N / (1 + 2\sum_{k=1}^{H-1}(1-k/H)\hat{\rho}_k)$.
 
-\textbf{Statistical Significance:} Paired bootstrap test \citep{efron1993introduction} on per-observation Brier score differences, with 2000 resamples.
+\textbf{Statistical Significance:} Paired bootstrap test \cite{efron1993introduction} on per-observation Brier score differences, with 2000 resamples.
 
 \subsection{Anti-Overfitting Framework}
 \label{sec:antioverfitting}
@@ -279,7 +279,7 @@ We implement five explicit overfitting controls:
 
 \begin{enumerate}
   \item \textbf{Lean Bayesian optimization:} 6 tunable parameters (from an original 14) via Optuna TPE. Fixed at defaults: $t$-df values, minimum calibrator updates, HAR-RV flag.
-  \item \textbf{Adaptive event-rate guard:} $r_\text{min} = \max\!\left(\frac{100 \times n_\text{params}}{2 \times N_\text{oof}},\, 0.03\right)$, ensuring $\geq 100$ events per parameter \citep{vittinghoff2007relaxing}.
+  \item \textbf{Adaptive event-rate guard:} $r_\text{min} = \max\!\left(\frac{100 \times n_\text{params}}{2 \times N_\text{oof}},\, 0.03\right)$, ensuring $\geq 100$ events per parameter \cite{vittinghoff2007relaxing}.
   \item \textbf{$\Neff$/parameter ratio tracking:} GREEN ($>100\times$), YELLOW ($50$--$100\times$), RED ($<50\times$).
   \item \textbf{Generalization gap monitoring:} $\Delta = (\text{ECE}_\text{full} - \text{ECE}_\text{BO}) / \text{ECE}_\text{BO}$. GREEN if $\Delta < 0.25$.
   \item \textbf{Temporal stability check:} Brier scores in later CV folds should not be systematically worse than earlier folds.
@@ -564,7 +564,108 @@ Code and data for reproducing all results are available at: [repository URL].
 % =========================================================================
 % REFERENCES
 % =========================================================================
-\bibliographystyle{plainnat}
-\bibliography{references}
+\begin{thebibliography}{20}
+
+\bibitem{bergmeir2012use}
+C.~Bergmeir and J.~M. Ben\'{\i}tez.
+\newblock On the use of cross-validation for time series predictor evaluation.
+\newblock \emph{Information Sciences}, 191:192--213, 2012.
+
+\bibitem{bollerslev1986generalized}
+T.~Bollerslev.
+\newblock Generalized autoregressive conditional heteroskedasticity.
+\newblock \emph{Journal of Econometrics}, 31(3):307--327, 1986.
+
+\bibitem{bollerslev1987conditionally}
+T.~Bollerslev.
+\newblock A conditionally heteroskedastic time series model for speculative prices and rates of return.
+\newblock \emph{The Review of Economics and Statistics}, 69(3):542--547, 1987.
+
+\bibitem{bollerslev2009expected}
+T.~Bollerslev, G.~Tauchen, and H.~Zhou.
+\newblock Expected stock returns and variance risk premia.
+\newblock \emph{The Review of Financial Studies}, 22(11):4463--4492, 2009.
+
+\bibitem{boyle1977options}
+P.~P. Boyle.
+\newblock Options: A {Monte Carlo} approach.
+\newblock \emph{Journal of Financial Economics}, 4(3):323--338, 1977.
+
+\bibitem{brocker2007increasing}
+J.~Br{\"o}cker and L.~A. Smith.
+\newblock Increasing the reliability of reliability diagrams.
+\newblock \emph{Weather and Forecasting}, 22(3):651--661, 2007.
+
+\bibitem{christoffersen1998evaluating}
+P.~F. Christoffersen.
+\newblock Evaluating interval forecasts.
+\newblock \emph{International Economic Review}, 39(4):841--862, 1998.
+
+\bibitem{efron1993introduction}
+B.~Efron and R.~J. Tibshirani.
+\newblock \emph{An Introduction to the Bootstrap}.
+\newblock Chapman and Hall/CRC, 1993.
+
+\bibitem{engle2004caviar}
+R.~F. Engle and S.~Manganelli.
+\newblock {CAViaR}: Conditional autoregressive value at risk by regression quantiles.
+\newblock \emph{Journal of Business \& Economic Statistics}, 22(4):367--381, 2004.
+
+\bibitem{glosten1993relation}
+L.~R. Glosten, R.~Jagannathan, and D.~E. Runkle.
+\newblock On the relation between the expected value and the volatility of the nominal excess return on stocks.
+\newblock \emph{The Journal of Finance}, 48(5):1779--1801, 1993.
+
+\bibitem{gneiting2007strictly}
+T.~Gneiting and A.~E. Raftery.
+\newblock Strictly proper scoring rules, prediction, and estimation.
+\newblock \emph{Journal of the American Statistical Association}, 102(477):359--378, 2007.
+
+\bibitem{guo2017calibration}
+C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger.
+\newblock On calibration of modern neural networks.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine Learning}, pages 1321--1330, 2017.
+
+\bibitem{hansen2005forecast}
+P.~R. Hansen and A.~Lunde.
+\newblock A forecast comparison of volatility models: does anything beat a {GARCH}(1,1)?
+\newblock \emph{Journal of Applied Econometrics}, 20(7):873--889, 2005.
+
+\bibitem{jp1996riskmetrics}
+{J.P. Morgan}.
+\newblock {RiskMetrics} -- Technical Document.
+\newblock Technical report, J.P. Morgan/Reuters, 1996.
+
+\bibitem{merton1976option}
+R.~C. Merton.
+\newblock Option pricing when underlying stock returns are discontinuous.
+\newblock \emph{Journal of Financial Economics}, 3(1-2):125--144, 1976.
+
+\bibitem{niculescu2005predicting}
+A.~Niculescu-Mizil and R.~Caruana.
+\newblock Predicting good probabilities with supervised learning.
+\newblock In \emph{Proceedings of the 22nd International Conference on Machine Learning}, pages 625--632, 2005.
+
+\bibitem{patton2015good}
+A.~J. Patton.
+\newblock Evaluating volatility and correlation forecasts.
+\newblock In \emph{Handbook of Economic Forecasting}, volume~2, pages 801--838. Elsevier, 2015.
+
+\bibitem{platt1999probabilistic}
+J.~Platt.
+\newblock Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.
+\newblock In \emph{Advances in Large Margin Classifiers}, pages 61--74. MIT Press, 1999.
+
+\bibitem{tashman2000out}
+L.~J. Tashman.
+\newblock Out-of-sample tests of forecasting accuracy: an analysis and review.
+\newblock \emph{International Journal of Forecasting}, 16(4):437--450, 2000.
+
+\bibitem{vittinghoff2007relaxing}
+E.~Vittinghoff and C.~E. McCulloch.
+\newblock Relaxing the rule of ten events per variable in logistic and {Cox} regression.
+\newblock \emph{American Journal of Epidemiology}, 165(6):710--718, 2007.
+
+\end{thebibliography}
 
 \end{document}

@@ -4,7 +4,7 @@ Evaluation metrics: calibration, discrimination, and density diagnostics.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple, Callable
 
 _EPS = 1e-15
 
@@ -155,26 +155,39 @@ def expected_calibration_error(
     return float(ece)
 
 
-def effective_sample_size(y: np.ndarray, H: int) -> float:
+def effective_sample_size(
+    y: np.ndarray,
+    H: int,
+    p_cal: Optional[np.ndarray] = None,
+) -> float:
     """
     Estimate effective sample size accounting for H-step overlap autocorrelation.
 
     Uses Bartlett-type correction: N_eff = N / (1 + 2 * sum of weighted ACF).
     For non-overlapping (H=1), returns N.
+
+    When p_cal is provided, ACF is computed on prediction residuals (p_cal - y)
+    rather than on binary labels. Residuals have a continuous distribution that
+    produces more accurate ACF estimates and avoids the upward N_eff bias
+    inherent in computing ACF on binary (0/1) outcomes.
     """
     n = len(y)
     mask = ~np.isnan(y)
-    y_clean = y[mask]
-    n_clean = len(y_clean)
+    if p_cal is not None:
+        mask = mask & ~np.isnan(p_cal)
+        series = (p_cal[mask] - y[mask])
+    else:
+        series = y[mask]
+    n_clean = len(series)
     if n_clean <= H or H <= 1:
         return float(n_clean)
-    y_centered = y_clean - np.mean(y_clean)
-    var_y = float(np.var(y_clean))
-    if var_y < 1e-15:
+    centered = series - np.mean(series)
+    var_s = float(np.var(series))
+    if var_s < 1e-15:
         return float(n_clean)
     acf_sum = 0.0
     for lag in range(1, H):
-        acf_lag = float(np.mean(y_centered[lag:] * y_centered[:-lag])) / var_y
+        acf_lag = float(np.mean(centered[lag:] * centered[:-lag])) / var_s
         acf_sum += (1.0 - lag / H) * acf_lag
     denom = 1.0 + 2.0 * acf_sum
     if denom <= 0:
@@ -380,6 +393,213 @@ def paired_bootstrap_loss_diff_pvalue(
 
 
 # ---------------------------------------------------------------------------
+# Statistical Rigor Utilities
+# ---------------------------------------------------------------------------
+
+
+def expected_calibration_error_detailed(
+    p: np.ndarray,
+    y: np.ndarray,
+    n_bins: int = 10,
+    adaptive: bool = True,
+) -> Dict[str, Any]:
+    """
+    ECE with per-bin sample counts for publication-quality reporting.
+
+    Returns dict with 'ece', 'bin_counts', 'min_bin_n', 'n_bins_used',
+    and 'bins' (list of per-bin dicts with lo, hi, n, mean_pred, mean_obs, error).
+    """
+    mask = ~np.isnan(y) & ~np.isnan(p)
+    if mask.sum() == 0:
+        return {"ece": np.nan, "bin_counts": [], "min_bin_n": 0,
+                "n_bins_used": 0, "bins": []}
+    p_m, y_m = p[mask], y[mask]
+    n = len(p_m)
+
+    if adaptive:
+        bin_edges = np.unique(np.quantile(p_m, np.linspace(0, 1, n_bins + 1)))
+        if len(bin_edges) < 2:
+            return {"ece": float(abs(np.mean(p_m) - np.mean(y_m))),
+                    "bin_counts": [n], "min_bin_n": n,
+                    "n_bins_used": 1, "bins": []}
+        n_actual_bins = len(bin_edges) - 1
+    else:
+        bin_edges = np.linspace(0, 1, n_bins + 1)
+        n_actual_bins = n_bins
+
+    ece = 0.0
+    bin_counts = []
+    bins_detail = []
+    for i in range(n_actual_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        if i < n_actual_bins - 1:
+            in_bin = (p_m >= lo) & (p_m < hi)
+        else:
+            in_bin = (p_m >= lo) & (p_m <= hi)
+        n_bin = int(in_bin.sum())
+        bin_counts.append(n_bin)
+        if n_bin > 0:
+            mean_pred = float(np.mean(p_m[in_bin]))
+            mean_obs = float(np.mean(y_m[in_bin]))
+            err = abs(mean_pred - mean_obs)
+            ece += (n_bin / n) * err
+            bins_detail.append({"lo": float(lo), "hi": float(hi), "n": n_bin,
+                                "mean_pred": mean_pred, "mean_obs": mean_obs,
+                                "error": err})
+
+    non_empty = [c for c in bin_counts if c > 0]
+    return {
+        "ece": float(ece),
+        "bin_counts": bin_counts,
+        "min_bin_n": min(non_empty) if non_empty else 0,
+        "n_bins_used": len(non_empty),
+        "bins": bins_detail,
+    }
+
+
+def bootstrap_metric_ci(
+    y_true: np.ndarray,
+    p_cal: np.ndarray,
+    metric_fn: Callable[[np.ndarray, np.ndarray], float],
+    n_boot: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> Tuple[float, float, float]:
+    """
+    Bootstrap confidence interval for any metric(p, y) -> float.
+
+    Uses BCa (bias-corrected accelerated) percentile method for better
+    small-sample coverage.
+
+    Returns (point_estimate, ci_low, ci_high).
+    """
+    y_true = np.asarray(y_true, dtype=np.float64).ravel()
+    p_cal = np.asarray(p_cal, dtype=np.float64).ravel()
+    mask = np.isfinite(y_true) & np.isfinite(p_cal)
+    y_true, p_cal = y_true[mask], p_cal[mask]
+    n = len(y_true)
+    if n < 10:
+        point = metric_fn(p_cal, y_true)
+        return (point, np.nan, np.nan)
+
+    point = metric_fn(p_cal, y_true)
+    rng = np.random.default_rng(seed)
+    boot_vals = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot_vals[b] = metric_fn(p_cal[idx], y_true[idx])
+
+    # BCa correction
+    finite_boots = boot_vals[np.isfinite(boot_vals)]
+    if len(finite_boots) < 100:
+        lo = float(np.nanpercentile(boot_vals, 100 * alpha / 2))
+        hi = float(np.nanpercentile(boot_vals, 100 * (1 - alpha / 2)))
+        return (point, lo, hi)
+
+    # Bias correction
+    z0 = float(_norm_ppf(np.mean(finite_boots < point)))
+    # Acceleration via jackknife
+    jack = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        jack_mask = np.ones(n, dtype=bool)
+        jack_mask[i] = False
+        jack[i] = metric_fn(p_cal[jack_mask], y_true[jack_mask])
+    jack_mean = np.mean(jack)
+    num = np.sum((jack_mean - jack) ** 3)
+    denom = 6.0 * (np.sum((jack_mean - jack) ** 2)) ** 1.5
+    a_hat = float(num / denom) if abs(denom) > 1e-15 else 0.0
+
+    # Adjusted percentiles
+    z_lo = _norm_ppf(alpha / 2)
+    z_hi = _norm_ppf(1 - alpha / 2)
+    alpha_lo = _norm_cdf(z0 + (z0 + z_lo) / (1 - a_hat * (z0 + z_lo)))
+    alpha_hi = _norm_cdf(z0 + (z0 + z_hi) / (1 - a_hat * (z0 + z_hi)))
+
+    lo = float(np.percentile(finite_boots, 100 * np.clip(alpha_lo, 0.001, 0.999)))
+    hi = float(np.percentile(finite_boots, 100 * np.clip(alpha_hi, 0.001, 0.999)))
+    return (point, lo, hi)
+
+
+def _norm_ppf(p: float) -> float:
+    """Inverse standard normal CDF (probit). Uses rational approximation."""
+    from math import sqrt, log, copysign
+    p = np.clip(p, 1e-10, 1 - 1e-10)
+    if p == 0.5:
+        return 0.0
+    # Rational approximation (Abramowitz & Stegun 26.2.23)
+    if p < 0.5:
+        t = sqrt(-2.0 * log(p))
+    else:
+        t = sqrt(-2.0 * log(1.0 - p))
+    c0, c1, c2 = 2.515517, 0.802853, 0.010328
+    d1, d2, d3 = 1.432788, 0.189269, 0.001308
+    val = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t ** 3)
+    return -val if p < 0.5 else val
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF using error function."""
+    from math import erf, sqrt
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+
+def apply_fdr_correction(
+    p_values: List[float],
+    alpha: float = 0.05,
+) -> Tuple[List[float], List[bool]]:
+    """
+    Benjamini-Hochberg FDR correction for multiple hypothesis testing.
+
+    Parameters
+    ----------
+    p_values : list of float
+        Raw p-values from individual tests.
+    alpha : float
+        Target false discovery rate (default 0.05).
+
+    Returns
+    -------
+    adjusted_pvals : list of float
+        FDR-adjusted p-values (monotonically non-decreasing in rank order).
+    reject : list of bool
+        Whether each null hypothesis is rejected at the given alpha.
+    """
+    n = len(p_values)
+    if n == 0:
+        return [], []
+
+    arr = np.asarray(p_values, dtype=np.float64)
+    # Handle NaN: treat as non-significant
+    finite_mask = np.isfinite(arr)
+    adjusted = np.ones(n, dtype=np.float64)
+    reject = [False] * n
+
+    if finite_mask.sum() == 0:
+        return adjusted.tolist(), reject
+
+    # BH procedure
+    order = np.argsort(arr)
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[order] = np.arange(1, n + 1, dtype=np.float64)
+
+    # Adjusted p-value: p_adj = p * n / rank, then enforce monotonicity
+    adjusted_raw = arr * n / ranks
+    # Step-up enforcement: walk from largest rank down
+    sorted_idx = order[::-1]
+    running_min = 1.0
+    for i in sorted_idx:
+        if not finite_mask[i]:
+            adjusted[i] = 1.0
+            continue
+        adjusted[i] = min(running_min, adjusted_raw[i])
+        running_min = adjusted[i]
+
+    adjusted = np.clip(adjusted, 0.0, 1.0)
+    reject = [bool(adjusted[i] <= alpha) for i in range(n)]
+    return adjusted.tolist(), reject
+
+
+# ---------------------------------------------------------------------------
 # Risk Analytics
 # ---------------------------------------------------------------------------
 
@@ -578,7 +798,7 @@ def _compute_horizon_metrics(
         "separation_cal": separation(p_cal, y),
         "event_rate": event_rate,
         "n": int(mask.sum()),
-        "n_eff": effective_sample_size(y, H),
+        "n_eff": effective_sample_size(y, H, p_cal=p_cal),
     }
 
 

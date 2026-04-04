@@ -14,10 +14,12 @@ Safety gate: when enabled, tracks rolling Brier of raw vs calibrated.
 If calibration is degrading performance, automatically falls back to raw.
 """
 
+import json
 import numpy as np
 import pandas as pd
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
 # Clipping bounds to avoid log(0) and overflow
@@ -177,6 +179,39 @@ class HistogramCalibrator:
         self._sum_obs[idx] += y
         self._count[idx] += 1.0
         self._recompute_corrections()
+
+    def export_state(self) -> dict:
+        """Export full state as a JSON-serializable dict."""
+        return {
+            "type": "HistogramCalibrator",
+            "n_bins": self.n_bins,
+            "min_samples_per_bin": self.min_samples_per_bin,
+            "decay": self.decay,
+            "prior_strength": self.prior_strength,
+            "monotonic": self.monotonic,
+            "interpolate": self.interpolate,
+            "sum_pred": self._sum_pred.tolist(),
+            "sum_obs": self._sum_obs.tolist(),
+            "count": self._count.tolist(),
+            "corrections": self._corrections.tolist(),
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "HistogramCalibrator":
+        """Restore a HistogramCalibrator from exported state."""
+        cal = cls(
+            n_bins=state["n_bins"],
+            min_samples_per_bin=state["min_samples_per_bin"],
+            decay=state["decay"],
+            prior_strength=state["prior_strength"],
+            monotonic=state["monotonic"],
+            interpolate=state.get("interpolate", False),
+        )
+        cal._sum_pred = np.array(state["sum_pred"], dtype=np.float64)
+        cal._sum_obs = np.array(state["sum_obs"], dtype=np.float64)
+        cal._count = np.array(state["count"], dtype=np.float64)
+        cal._corrections = np.array(state["corrections"], dtype=np.float64)
+        return cal
 
 
 def _make_post_calibrator(method: str, n_bins: int, min_samples: int,
@@ -743,6 +778,40 @@ class OnlineCalibrator:
             "gated": self._gate_active,
         }
 
+    def export_state(self) -> dict:
+        """Export full state as a JSON-serializable dict."""
+        state = {
+            "type": "OnlineCalibrator",
+            "a": self.a,
+            "b": self.b,
+            "lr": self.lr,
+            "adaptive_lr": self.adaptive_lr,
+            "min_updates": self.min_updates,
+            "n_updates": self.n_updates,
+            "safety_gate": self.safety_gate,
+            "gate_active": self._gate_active,
+        }
+        if self._histogram_cal is not None:
+            state["histogram_cal"] = self._histogram_cal.export_state()
+        return state
+
+    @classmethod
+    def from_state(cls, state: dict) -> "OnlineCalibrator":
+        """Restore an OnlineCalibrator from exported state."""
+        cal = cls(
+            lr=state["lr"],
+            adaptive_lr=state["adaptive_lr"],
+            min_updates=state["min_updates"],
+            safety_gate=state["safety_gate"],
+        )
+        cal.a = state["a"]
+        cal.b = state["b"]
+        cal.n_updates = state["n_updates"]
+        cal._gate_active = state.get("gate_active", False)
+        if "histogram_cal" in state:
+            cal._histogram_cal = HistogramCalibrator.from_state(state["histogram_cal"])
+        return cal
+
 
 class RegimeMultiFeatureCalibrator:
     """
@@ -1109,5 +1178,46 @@ class MultiFeatureCalibrator:
             "gated": self._gate_active,
             "weights": self.w.tolist(),
         }
+
+    def export_state(self) -> dict:
+        """Export full state as a JSON-serializable dict."""
+        state = {
+            "type": "MultiFeatureCalibrator",
+            "weights": self.w.tolist(),
+            "lr": self.lr,
+            "l2_reg": self.l2_reg,
+            "min_updates": self.min_updates,
+            "n_updates": self.n_updates,
+            "safety_gate": self.safety_gate,
+            "gate_active": self._gate_active,
+            "earnings_aware": self.earnings_aware,
+            "beta_calibration": self.beta_calibration,
+            "implied_vol_aware": self.implied_vol_aware,
+            "ohlc_aware": self.ohlc_aware,
+            "N_FEATURES": self.N_FEATURES,
+        }
+        if self._histogram_cal is not None:
+            state["histogram_cal"] = self._histogram_cal.export_state()
+        return state
+
+    @classmethod
+    def from_state(cls, state: dict) -> "MultiFeatureCalibrator":
+        """Restore a MultiFeatureCalibrator from exported state."""
+        cal = cls(
+            lr=state["lr"],
+            l2_reg=state["l2_reg"],
+            min_updates=state["min_updates"],
+            safety_gate=state["safety_gate"],
+            earnings_aware=state["earnings_aware"],
+            beta_calibration=state.get("beta_calibration", False),
+            implied_vol_aware=state.get("implied_vol_aware", False),
+            ohlc_aware=state.get("ohlc_aware", False),
+        )
+        cal.w = np.array(state["weights"], dtype=np.float64)
+        cal.n_updates = state["n_updates"]
+        cal._gate_active = state.get("gate_active", False)
+        if "histogram_cal" in state:
+            cal._histogram_cal = HistogramCalibrator.from_state(state["histogram_cal"])
+        return cal
 
 

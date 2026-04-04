@@ -1,0 +1,16 @@
+calibration:
+  ensemble_weights:
+  - 0.5
+  - 0.3
+  - 0.2
+data:
+  end: '2024-12-31'
+  source: synthetic
+  start: '2015-01-01'
+model:
+  horizons:
+  - 5
+  - 10
+  - 20
+  hybrid_range_blend: 0.5
+  hybrid_variance_enabled: true

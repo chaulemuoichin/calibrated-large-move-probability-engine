@@ -18,7 +18,20 @@
       "Bash(taskkill //PID 50468 //F)",
       "Read(//c/Users/Admin/Downloads/calibrated-large-move-probability-engine/**)",
       "Bash(.venv/Scripts/python.exe -c \"from scripts.baselines import run_all_baselines, evaluate_baseline; print\\('Baselines module OK'\\)\")",
-      "Bash(.venv/Scripts/python.exe -c ':*)"
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Bash(.venv/Scripts/python.exe paper/reproduce.py --economic)",
+      "Bash(ls:*)",
+      "Bash(grep -oP '\\\\\\\\cite\\\\{\\\\K[^}]+' paper/main.tex)",
+      "Bash(.venv/Scripts/python.exe -c \"import xgboost; print\\('xgboost', xgboost.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import lightgbm; print\\('lightgbm', lightgbm.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import statsmodels; print\\('statsmodels', statsmodels.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install xgboost --quiet)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q)",
+      "Bash(.venv/Scripts/python.exe -c \"from sklearn.ensemble import HistGradientBoostingClassifier; print\\('sklearn HGBC available'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install scikit-learn --quiet)",
+      "Bash(.venv/Scripts/python.exe -c \"from sklearn.ensemble import HistGradientBoostingClassifier; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py -x -q -k \"TestNEff or TestBootstrap or TestFDR or TestECEDetailed or TestCalibrator or TestGarch or TestPrediction\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py::TestPredictionEngine::test_prediction_engine_basic -x -v)"
     ]
   }
 }

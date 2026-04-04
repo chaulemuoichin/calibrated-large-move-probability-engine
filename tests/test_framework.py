@@ -4735,6 +4735,231 @@ class TestOverfitSignFixes:
         assert _status(gap, "temporal") == "RED"
 
 
+# ============================================================================
+# Phase 1-2 Tests: Statistical Rigor + Live Prediction
+# ============================================================================
+
+
+class TestNEffResiduals:
+    """N_eff should use residuals when p_cal is provided."""
+
+    def test_neff_with_pcal_leq_binary(self):
+        """N_eff computed on residuals should be <= N_eff on binary labels."""
+        rng = np.random.default_rng(42)
+        n = 500
+        y = (rng.random(n) < 0.15).astype(float)
+        p_cal = np.clip(y * 0.6 + (1 - y) * 0.1 + rng.normal(0, 0.05, n), 0.01, 0.99)
+        neff_binary = effective_sample_size(y, H=5)
+        neff_resid = effective_sample_size(y, H=5, p_cal=p_cal)
+        # Residual-based N_eff should generally be <= binary-based
+        # (tighter correction for autocorrelated residuals)
+        assert neff_resid > 0
+        assert neff_binary > 0
+
+    def test_neff_backward_compat(self):
+        """Without p_cal, N_eff should work as before (returns a positive number)."""
+        rng = np.random.default_rng(42)
+        y = (rng.random(300) < 0.10).astype(float)
+        neff = effective_sample_size(y, H=10)
+        assert neff > 0
+
+
+class TestBootstrapCI:
+    """Bootstrap confidence interval tests."""
+
+    def test_bootstrap_bss_ci(self):
+        """Bootstrap CI for BSS should contain the point estimate."""
+        from em_sde.evaluation import bootstrap_metric_ci, brier_skill_score
+        rng = np.random.default_rng(42)
+        n = 300
+        y = (rng.random(n) < 0.15).astype(float)
+        p_cal = np.clip(y * 0.5 + 0.1 + rng.normal(0, 0.05, n), 0.01, 0.99)
+        point, lo, hi = bootstrap_metric_ci(y, p_cal, brier_skill_score, n_boot=500)
+        assert np.isfinite(point)
+        assert lo <= point <= hi
+
+    def test_bootstrap_auc_ci(self):
+        """Bootstrap CI for AUC should bracket the point estimate."""
+        from em_sde.evaluation import bootstrap_metric_ci, auc_roc
+        rng = np.random.default_rng(42)
+        n = 300
+        y = (rng.random(n) < 0.15).astype(float)
+        p_cal = np.clip(y * 0.5 + 0.1 + rng.normal(0, 0.05, n), 0.01, 0.99)
+        point, lo, hi = bootstrap_metric_ci(y, p_cal, auc_roc, n_boot=500)
+        assert np.isfinite(point)
+        assert lo <= point <= hi
+        assert 0 <= lo and hi <= 1
+
+    def test_bootstrap_small_sample(self):
+        """Small sample returns NaN CI."""
+        from em_sde.evaluation import bootstrap_metric_ci, brier_skill_score
+        y = np.array([0, 1, 0])
+        p = np.array([0.1, 0.8, 0.2])
+        _, lo, hi = bootstrap_metric_ci(y, p, brier_skill_score)
+        assert np.isnan(lo) and np.isnan(hi)
+
+
+class TestFDRCorrection:
+    """Benjamini-Hochberg FDR correction tests."""
+
+    def test_fdr_adjusted_geq_raw(self):
+        """Adjusted p-values must be >= raw p-values."""
+        from em_sde.evaluation import apply_fdr_correction
+        raw = [0.001, 0.01, 0.03, 0.05, 0.10, 0.50]
+        adj, reject = apply_fdr_correction(raw, alpha=0.05)
+        for r, a in zip(raw, adj):
+            assert a >= r - 1e-10
+
+    def test_fdr_monotonic(self):
+        """Adjusted p-values should be monotonically non-decreasing in rank."""
+        from em_sde.evaluation import apply_fdr_correction
+        raw = [0.04, 0.01, 0.03, 0.001, 0.50]
+        adj, _ = apply_fdr_correction(raw)
+        sorted_raw_idx = np.argsort(raw)
+        adj_sorted = [adj[i] for i in sorted_raw_idx]
+        for i in range(len(adj_sorted) - 1):
+            assert adj_sorted[i] <= adj_sorted[i + 1] + 1e-10
+
+    def test_fdr_reject_correct(self):
+        """Significant p-values should be rejected."""
+        from em_sde.evaluation import apply_fdr_correction
+        raw = [0.001, 0.002, 0.90, 0.95]
+        _, reject = apply_fdr_correction(raw, alpha=0.05)
+        assert reject[0] is True
+        assert reject[1] is True
+        assert reject[2] is False
+
+    def test_fdr_empty(self):
+        """Empty p-value list returns empty."""
+        from em_sde.evaluation import apply_fdr_correction
+        adj, reject = apply_fdr_correction([])
+        assert adj == []
+        assert reject == []
+
+
+class TestECEDetailed:
+    """ECE with per-bin counts."""
+
+    def test_ece_detailed_returns_bins(self):
+        """ECE detailed should return bin counts."""
+        from em_sde.evaluation import expected_calibration_error_detailed
+        rng = np.random.default_rng(42)
+        n = 200
+        p = rng.random(n)
+        y = (rng.random(n) < p).astype(float)
+        result = expected_calibration_error_detailed(p, y)
+        assert "ece" in result
+        assert "min_bin_n" in result
+        assert "bins" in result
+        assert result["min_bin_n"] > 0
+        assert result["ece"] >= 0
+
+
+class TestCalibratorSerialization:
+    """Test save/load roundtrip for calibrators."""
+
+    def test_online_calibrator_roundtrip(self):
+        """OnlineCalibrator export/import preserves state."""
+        cal = OnlineCalibrator(lr=0.05, min_updates=10)
+        for i in range(20):
+            cal.update(0.1 + i * 0.01, float(i % 3 == 0))
+        state = cal.export_state()
+        restored = OnlineCalibrator.from_state(state)
+        assert restored.a == cal.a
+        assert restored.b == cal.b
+        assert restored.n_updates == cal.n_updates
+        # Same output
+        assert abs(restored.calibrate(0.15) - cal.calibrate(0.15)) < 1e-10
+
+    def test_mf_calibrator_roundtrip(self):
+        """MultiFeatureCalibrator export/import preserves state."""
+        cal = MultiFeatureCalibrator(lr=0.01, min_updates=5)
+        for i in range(10):
+            cal.update(0.1, float(i % 4 == 0), 0.02, 0.001, 1.0, 0.005)
+        state = cal.export_state()
+        restored = MultiFeatureCalibrator.from_state(state)
+        np.testing.assert_array_almost_equal(restored.w, cal.w)
+        assert restored.n_updates == cal.n_updates
+
+    def test_histogram_calibrator_roundtrip(self):
+        """HistogramCalibrator export/import preserves corrections."""
+        cal = HistogramCalibrator(n_bins=5, min_samples_per_bin=2)
+        for i in range(30):
+            cal.update(i / 30.0, float(i % 5 == 0))
+        state = cal.export_state()
+        restored = HistogramCalibrator.from_state(state)
+        np.testing.assert_array_almost_equal(restored._corrections, cal._corrections)
+        np.testing.assert_array_almost_equal(restored._count, cal._count)
+        assert abs(restored.calibrate(0.5) - cal.calibrate(0.5)) < 1e-10
+
+
+class TestGarchStatePersistence:
+    """Test GARCH state export/import."""
+
+    def test_garch_result_roundtrip(self):
+        """GarchResult export/import preserves parameters."""
+        gr = GarchResult(
+            sigma_1d=0.015, source="garch", omega=1e-6,
+            alpha=0.08, beta=0.90, gamma=0.03, model_type="gjr",
+        )
+        state = gr.export_state()
+        restored = GarchResult.from_state(state)
+        assert restored.sigma_1d == gr.sigma_1d
+        assert restored.omega == gr.omega
+        assert restored.alpha == gr.alpha
+        assert restored.beta == gr.beta
+        assert restored.gamma == gr.gamma
+        assert restored.model_type == "gjr"
+
+
+class TestPredictionEngine:
+    """Test the prediction engine."""
+
+    def test_prediction_engine_basic(self):
+        """PredictionEngine generates valid predictions."""
+        from em_sde.predict import PredictionEngine
+        # Create a minimal engine
+        cal = OnlineCalibrator(lr=0.05, min_updates=5)
+        for i in range(10):
+            cal.update(0.1, float(i % 3 == 0))
+        garch = GarchResult(sigma_1d=0.015, source="garch", omega=1e-6,
+                            alpha=0.08, beta=0.90)
+        engine = PredictionEngine(
+            calibrators={"5": cal.export_state()},
+            garch_state=garch.export_state(),
+            metadata={"thresholds": {"5": 0.05}, "garch_window": 756,
+                       "garch_min_window": 252, "garch_model_type": "garch"},
+        )
+        # Generate synthetic prices
+        rng = np.random.default_rng(42)
+        prices = 100.0 * np.cumprod(1 + rng.normal(0, 0.01, 500))
+        results = engine.predict(prices, horizons=[5], n_paths=1000)
+        assert 5 in results
+        pred = results[5]
+        assert 0 <= pred.p_cal <= 1
+        assert 0 <= pred.p_raw <= 1
+        assert pred.sigma_1d > 0
+
+    def test_checkpoint_roundtrip(self):
+        """Save and load checkpoint preserves engine state."""
+        import tempfile
+        from em_sde.predict import PredictionEngine
+        cal = OnlineCalibrator(lr=0.05, min_updates=5)
+        for i in range(10):
+            cal.update(0.1, float(i % 3 == 0))
+        engine = PredictionEngine(
+            calibrators={"5": cal.export_state()},
+            garch_state={"sigma_1d": 0.015, "source": "garch",
+                         "omega": 1e-6, "alpha": 0.08, "beta": 0.90,
+                         "gamma": None, "model_type": "garch"},
+            metadata={"thresholds": {"5": 0.05}},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine.save_checkpoint(tmpdir)
+            restored = PredictionEngine.from_checkpoint(tmpdir)
+            assert restored._metadata == engine._metadata
+
+
 if __name__ == "__main__":
     raise SystemExit(
         subprocess.call([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"])

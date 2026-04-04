@@ -36,6 +36,33 @@ class GarchResult:
     standardized_residuals: Optional[np.ndarray] = None  # FHS: z_t = resid_t / sigma_t
     model_type: str = "garch"  # actual fitted dynamics for downstream persistence math
 
+    def export_state(self) -> dict:
+        """Export GARCH parameters as a JSON-serializable dict."""
+        return {
+            "sigma_1d": self.sigma_1d,
+            "source": self.source,
+            "omega": self.omega,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "gamma": self.gamma,
+            "model_type": self.model_type,
+            "diagnostics": self.diagnostics,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "GarchResult":
+        """Restore a GarchResult from exported state."""
+        return cls(
+            sigma_1d=state["sigma_1d"],
+            source=state["source"],
+            omega=state.get("omega"),
+            alpha=state.get("alpha"),
+            beta=state.get("beta"),
+            gamma=state.get("gamma"),
+            model_type=state.get("model_type", "garch"),
+            diagnostics=state.get("diagnostics"),
+        )
+
 
 def _to_float(value: object) -> float:
     """Convert scalars or scalar-like pandas/numpy values to float."""

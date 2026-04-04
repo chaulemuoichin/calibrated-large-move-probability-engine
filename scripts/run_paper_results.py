@@ -34,6 +34,8 @@ from em_sde.model_selection import (
 from em_sde.evaluation import (
     brier_score, brier_skill_score, auc_roc, expected_calibration_error,
     effective_sample_size, paired_bootstrap_loss_diff_pvalue,
+    bootstrap_metric_ci, apply_fdr_correction,
+    expected_calibration_error_detailed,
 )
 from scripts.baselines import run_all_baselines, evaluate_baseline
 
@@ -72,7 +74,7 @@ def generate_main_results_table(ticker: str, n_folds: int = 5) -> pd.DataFrame:
     """Generate Table 1: Main CV results with gate pass/fail and significance."""
     config_path = TICKER_CONFIGS[ticker.lower()]
     cfg = load_config(config_path)
-    df = load_data(cfg.data)
+    df, _ = load_data(cfg)
 
     logger.info("Running %d-fold CV for %s...", n_folds, ticker.upper())
     cv_results, oof_df = expanding_window_cv(df, [cfg], [ticker.upper()], n_folds=n_folds)
@@ -88,19 +90,17 @@ def generate_main_results_table(ticker: str, n_folds: int = 5) -> pd.DataFrame:
         mask = np.isfinite(p) & np.isfinite(y)
         p_m, y_m = p[mask], y[mask]
 
-        n_eff = effective_sample_size(y_m, H)
+        n_eff = effective_sample_size(y_m, H, p_cal=p_m)
         bss = brier_skill_score(p_m, y_m)
         auc = auc_roc(p_m, y_m)
-        ece = expected_calibration_error(p_m, y_m, adaptive=False)
+        ece_detail = expected_calibration_error_detailed(p_m, y_m, adaptive=False)
+        ece = ece_detail["ece"]
 
-        # Bootstrap CI for ECE
-        rng = np.random.default_rng(42)
-        ece_boots = []
-        for _ in range(2000):
-            idx = rng.integers(0, len(p_m), size=len(p_m))
-            ece_boots.append(expected_calibration_error(p_m[idx], y_m[idx], adaptive=False))
-        ece_ci_lo = float(np.percentile(ece_boots, 2.5))
-        ece_ci_hi = float(np.percentile(ece_boots, 97.5))
+        # Bootstrap CIs for BSS, AUC, and ECE
+        bss_pt, bss_lo, bss_hi = bootstrap_metric_ci(y_m, p_m, brier_skill_score, n_boot=2000)
+        auc_pt, auc_lo, auc_hi = bootstrap_metric_ci(y_m, p_m, auc_roc, n_boot=2000)
+        ece_fn = lambda p, y: expected_calibration_error(p, y, adaptive=False)
+        ece_pt, ece_lo, ece_hi = bootstrap_metric_ci(y_m, p_m, ece_fn, n_boot=2000)
 
         # Significance vs climatology
         clim = float(np.mean(y_m))
@@ -120,9 +120,12 @@ def generate_main_results_table(ticker: str, n_folds: int = 5) -> pd.DataFrame:
             "N_eff": round(n_eff, 0),
             "Event Rate": f"{clim*100:.1f}%",
             "BSS": bss,
+            "BSS 95% CI": f"[{bss_lo:.4f}, {bss_hi:.4f}]",
             "AUC": auc,
+            "AUC 95% CI": f"[{auc_lo:.3f}, {auc_hi:.3f}]",
             "ECE": ece,
-            "ECE 95% CI": f"[{ece_ci_lo:.4f}, {ece_ci_hi:.4f}]",
+            "ECE 95% CI": f"[{ece_lo:.4f}, {ece_hi:.4f}]",
+            "Min Bin N": ece_detail["min_bin_n"],
             "p-value": pval,
             "Sig": _sig_stars(pval),
             "Gates": "PASS" if (bss > 0 and auc >= 0.55 and ece <= 0.02) else "FAIL",
@@ -135,7 +138,7 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
     """Generate Table 2: Full model vs all baselines with paired significance."""
     config_path = TICKER_CONFIGS[ticker.lower()]
     cfg = load_config(config_path)
-    df = load_data(cfg.data)
+    df, _ = load_data(cfg)
 
     prices = df["price"].to_numpy(dtype=float)
     dates_idx = df.index
@@ -304,13 +307,22 @@ def main():
     # Combine and save
     if all_main:
         combined_main = pd.concat(all_main, ignore_index=True)
+
+        # Apply FDR correction across all p-values
+        raw_pvals = combined_main["p-value"].tolist()
+        adj_pvals, reject = apply_fdr_correction(raw_pvals, alpha=0.05)
+        combined_main["p-value (FDR)"] = adj_pvals
+        combined_main["FDR Sig"] = [_sig_stars(p) for p in adj_pvals]
+
         combined_main.to_csv("outputs/paper/tables/main_results.csv", index=False)
 
         latex = to_latex_table(
-            combined_main[["Ticker", "H", "BSS", "AUC", "ECE", "N_eff", "p-value", "Gates"]],
+            combined_main[["Ticker", "H", "BSS", "BSS 95% CI", "AUC", "AUC 95% CI",
+                           "ECE", "ECE 95% CI", "N_eff", "p-value (FDR)", "Gates"]],
             "Cross-validated calibration results (5-fold expanding window). "
-            "BSS: Brier Skill Score vs.~climatology. "
-            "Significance: paired bootstrap, $^{***}p<0.01$, $^{**}p<0.05$, $^{*}p<0.10$.",
+            "BSS: Brier Skill Score vs.~climatology. 95\\% bootstrap CIs reported. "
+            "p-values: Benjamini-Hochberg FDR-corrected across all tests. "
+            "$^{***}p<0.01$, $^{**}p<0.05$, $^{*}p<0.10$.",
             "tab:main_results",
         )
         with open("outputs/paper/tables/main_results.tex", "w") as f:

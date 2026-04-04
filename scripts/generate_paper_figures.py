@@ -82,7 +82,7 @@ def generate_reliability_diagrams(plt):
     for row, (ticker, config_path) in enumerate(tickers.items()):
         try:
             cfg = load_config(config_path)
-            df = load_data(cfg.data)
+            df, _ = load_data(cfg)
             results = run_walkforward(df, cfg)
 
             for col, H in enumerate(cfg.model.horizons):
@@ -281,7 +281,7 @@ def generate_rolling_ece_plot(plt):
         for ticker, config_path in tickers.items():
             try:
                 cfg = load_config(config_path)
-                df = load_data(cfg.data)
+                df, _ = load_data(cfg)
                 results = run_walkforward(df, cfg)
 
                 p_col = f"p_cal_{H}"
