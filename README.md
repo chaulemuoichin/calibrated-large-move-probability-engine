@@ -127,6 +127,16 @@ scripts/               Operational runners
   run_overfit_check.py   Overfitting diagnostics
   run_full_institutional.py  Full validation battery
   run_stress_suite.py    Stress testing
+  baselines.py           Formal baseline models for comparison
+  run_ablation_study.py  Component ablation study
+  run_temporal_holdout.py  Temporal hold-out evaluation
+  run_paper_results.py   Paper table generation
+  run_economic_significance.py  Economic impact analysis
+  generate_paper_figures.py  Publication figures
+paper/                 Academic paper
+  main.tex               LaTeX source
+  references.bib         BibTeX references
+  reproduce.py           Full reproduction script
 tests/                 296 unit tests
 ```
 
@@ -155,6 +165,26 @@ python scripts/run_overfit_check.py spy
 # Full institutional battery
 python -u scripts/run_full_institutional.py
 ```
+
+## Academic Paper
+
+A full academic paper is included in the `paper/` directory with LaTeX source, BibTeX references, and a reproduction script.
+
+```bash
+# Reproduce all paper tables and figures
+python paper/reproduce.py --all
+
+# Compile the paper
+cd paper && pdflatex main.tex && bibtex main && pdflatex main.tex && pdflatex main.tex
+```
+
+Paper infrastructure in `scripts/`:
+- `baselines.py` -- four formal baseline models
+- `run_ablation_study.py` -- systematic component ablation
+- `run_temporal_holdout.py` -- temporal hold-out evaluation
+- `run_paper_results.py` -- LaTeX-ready tables with significance tests
+- `run_economic_significance.py` -- economic impact analysis
+- `generate_paper_figures.py` -- publication-quality figures
 
 ## Known Limitations
 

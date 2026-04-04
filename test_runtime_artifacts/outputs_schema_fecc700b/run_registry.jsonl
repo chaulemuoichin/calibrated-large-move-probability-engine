@@ -1,0 +1,1 @@
+{"run_id": "test_run", "timestamp": "2026-04-04T00:07:09.197276Z", "ticker": "SPY", "data_source": "synthetic", "dataset_hash": null, "artifact_manifest_sha256": "4f4e32143c8d47e61fb50903f804c5aec6ad6ac8dc9e906b6906bb77abc1e7fb", "prediction_rows": 249, "horizons": [5, 10, 20], "output_root": "test_runtime_artifacts/outputs_schema_fecc700b/test_run"}

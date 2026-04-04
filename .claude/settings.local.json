@@ -17,7 +17,8 @@
       "Bash(taskkill //PID 35600 //F)",
       "Bash(taskkill //PID 50468 //F)",
       "Read(//c/Users/Admin/Downloads/calibrated-large-move-probability-engine/**)",
-      "Bash(.venv/Scripts/python.exe -c \"from scripts.baselines import run_all_baselines, evaluate_baseline; print\\('Baselines module OK'\\)\")"
+      "Bash(.venv/Scripts/python.exe -c \"from scripts.baselines import run_all_baselines, evaluate_baseline; print\\('Baselines module OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ':*)"
     ]
   }
 }
