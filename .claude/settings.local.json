@@ -31,7 +31,21 @@
       "Bash(.venv/Scripts/python.exe -m pip install scikit-learn --quiet)",
       "Bash(.venv/Scripts/python.exe -c \"from sklearn.ensemble import HistGradientBoostingClassifier; print\\('OK'\\)\")",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py -x -q -k \"TestNEff or TestBootstrap or TestFDR or TestECEDetailed or TestCalibrator or TestGarch or TestPrediction\")",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py::TestPredictionEngine::test_prediction_engine_basic -x -v)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py::TestPredictionEngine::test_prediction_engine_basic -x -v)",
+      "Bash(.venv/Scripts/python.exe paper/reproduce.py --all)",
+      "Bash(.venv/Scripts/python.exe scripts/run_bayesian_opt.py nvda --n-trials 10)",
+      "Bash(du -sh temp_* test_runtime_artifacts .pytest-tmp __pycache__)",
+      "Bash(rm:*)",
+      "Bash(mkdir -p configs/examples configs/archive)",
+      "Bash(mv configs/csv_example.yaml configs/synthetic_example.yaml configs/examples/)",
+      "Bash(mv configs/exp_suite/exp_aapl_regime_gated.yaml configs/exp_suite/exp_cluster_regime_gated.yaml configs/exp_suite/exp_jump_regime_gated.yaml configs/exp_suite/exp_trend_regime_gated.yaml configs/archive/)",
+      "Bash(mkdir -p data/synthetic)",
+      "Bash(mv data/pattern_cluster_leverage.csv data/pattern_jump_crash.csv data/pattern_trend_lowvol.csv data/synthetic/)",
+      "Bash(rm -rf data/cache)",
+      "Bash(sed -i 's|data/pattern_cluster_leverage.csv|data/synthetic/pattern_cluster_leverage.csv|' configs/archive/exp_cluster_regime_gated.yaml)",
+      "Bash(sed -i 's|data/pattern_jump_crash.csv|data/synthetic/pattern_jump_crash.csv|' configs/archive/exp_jump_regime_gated.yaml)",
+      "Bash(sed -i 's|data/pattern_trend_lowvol.csv|data/synthetic/pattern_trend_lowvol.csv|' configs/archive/exp_trend_regime_gated.yaml)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py -v --tb=short -k \"calibrator or predict\")"
     ]
   }
 }

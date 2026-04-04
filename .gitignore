@@ -3,6 +3,13 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.pytest-tmp/
+
+# Test and runtime temp artifacts
+test_runtime_artifacts/
+temp_runtime/
+temp_runtime_checks/
+temp_pytest_base/
 
 # Outputs (runtime artifacts — reproducible, not tracked)
 outputs/**
@@ -10,6 +17,17 @@ outputs/**
 # Re-include diagnostics memo folder and Markdown memos only
 !outputs/diagnostics/
 !outputs/diagnostics/*.md
+
+# Data cache
+data/cache/
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
 
 # Virtual environments
 .venv/

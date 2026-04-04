@@ -902,6 +902,31 @@ class RegimeMultiFeatureCalibrator:
             "weights": active.w.tolist(),
         }
 
+    def export_state(self) -> dict:
+        """Export full state for checkpoint serialization."""
+        self._init_calibrators()
+        return {
+            "type": "RegimeMultiFeatureCalibrator",
+            "n_bins": self.n_bins,
+            "vol_history": list(self._vol_history),
+            "warmup": self._warmup,
+            "mf_kwargs": {k: v for k, v in self._mf_kwargs.items()
+                          if isinstance(v, (int, float, bool, str))},
+            "calibrators": [cal.export_state() for cal in self.calibrators],
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "RegimeMultiFeatureCalibrator":
+        """Restore from exported state."""
+        mf_kwargs = state.get("mf_kwargs", {})
+        obj = cls(n_bins=state.get("n_bins", 3), **mf_kwargs)
+        obj._warmup = state.get("warmup", 50)
+        obj._vol_history = deque(state.get("vol_history", []), maxlen=252)
+        cal_states = state.get("calibrators", [])
+        if cal_states:
+            obj.calibrators = [MultiFeatureCalibrator.from_state(s) for s in cal_states]
+        return obj
+
 
 class MultiFeatureCalibrator:
     """

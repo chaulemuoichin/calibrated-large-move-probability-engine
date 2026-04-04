@@ -9,8 +9,8 @@ pip install -r requirements.txt
 ```
 
 Required data files in `data/`:
-- `spy_daily.csv`, `googl_daily.csv`, `amzn_daily.csv`, `nvda_daily.csv`
-- `vix_history.csv` (VIX/VIX9D/VIX3M)
+- `spy_daily.csv`, `googl_daily.csv`, `amzn_daily.csv`, `nvda_daily.csv` (price data)
+- `vix_history.csv` (VIX/VIX9D/VIX3M implied volatility)
 
 ### Full Reproduction
 

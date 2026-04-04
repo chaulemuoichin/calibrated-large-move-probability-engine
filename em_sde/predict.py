@@ -22,6 +22,7 @@ import pandas as pd
 
 from .calibration import (
     MultiFeatureCalibrator,
+    RegimeMultiFeatureCalibrator,
     OnlineCalibrator,
     HistogramCalibrator,
     sigmoid,
@@ -73,6 +74,8 @@ class PredictionEngine:
             cal_type = state.get("type", "OnlineCalibrator")
             if cal_type == "MultiFeatureCalibrator":
                 self._calibrators[h] = MultiFeatureCalibrator.from_state(state)
+            elif cal_type == "RegimeMultiFeatureCalibrator":
+                self._calibrators[h] = RegimeMultiFeatureCalibrator.from_state(state)
             elif cal_type == "OnlineCalibrator":
                 self._calibrators[h] = OnlineCalibrator.from_state(state)
             else:
@@ -211,9 +214,9 @@ class PredictionEngine:
             if cal is None:
                 p_cal = p_raw
                 n_updates = 0
-            elif isinstance(cal, MultiFeatureCalibrator):
+            elif isinstance(cal, (RegimeMultiFeatureCalibrator, MultiFeatureCalibrator)):
                 p_cal = cal.calibrate(p_raw, sigma_1d, delta_sigma, vol_ratio, vol_of_vol)
-                n_updates = cal.n_updates
+                n_updates = getattr(cal, 'n_updates', 0)
             elif isinstance(cal, OnlineCalibrator):
                 p_cal = cal.calibrate(p_raw)
                 n_updates = cal.n_updates
