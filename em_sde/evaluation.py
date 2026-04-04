@@ -370,12 +370,16 @@ def paired_bootstrap_loss_diff_pvalue(
     baseline_loss: np.ndarray,
     n_boot: int = 1000,
     seed: int = 42,
+    block_size: int = 1,
 ) -> float:
     """
     One-sided paired bootstrap p-value for model beating baseline.
 
     Null: mean(model_loss - baseline_loss) >= 0.
     Alternative: model loss is lower than baseline loss.
+
+    When block_size > 1, uses circular block bootstrap to account for
+    serial dependence in overlapping predictions.
     """
     model_loss = np.asarray(model_loss, dtype=np.float64).reshape(-1)
     baseline_loss = np.asarray(baseline_loss, dtype=np.float64).reshape(-1)
@@ -386,9 +390,22 @@ def paired_bootstrap_loss_diff_pvalue(
     n = len(diff)
     rng = np.random.default_rng(seed)
     boot_means = np.empty(n_boot, dtype=np.float64)
-    for b in range(n_boot):
-        idx = rng.integers(0, n, size=n)
-        boot_means[b] = float(np.mean(diff[idx]))
+
+    if block_size <= 1:
+        # Standard i.i.d. bootstrap
+        for b in range(n_boot):
+            idx = rng.integers(0, n, size=n)
+            boot_means[b] = float(np.mean(diff[idx]))
+    else:
+        # Circular block bootstrap for overlapping/dependent data
+        n_blocks = max(1, (n + block_size - 1) // block_size)
+        for b in range(n_boot):
+            starts = rng.integers(0, n, size=n_blocks)
+            idx = np.concatenate([
+                np.arange(s, s + block_size) % n for s in starts
+            ])[:n]
+            boot_means[b] = float(np.mean(diff[idx]))
+
     return float(np.mean(boot_means >= 0.0))
 
 
@@ -457,6 +474,92 @@ def expected_calibration_error_detailed(
     }
 
 
+def prediction_sharpness(
+    p: np.ndarray,
+    y: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Measure prediction sharpness — how much the model deviates from base rate.
+
+    A model that always predicts near the base rate has low sharpness and low ECE
+    trivially. Sharpness quantifies whether the model is actually saying something.
+
+    Returns dict with: std, iqr, pct_deviate_5pp (fraction of predictions >5pp
+    from base rate), base_rate, min, max, range.
+    """
+    mask = np.isfinite(p) & np.isfinite(y)
+    p_m, y_m = p[mask], y[mask]
+    if len(p_m) < 10:
+        return {"std": np.nan, "iqr": np.nan, "pct_deviate_5pp": np.nan,
+                "base_rate": np.nan, "min": np.nan, "max": np.nan, "range": np.nan}
+
+    base_rate = float(np.mean(y_m))
+    p_std = float(np.std(p_m))
+    q25, q75 = np.percentile(p_m, [25, 75])
+    iqr = float(q75 - q25)
+    pct_deviate = float(np.mean(np.abs(p_m - base_rate) > 0.05))
+
+    return {
+        "std": p_std,
+        "iqr": iqr,
+        "pct_deviate_5pp": pct_deviate,
+        "base_rate": base_rate,
+        "min": float(np.min(p_m)),
+        "max": float(np.max(p_m)),
+        "range": float(np.max(p_m) - np.min(p_m)),
+    }
+
+
+def conditional_ece(
+    p: np.ndarray,
+    y: np.ndarray,
+    condition: np.ndarray,
+    condition_bins: Optional[List[Tuple[str, float, float]]] = None,
+    n_bins: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    ECE conditioned on an external variable (e.g., vol regime, era).
+
+    Parameters
+    ----------
+    p, y : predictions and labels
+    condition : array of condition values (same length as p)
+    condition_bins : list of (name, lo, hi) tuples defining bins.
+        If None, uses terciles of condition values.
+
+    Returns list of dicts: {name, ece, n, base_rate}.
+    """
+    mask = np.isfinite(p) & np.isfinite(y) & np.isfinite(condition)
+    p_m, y_m, c_m = p[mask], y[mask], condition[mask]
+    if len(p_m) < 30:
+        return []
+
+    if condition_bins is None:
+        t33, t67 = np.percentile(c_m, [33, 67])
+        condition_bins = [
+            ("Low", float('-inf'), t33),
+            ("Mid", t33, t67),
+            ("High", t67, float('inf')),
+        ]
+
+    results = []
+    for name, lo, hi in condition_bins:
+        in_bin = (c_m >= lo) & (c_m < hi) if hi < float('inf') else (c_m >= lo)
+        if lo == float('-inf'):
+            in_bin = c_m < hi
+        if in_bin.sum() < 30:
+            continue
+        ece_val = expected_calibration_error(p_m[in_bin], y_m[in_bin], adaptive=False, n_bins=n_bins)
+        results.append({
+            "name": name,
+            "ece": float(ece_val),
+            "n": int(in_bin.sum()),
+            "base_rate": float(np.mean(y_m[in_bin])),
+        })
+
+    return results
+
+
 def bootstrap_metric_ci(
     y_true: np.ndarray,
     p_cal: np.ndarray,
@@ -464,12 +567,14 @@ def bootstrap_metric_ci(
     n_boot: int = 2000,
     alpha: float = 0.05,
     seed: int = 42,
+    block_size: int = 1,
 ) -> Tuple[float, float, float]:
     """
     Bootstrap confidence interval for any metric(p, y) -> float.
 
     Uses BCa (bias-corrected accelerated) percentile method for better
-    small-sample coverage.
+    small-sample coverage. When block_size > 1, uses circular block
+    bootstrap for serially dependent (overlapping) predictions.
 
     Returns (point_estimate, ci_low, ci_high).
     """
@@ -485,9 +590,20 @@ def bootstrap_metric_ci(
     point = metric_fn(p_cal, y_true)
     rng = np.random.default_rng(seed)
     boot_vals = np.empty(n_boot, dtype=np.float64)
-    for b in range(n_boot):
-        idx = rng.integers(0, n, size=n)
-        boot_vals[b] = metric_fn(p_cal[idx], y_true[idx])
+
+    if block_size <= 1:
+        for b in range(n_boot):
+            idx = rng.integers(0, n, size=n)
+            boot_vals[b] = metric_fn(p_cal[idx], y_true[idx])
+    else:
+        # Circular block bootstrap for overlapping predictions
+        n_blocks = max(1, (n + block_size - 1) // block_size)
+        for b in range(n_boot):
+            starts = rng.integers(0, n, size=n_blocks)
+            idx = np.concatenate([
+                np.arange(s, s + block_size) % n for s in starts
+            ])[:n]
+            boot_vals[b] = metric_fn(p_cal[idx], y_true[idx])
 
     # BCa correction
     finite_boots = boot_vals[np.isfinite(boot_vals)]

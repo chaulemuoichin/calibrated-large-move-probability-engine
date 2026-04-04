@@ -189,8 +189,8 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
             "p-value vs Full": "---",
         })
 
-        # Compare each baseline
-        full_model_losses = (p_full_m - y_full_m) ** 2
+        # Build date-indexed full model series for paired alignment
+        full_dates = pd.to_datetime(full_results["date"]) if "date" in full_results.columns else None
 
         for bl_name, bl_df in baseline_results.items():
             if len(bl_df) == 0:
@@ -209,15 +209,34 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
             if len(p_bl_m) < 50:
                 continue
 
-            # Paired comparison (use common dates where possible)
-            n_common = min(len(p_full_m), len(p_bl_m))
-            if n_common < 50:
-                continue
+            # Date-aligned paired comparison
+            pval = np.nan
+            if full_dates is not None and "idx" in bl_df.columns:
+                # Convert baseline idx to dates for alignment
+                bl_dates_all = dates_idx[bl_df["idx"].to_numpy(dtype=int).clip(0, len(dates_idx) - 1)]
+                bl_dates = bl_dates_all[bl_mask]
+                full_date_set = set(full_dates[full_mask])
+                # Find common dates
+                common_mask_bl = np.array([d in full_date_set for d in bl_dates])
+                bl_date_to_idx = {d: i for i, d in enumerate(full_dates[full_mask])}
+                common_bl_dates = bl_dates[common_mask_bl]
+                common_fm_indices = np.array([bl_date_to_idx[d] for d in common_bl_dates
+                                              if d in bl_date_to_idx])
+                common_bl_indices = np.where(common_mask_bl)[0]
+                n_common = min(len(common_fm_indices), len(common_bl_indices))
+                if n_common >= 50:
+                    fm_losses = (p_full_m[common_fm_indices[:n_common]] - y_full_m[common_fm_indices[:n_common]]) ** 2
+                    bl_losses = (p_bl_m[common_bl_indices[:n_common]] - y_bl_m[common_bl_indices[:n_common]]) ** 2
+                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
+            else:
+                # Fallback: truncate to common length (less reliable)
+                n_common = min(len(p_full_m), len(p_bl_m))
+                if n_common >= 50:
+                    fm_losses = (p_full_m[:n_common] - y_full_m[:n_common]) ** 2
+                    bl_losses = (p_bl_m[:n_common] - y_bl_m[:n_common]) ** 2
+                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
 
-            bl_losses = (p_bl_m[:n_common] - y_bl_m[:n_common]) ** 2
-            fm_losses = full_model_losses[:n_common]
-            pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
-
+            pval_str = f"{pval:.4f}{_sig_stars(pval)}" if np.isfinite(pval) else "n/a"
             rows.append({
                 "Ticker": ticker.upper(),
                 "Method": bl_name,
@@ -225,7 +244,7 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
                 "BSS": brier_skill_score(p_bl_m, y_bl_m),
                 "AUC": auc_roc(p_bl_m, y_bl_m),
                 "ECE": expected_calibration_error(p_bl_m, y_bl_m, adaptive=False),
-                "p-value vs Full": f"{pval:.4f}{_sig_stars(pval)}",
+                "p-value vs Full": pval_str,
             })
 
     return pd.DataFrame(rows)

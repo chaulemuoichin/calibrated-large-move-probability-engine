@@ -106,7 +106,7 @@ def risk_managed_portfolio(
     n_risk_off = 0
 
     for i in range(len(daily_returns)):
-        date = dates[i + 1] if i + 1 < len(dates) else dates[-1]
+        date = dates[i]  # prediction available at start of period (no lookahead)
         ret = daily_returns[i]
 
         # Update probability estimate (use most recent prediction)
@@ -126,7 +126,7 @@ def risk_managed_portfolio(
 
         # Transaction cost when weight changes
         if i > 0:
-            prev_date = dates[i] if i < len(dates) else dates[-1]
+            prev_date = dates[i - 1]
             prev_p = p_by_date.get(prev_date, last_p)
             prev_weight = reduced_weight if prev_p >= p_threshold else 1.0
             if abs(weight - prev_weight) > 0.01 and cost_bps > 0:
@@ -153,7 +153,7 @@ def risk_managed_portfolio(
         "sharpe_improvement": _annualized_sharpe(rm_returns) - _annualized_sharpe(bh_returns),
         "bh_max_dd": _max_drawdown_pct(bh_equity),
         "rm_max_dd": _max_drawdown_pct(rm_equity),
-        "dd_reduction": _max_drawdown_pct(bh_equity) - _max_drawdown_pct(rm_equity),
+        "dd_reduction": _max_drawdown_pct(rm_equity) - _max_drawdown_pct(bh_equity),  # positive = RM better
         "bh_cvar95": conditional_var(bh_returns),
         "rm_cvar95": conditional_var(rm_returns),
         "bh_annual_return": float(np.mean(bh_returns)) * 252,
@@ -200,7 +200,7 @@ def selective_hedging_analysis(
     n_hedged_days = 0
 
     for i in range(len(daily_returns)):
-        date = dates[i + 1] if i + 1 < len(dates) else dates[-1]
+        date = dates[i]  # prediction available at start of period (no lookahead)
         ret = daily_returns[i]
 
         if date in p_by_date:

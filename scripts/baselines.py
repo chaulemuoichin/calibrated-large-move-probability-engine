@@ -346,14 +346,14 @@ def feature_logistic_baseline(
             thr = thresholds.get(H, 0.05)
             w = weights[H]
 
-            # Resolve pending predictions
+            # Resolve pending predictions (only those observable by time t)
             resolved = []
             for (pt, pf) in pending[H]:
-                if pt + H < n:
+                if pt + H <= t:  # outcome known at time t, no lookahead
                     y = 1.0 if abs(prices[pt + H] / prices[pt] - 1.0) >= thr else 0.0
                     resolved.append((pf, y))
-            # Keep only unresolved
-            pending[H] = [(pt, pf) for (pt, pf) in pending[H] if pt + H >= t]
+            # Keep only unresolved (outcome not yet observable)
+            pending[H] = [(pt, pf) for (pt, pf) in pending[H] if pt + H > t]
 
             # SGD update with resolved labels
             for (feat, y) in resolved:
@@ -498,15 +498,15 @@ def gradient_boosting_baseline(
 
             # Refit model periodically
             if t - last_fit[H] >= refit_every or models[H] is None:
-                # Collect training data: all past resolved labels
-                train_times = [tt for tt in sorted_times if tt < t and tt in all_labels[H] and tt in all_features]
+                # Collect training data: only labels where outcome is observable (tt + H <= t)
+                train_times = [tt for tt in sorted_times if tt < t and tt + H <= t and tt in all_labels[H] and tt in all_features]
                 if len(train_times) >= min_train:
                     X_train = np.vstack([all_features[tt] for tt in train_times])
                     y_train = np.array([all_labels[H][tt] for tt in train_times])
 
                     # Need both classes
                     if len(np.unique(y_train)) >= 2:
-                        clf = HistGradientBoostingClassifier(
+                        base_clf = HistGradientBoostingClassifier(
                             max_iter=100,
                             max_depth=4,
                             learning_rate=0.05,
@@ -514,7 +514,16 @@ def gradient_boosting_baseline(
                             l2_regularization=1.0,
                             random_state=42,
                         )
-                        clf.fit(X_train, y_train)
+                        # Platt-calibrate outputs for fair comparison
+                        clf = CalibratedClassifierCV(
+                            base_clf, cv=3, method="sigmoid",
+                        )
+                        try:
+                            clf.fit(X_train, y_train)
+                        except ValueError:
+                            # CalibratedClassifierCV can fail with too few samples per fold
+                            base_clf.fit(X_train, y_train)
+                            clf = base_clf
                         models[H] = clf
                         last_fit[H] = t
 
@@ -522,8 +531,8 @@ def gradient_boosting_baseline(
             if models[H] is not None:
                 p_pred = float(models[H].predict_proba(feat.reshape(1, -1))[0, 1])
             else:
-                # Fallback to empirical rate
-                train_times = [tt for tt in sorted_times if tt < t and tt in all_labels[H]]
+                # Fallback to empirical rate (only resolved labels)
+                train_times = [tt for tt in sorted_times if tt < t and tt + H <= t and tt in all_labels[H]]
                 if train_times:
                     p_pred = float(np.mean([all_labels[H][tt] for tt in train_times[-252:]]))
                 else:
@@ -531,6 +540,172 @@ def gradient_boosting_baseline(
 
             y_label = all_labels[H].get(t, np.nan)
             row[f"p_baseline_{H}"] = float(np.clip(p_pred, 0.001, 0.999))
+            row[f"y_{H}"] = y_label
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Baseline 6: VIX Threshold Rule (Simple Practitioner Baseline)
+# ---------------------------------------------------------------------------
+
+def vix_threshold_baseline(
+    prices: np.ndarray,
+    dates: pd.DatetimeIndex,
+    horizons: List[int],
+    thresholds: Dict[int, float],
+    iv_csv_path: str = "data/vix_history.csv",
+    vix_percentile: int = 80,
+    high_prob_mult: float = 1.5,
+) -> pd.DataFrame:
+    """
+    Simple VIX-regime baseline: "reduce exposure when VIX is high."
+
+    When VIX > rolling Xth percentile, predict base_rate * mult.
+    When VIX <= percentile, predict base_rate * (1/mult).
+    This is the baseline a PM would actually use in practice.
+    """
+    try:
+        iv_df = pd.read_csv(iv_csv_path, index_col=0, parse_dates=True)
+    except Exception:
+        logger.warning("Cannot load VIX data for VIX threshold baseline")
+        return pd.DataFrame()
+
+    # Use VIX close
+    vix_col = None
+    for col in ["VIX_Close", "Close", "vix", "VIX"]:
+        if col in iv_df.columns:
+            vix_col = col
+            break
+    if vix_col is None and len(iv_df.columns) > 0:
+        vix_col = iv_df.columns[0]
+    if vix_col is None:
+        return pd.DataFrame()
+
+    vix_series = iv_df[vix_col].dropna()
+    n = len(prices)
+    rows = []
+
+    for t in range(252, n):
+        row = {"idx": t}
+        date_t = dates[t] if t < len(dates) else None
+        if date_t is None:
+            continue
+
+        # Get VIX value
+        vix_vals = vix_series[vix_series.index <= date_t]
+        if len(vix_vals) < 63:
+            continue
+        current_vix = float(vix_vals.iloc[-1])
+        rolling_vix = vix_vals.iloc[-252:] if len(vix_vals) >= 252 else vix_vals
+        pctile_val = float(np.percentile(rolling_vix.values, vix_percentile))
+
+        for H in horizons:
+            thr = thresholds.get(H, 0.05)
+            # Compute rolling base rate
+            events = 0
+            total = 0
+            for j in range(max(0, t - 252), t - H):
+                if j + H < n:
+                    ret = abs(prices[j + H] / prices[j] - 1.0)
+                    if ret >= thr:
+                        events += 1
+                    total += 1
+            base_rate = events / max(total, 1)
+
+            # Simple rule: scale by VIX regime
+            if current_vix > pctile_val:
+                p_pred = min(base_rate * high_prob_mult, 0.95)
+            else:
+                p_pred = max(base_rate / high_prob_mult, 0.005)
+
+            y_label = np.nan
+            if t + H < n:
+                y_label = 1.0 if abs(prices[t + H] / prices[t] - 1.0) >= thr else 0.0
+
+            row[f"p_baseline_{H}"] = float(np.clip(p_pred, 0.001, 0.999))
+            row[f"y_{H}"] = y_label
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Baseline 7: Market-Implied Probability (Straddle Comparison)
+# ---------------------------------------------------------------------------
+
+def market_implied_probability_baseline(
+    prices: np.ndarray,
+    dates: pd.DatetimeIndex,
+    horizons: List[int],
+    thresholds: Dict[int, float],
+    iv_csv_path: str = "data/vix_history.csv",
+) -> pd.DataFrame:
+    """
+    Options-implied probability of threshold-exceeding moves.
+
+    Uses VIX (annualized implied vol) to compute the probability that
+    |return| >= threshold under a log-normal model with implied vol.
+    This represents what the options market "thinks" the probability is.
+
+    Comparison vs this baseline answers: "Does our model know something
+    the options market doesn't?"
+    """
+    try:
+        iv_df = pd.read_csv(iv_csv_path, index_col=0, parse_dates=True)
+    except Exception:
+        logger.warning("Cannot load VIX data for market-implied baseline")
+        return pd.DataFrame()
+
+    vix_col = None
+    for col in ["VIX_Close", "Close", "vix", "VIX"]:
+        if col in iv_df.columns:
+            vix_col = col
+            break
+    if vix_col is None and len(iv_df.columns) > 0:
+        vix_col = iv_df.columns[0]
+    if vix_col is None:
+        return pd.DataFrame()
+
+    vix_series = iv_df[vix_col].dropna()
+    n = len(prices)
+    rows = []
+
+    for t in range(252, n):
+        row = {"idx": t}
+        date_t = dates[t] if t < len(dates) else None
+        if date_t is None:
+            continue
+
+        vix_vals = vix_series[vix_series.index <= date_t]
+        if len(vix_vals) < 1:
+            continue
+        current_vix = float(vix_vals.iloc[-1]) / 100.0  # VIX is in pct
+
+        for H in horizons:
+            thr = thresholds.get(H, 0.05)
+            # Implied vol for H days
+            sigma_H = current_vix * np.sqrt(H / 252.0)
+
+            # P(|return| >= thr) under log-normal with implied vol
+            # log(S_T/S_0) ~ N(-0.5*sigma^2, sigma^2)
+            if sigma_H > 1e-8:
+                d_up = (np.log(1.0 + thr) + 0.5 * sigma_H**2) / sigma_H
+                d_down = (np.log(1.0 - thr) + 0.5 * sigma_H**2) / sigma_H
+                p_up = 1.0 - sp_stats.norm.cdf(d_up)
+                p_down = sp_stats.norm.cdf(d_down)
+                p_implied = p_up + p_down
+            else:
+                p_implied = 0.0
+
+            y_label = np.nan
+            if t + H < n:
+                y_label = 1.0 if abs(prices[t + H] / prices[t] - 1.0) >= thr else 0.0
+
+            row[f"p_baseline_{H}"] = float(np.clip(p_implied, 0.001, 0.999))
             row[f"y_{H}"] = y_label
 
         rows.append(row)
@@ -594,6 +769,22 @@ def run_all_baselines(
         )
         if len(impl_vol) > 0:
             results["Implied-Vol BS"] = impl_vol
+
+        logger.info("Running VIX Threshold Rule baseline...")
+        vix_rule = vix_threshold_baseline(
+            prices, dates, horizons, thresholds,
+            iv_csv_path=iv_csv_path,
+        )
+        if len(vix_rule) > 0:
+            results["VIX Threshold Rule"] = vix_rule
+
+        logger.info("Running Market-Implied Probability baseline...")
+        mkt_impl = market_implied_probability_baseline(
+            prices, dates, horizons, thresholds,
+            iv_csv_path=iv_csv_path,
+        )
+        if len(mkt_impl) > 0:
+            results["Market-Implied (Straddle)"] = mkt_impl
 
     return results
 

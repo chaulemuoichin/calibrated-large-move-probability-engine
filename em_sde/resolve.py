@@ -21,6 +21,8 @@ def resolve_predictions(
     prediction_log: str,
     prices: np.ndarray,
     dates: pd.DatetimeIndex,
+    ticker: Optional[str] = None,
+    mark_resolved: bool = True,
 ) -> pd.DataFrame:
     """
     Resolve outstanding predictions using current price data.
@@ -34,6 +36,12 @@ def resolve_predictions(
         Full price history (must extend beyond prediction dates by H days).
     dates : pd.DatetimeIndex
         Date index corresponding to prices.
+    ticker : str, optional
+        Filter to only resolve predictions for this ticker. Required when
+        the log contains multiple tickers to prevent cross-ticker contamination.
+    mark_resolved : bool
+        If True, rewrite the log marking resolved rows so they aren't
+        re-resolved on subsequent calls.
 
     Returns
     -------
@@ -55,10 +63,25 @@ def resolve_predictions(
     if len(preds) == 0:
         return pd.DataFrame()
 
+    # Ensure 'resolved' column exists for tracking
+    if "resolved" not in preds.columns:
+        preds["resolved"] = False
+
+    # Filter by ticker if specified
+    if ticker is not None and "ticker" in preds.columns:
+        ticker_mask = preds["ticker"].str.upper() == ticker.upper()
+    else:
+        ticker_mask = pd.Series(True, index=preds.index)
+
     date_to_idx = {d: i for i, d in enumerate(dates)}
     resolved_rows = []
+    resolved_indices = []
 
-    for _, row in preds.iterrows():
+    for idx, row in preds[ticker_mask].iterrows():
+        # Skip already-resolved rows
+        if row.get("resolved", False):
+            continue
+
         pred_date = pd.Timestamp(row["date"])
         H = int(row["horizon"])
         thr = float(row["threshold"])
@@ -81,7 +104,15 @@ def resolve_predictions(
             "y": y,
             "realized_return": float(realized_return),
             "resolved_date": str(dates[resolve_idx].date()),
+            "resolved": True,
         })
+        resolved_indices.append(idx)
+
+    # Mark resolved rows in the log file
+    if mark_resolved and resolved_indices and log_path.suffix == ".csv":
+        preds.loc[resolved_indices, "resolved"] = True
+        preds.to_csv(log_path, index=False)
+        logger.info("Marked %d rows as resolved in %s", len(resolved_indices), log_path)
 
     return pd.DataFrame(resolved_rows) if resolved_rows else pd.DataFrame()
 

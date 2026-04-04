@@ -962,7 +962,9 @@ The effective sample size calculation now computes autocorrelation on prediction
 
 BCa (bias-corrected accelerated) bootstrap 95% CIs are computed for BSS, AUC, and ECE using `bootstrap_metric_ci()`. The BCa method uses jackknife acceleration to correct for skewness and bias in the bootstrap distribution, providing better coverage than percentile-based CIs especially with small samples.
 
-**File:** `em_sde/evaluation.py`, `bootstrap_metric_ci()`.
+For overlapping H-step predictions, a **circular block bootstrap** (block_size=H) is used instead of i.i.d. resampling. This preserves temporal dependence structure and avoids understating CI width. The same block bootstrap is applied in `paired_bootstrap_loss_diff_pvalue()` for significance testing.
+
+**File:** `em_sde/evaluation.py`, `bootstrap_metric_ci()`, `paired_bootstrap_loss_diff_pvalue()`.
 
 ### 14.3 Benjamini-Hochberg FDR Correction
 
@@ -976,9 +978,20 @@ With 12+ ticker-horizon tests (or 21 ablation tests), raw p-values are inflated 
 
 ### 14.5 Gradient Boosting Baseline
 
-A 5th baseline using `HistGradientBoostingClassifier` (sklearn) with walk-forward expanding-window training. Features: vol_20d, delta_sigma, vol_ratio, vol_of_vol, ret_5d. Refit every 63 days. Tests whether flexible ML on raw features can match the MC+calibration stack.
+A 5th baseline using `HistGradientBoostingClassifier` (sklearn) with walk-forward expanding-window training and Platt scaling (CalibratedClassifierCV). Features: vol_20d, delta_sigma, vol_ratio, vol_of_vol, ret_5d. Refit every 63 days. Only trains on labels where `tt + H <= t` (outcome observable at prediction time). Tests whether flexible ML on raw features can match the MC+calibration stack.
 
 **File:** `scripts/baselines.py`, `gradient_boosting_baseline()`.
+
+### 14.6 No-Lookahead Enforcement
+
+All baseline and economic significance computations enforce strict no-lookahead:
+- **Baselines**: Feature logistic SGD resolves labels only when `pt + H <= t`, not `pt + H < n`. Gradient boosting training data filtered to `tt + H <= t`.
+- **Economic significance**: Position sizing uses `dates[i]` prediction for return from i to i+1, not `dates[i+1]`.
+- **Label resolution**: `resolve.py` filters by ticker to prevent cross-contamination and marks rows as resolved.
+
+### 14.7 N_eff in Promotion Gates
+
+The promotion gate framework (`model_selection.py`) now uses ACF-corrected `effective_sample_size(y, H, p_cal)` for the N_eff/N_params ratio, consistent with paper reporting. Previously used the simpler `min(events, nonevents) * 2` which ignored temporal overlap. The ACF-corrected version produces more conservative (lower) N_eff estimates.
 
 ---
 

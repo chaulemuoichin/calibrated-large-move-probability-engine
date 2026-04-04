@@ -129,6 +129,7 @@ def run_daily():
                     PREDICTION_LOG,
                     df["price"].to_numpy(dtype=float),
                     df.index,
+                    ticker=ticker.upper(),
                 )
                 if len(resolved) > 0:
                     n_resolved = len(resolved[resolved["y"].notna()])

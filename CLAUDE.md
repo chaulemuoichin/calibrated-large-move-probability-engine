@@ -51,7 +51,8 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `run_overfit_check.py` | 5-metric overfitting diagnostics (gen gap, CV stability, threshold sensitivity, temporal stability, N_eff/N_params) |
 | `run_full_institutional.py` | Full validation battery |
 | `run_stress_suite.py` | Stress testing |
-| `baselines.py` | Four formal baseline models (hist freq, GARCH-CDF, implied-vol BS, feature logistic) |
+| `baselines.py` | Seven baseline models (hist freq, GARCH-CDF, implied-vol BS, feature logistic, gradient boosting, VIX threshold rule, market-implied straddle) |
+| `run_robustness_analysis.py` | Blind spot analysis: sharpness, conditional ECE, universal thresholds, cross-asset correlation, AAPL failure |
 | `run_ablation_study.py` | Systematic 7-variant ablation study with significance testing |
 | `run_temporal_holdout.py` | Temporal hold-out evaluation (train pre-2020, test post-2020) |
 | `run_paper_results.py` | Generate LaTeX-ready tables with p-values and CIs |
@@ -192,20 +193,34 @@ python scripts/daily_predict.py
 
 ### Recent Changes (2026-04-04)
 
+**Critical bug fixes (from dual-persona Codex review):**
+
+1. **Economic significance lookahead fix** (`run_economic_significance.py`): `dates[i+1]` → `dates[i]` in both risk-managed and selective hedging strategies. Previous code used tomorrow's prediction for today's trade decision. Also fixed drawdown reduction sign.
+2. **resolve.py ticker filtering** (`resolve.py`, `daily_predict.py`): Added `ticker` parameter to prevent cross-ticker contamination in shared prediction log. Added `mark_resolved` tracking to prevent re-resolution.
+3. **Baseline date alignment** (`run_paper_results.py`): Replaced blind `[:n_common]` truncation with proper date-based merge for paired bootstrap comparisons. Full model and baselines now aligned on matching dates.
+4. **Baseline label leakage fix** (`baselines.py`): Feature logistic and gradient boosting baselines now only train on labels where `tt + H <= t` (outcome observable at prediction time). Previously used `tt + H < n` which leaked future labels. Added CalibratedClassifierCV (Platt scaling) to gradient boosting.
+5. **Block bootstrap** (`evaluation.py`): Added `block_size` parameter to `paired_bootstrap_loss_diff_pvalue` and `bootstrap_metric_ci`. Circular block bootstrap preserves temporal structure for overlapping predictions.
+6. **ACF-corrected N_eff in gates** (`model_selection.py`): Promotion gates now use `effective_sample_size(y, H, p_cal)` (residual-based ACF correction) instead of naive `min(events, nonevents) * 2`.
+7. **RegimeMultiFeatureCalibrator serialization** (`calibration.py`): Added `export_state()`/`from_state()` — was missing, causing all BO trials and gate rechecks to crash.
+8. **SPY + implied vol tested**: H=5 ECE=0.0088, H=10 ECE=0.0092 (PASS). H=20 ECE=0.0265 (still fails). Implied vol doesn't help SPY H=20.
+9. **Robustness analysis** (`scripts/run_robustness_analysis.py`): New script covering 8 blind spots — sharpness, conditional ECE, universal thresholds, cross-asset correlation, AAPL failure, VIX/straddle baselines.
+10. **Two new baselines** (`baselines.py`): VIX threshold rule and market-implied straddle probability.
+11. **312 tests passing**.
+
 **Statistical rigor + live prediction mode + honest scoping:**
 
 1. **N_eff fix** (`evaluation.py`): ACF now computed on prediction residuals `(p_cal - y)` instead of binary labels. Removes upward bias in effective sample size estimates.
 2. **Bootstrap CIs** (`evaluation.py`): BCa bootstrap CIs for BSS, AUC, and ECE. All paper tables now report `metric [95% CI]`.
 3. **FDR correction** (`evaluation.py`, `run_paper_results.py`, `run_ablation_study.py`): Benjamini-Hochberg FDR correction across all hypothesis tests. Tables show both raw and adjusted p-values.
 4. **ECE detailed** (`evaluation.py`): Per-bin sample counts reported alongside ECE for reviewer transparency.
-5. **Gradient Boosting baseline** (`baselines.py`): HistGradientBoostingClassifier on vol features — strongest fair baseline. Walk-forward expanding-window, same splits.
-6. **Calibrator serialization** (`calibration.py`): `export_state()`/`from_state()` on OnlineCalibrator, MultiFeatureCalibrator, HistogramCalibrator. JSON format.
+5. **Gradient Boosting baseline** (`baselines.py`): HistGradientBoostingClassifier on vol features with Platt scaling — strongest fair baseline. Walk-forward expanding-window, same splits.
+6. **Calibrator serialization** (`calibration.py`): `export_state()`/`from_state()` on OnlineCalibrator, MultiFeatureCalibrator, HistogramCalibrator, RegimeMultiFeatureCalibrator. JSON format.
 7. **GARCH state persistence** (`garch.py`): `export_state()`/`from_state()` on GarchResult.
 8. **Backtest state checkpoint** (`backtest.py`): Final calibrator and GARCH states saved in `result_df.attrs`.
 9. **Live prediction engine** (`predict.py`): Loads checkpoint, fetches latest prices, runs MC, applies calibrators, returns `PredictionResult` per horizon.
-10. **Async label resolution** (`resolve.py`): Resolves past predictions as outcomes become available.
+10. **Async label resolution** (`resolve.py`): Resolves past predictions as outcomes become available. Ticker-filtered, with resolved-row tracking.
 11. **`--predict-now` CLI** (`run.py`): Generate live predictions from CLI. Loads checkpoint or runs backtest first.
-12. **Transaction cost model** (`run_economic_significance.py`): Sensitivity sweep at 0/5/10/20 bps per trade.
+12. **Transaction cost model** (`run_economic_significance.py`): Sensitivity sweep at 0/5/10/20 bps per trade. No lookahead bias.
 13. **Daily scheduling** (`scripts/daily_predict.py`): Cron-ready script for daily predictions with logging.
 14. **312 tests passing** (was 296). 16 new tests for all Phase 1-2 features.
 

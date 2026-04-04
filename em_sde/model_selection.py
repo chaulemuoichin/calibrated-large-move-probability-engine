@@ -15,7 +15,8 @@ from .backtest import run_walkforward
 from .calibration import fit_offline_pooled_calibrator
 from .evaluation import (
     brier_score, brier_skill_score, log_loss, auc_roc, separation,
-    expected_calibration_error, crps_from_quantiles, pit_from_quantiles,
+    expected_calibration_error, effective_sample_size,
+    crps_from_quantiles, pit_from_quantiles,
     pit_ks_statistic, central_interval_coverage_error,
     crps_per_sample_from_quantiles, paired_bootstrap_loss_diff_pvalue,
 )
@@ -690,7 +691,11 @@ def apply_promotion_gates_oof(
             n_samples = len(y_r)
             n_events = int(np.sum(y_r))
             n_nonevents = n_samples - n_events
-            n_eff = min(n_events, n_nonevents) * 2
+            # Use ACF-corrected N_eff on residuals (accounts for overlap)
+            H_int = int(horizon) if isinstance(horizon, (int, float, np.integer, np.floating)) else 5
+            n_eff_acf = effective_sample_size(y_r, H_int, p_cal=p_r)
+            # Cap at min(events, nonevents) * 2 as upper bound
+            n_eff = min(n_eff_acf, min(n_events, n_nonevents) * 2)
             neff_ratio = round(n_eff / n_bo_params, 1) if n_bo_params > 0 else 0.0
             neff_warning = "" if neff_ratio >= 100 else ("YELLOW" if neff_ratio >= 50 else "RED")
 
