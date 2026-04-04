@@ -49,6 +49,12 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `run_overfit_check.py` | 5-metric overfitting diagnostics (gen gap, CV stability, threshold sensitivity, temporal stability, N_eff/N_params) |
 | `run_full_institutional.py` | Full validation battery |
 | `run_stress_suite.py` | Stress testing |
+| `baselines.py` | Four formal baseline models (hist freq, GARCH-CDF, implied-vol BS, feature logistic) |
+| `run_ablation_study.py` | Systematic 7-variant ablation study with significance testing |
+| `run_temporal_holdout.py` | Temporal hold-out evaluation (train pre-2020, test post-2020) |
+| `run_paper_results.py` | Generate LaTeX-ready tables with p-values and CIs |
+| `run_economic_significance.py` | Risk-managed portfolio and selective hedging analysis |
+| `generate_paper_figures.py` | Publication-quality reliability diagrams, heatmaps, charts |
 
 ### Config System (`configs/`)
 
@@ -136,9 +142,29 @@ python scripts/run_overfit_check.py all
 
 # Full institutional validation
 python -u scripts/run_full_institutional.py
+
+# --- Paper Infrastructure ---
+# Ablation study
+python scripts/run_ablation_study.py spy    # single ticker
+python scripts/run_ablation_study.py all    # all tickers
+
+# Temporal hold-out evaluation
+python scripts/run_temporal_holdout.py spy --cutoff 2019-12-31
+
+# Paper results tables (main + baselines with significance)
+python scripts/run_paper_results.py all
+
+# Economic significance analysis
+python scripts/run_economic_significance.py all
+
+# Publication figures
+python scripts/generate_paper_figures.py
+
+# Full paper reproduction (all of the above)
+python paper/reproduce.py --all
 ```
 
-## Current State (2026-03-10)
+## Current State (2026-04-03)
 
 ### Ticker Status (Legacy Point-Metric Gates)
 
@@ -149,7 +175,21 @@ python -u scripts/run_full_institutional.py
 
 **Density governance (CRPS/PIT/tail) mostly failing.** Even best tickers fail CRPS skill at longer horizons. The MC engine produces calibrated binary probabilities but the full return distribution needs work.
 
-### Recent Changes (2026-03-10)
+### Recent Changes (2026-04-03)
+
+**Academic paper infrastructure (Phase 1-3):**
+
+1. **Baselines module** (`scripts/baselines.py`): Four formal baseline models — Historical Frequency (rolling event rate), GARCH-CDF (parametric, no MC), Implied-Vol Black-Scholes, Feature Logistic Regression. All run through the same evaluation pipeline.
+2. **Ablation study** (`scripts/run_ablation_study.py`): Systematic 7-variant ablation (Base GBM → +GARCH-in-Sim → +Student-t → +MF Cal → +Histogram → +Implied Vol → Full). Paired bootstrap significance vs base variant.
+3. **Temporal hold-out** (`scripts/run_temporal_holdout.py`): Train through 2019-12-31, test 2020-2025. Per-era breakdown (COVID, tightening, post-2023). Runs baselines on same split.
+4. **Significance testing** (`scripts/run_paper_results.py`): Generates LaTeX-ready tables with paired bootstrap p-values, confidence intervals, gate pass/fail. Tables output to `outputs/paper/tables/`.
+5. **Economic significance** (`scripts/run_economic_significance.py`): Risk-managed portfolio (reduce weight when p > threshold) and selective hedging analysis. Sharpe, max drawdown, CVaR comparisons.
+6. **Publication figures** (`scripts/generate_paper_figures.py`): Multi-panel reliability diagrams, ablation heatmaps, baseline comparison charts, rolling ECE plots. Publication-quality PDF/PNG.
+7. **Full LaTeX paper** (`paper/main.tex`): ~16-page paper with abstract, intro, related work (20 citations), methodology, experimental setup, results, discussion, conclusion. BibTeX references in `paper/references.bib`.
+8. **Reproducibility package** (`paper/reproduce.py`): Single script to regenerate all paper tables and figures. `--all` flag or individual `--main-results`, `--ablation`, `--holdout`, `--economic`, `--figures`.
+9. **296 tests still passing.**
+
+### Previous Changes (2026-03-10)
 
 **Anti-overfitting methodology improvements:**
 
@@ -183,10 +223,11 @@ python -u scripts/run_full_institutional.py
 
 ### Next Steps
 
-1. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
-2. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
-3. **Fresh gate rechecks** on all tickers with density gates + N_eff tracking for current baseline
-4. **Density calibration frontier** — CRPS/PIT failures are the main gap; may need tail modeling or quantile recalibration
+1. **Run paper reproduction** — `python paper/reproduce.py --all` to generate all tables/figures with real numbers
+2. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
+3. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
+4. **Update paper tables** with actual reproduction numbers (current tables have representative values from RESULTS.md)
+5. **Submit to IJF or Quantitative Finance** — best venue fit for calibration + walk-forward methodology
 
 ### Standard Workflow
 ```bash

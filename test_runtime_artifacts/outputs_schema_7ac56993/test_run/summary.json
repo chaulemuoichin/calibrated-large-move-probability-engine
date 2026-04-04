@@ -1,0 +1,138 @@
+{
+  "run_id": "test_run",
+  "config": {
+    "data_source": "synthetic",
+    "ticker": "SPY",
+    "horizons": [
+      5,
+      10,
+      20
+    ],
+    "k": 2.0,
+    "mc_base_paths": 2000,
+    "garch_window": 300,
+    "calibration_lr": 0.05,
+    "safety_gate": false,
+    "gate_window": 200,
+    "ensemble_enabled": true,
+    "seed": 42,
+    "t_df": 5.0,
+    "garch_in_sim": false,
+    "garch_model_type": "garch",
+    "jump_enabled": false,
+    "threshold_mode": "fixed_pct",
+    "fixed_threshold_pct": 0.05,
+    "lock_threshold_panel": true,
+    "multi_feature": false,
+    "ohlc_features_enabled": true,
+    "strict_validation": true
+  },
+  "unit_convention": {
+    "returns": "daily simple returns (decimal, e.g. 0.01 = 1%)",
+    "sigma_1d": "daily volatility (decimal std dev of daily returns)",
+    "sigma_year": "sigma_1d * sqrt(252)",
+    "simulation_dt": "1/252",
+    "simulation_steps": "H (horizon in trading days)",
+    "threshold": "mode=fixed_pct"
+  },
+  "data_metadata": {
+    "ticker": "SYNTH"
+  },
+  "prediction_rows": 249,
+  "metrics": {
+    "overlapping": {
+      "5": {
+        "brier_raw": 0.09037002459016394,
+        "brier_cal": 0.09249806508881071,
+        "bss_raw": -0.018990489393939436,
+        "bss_cal": -0.04298575816807482,
+        "logloss_raw": 0.33400563292921914,
+        "logloss_cal": 0.3556849616516938,
+        "auc_raw": 0.4729166666666669,
+        "auc_cal": 0.3276515151515153,
+        "separation_raw": -0.001293939393939389,
+        "separation_cal": -0.013450040452192058,
+        "event_rate": 0.09836065573770492,
+        "n": 244,
+        "n_eff": 114.19879295665552
+      },
+      "10": {
+        "brier_raw": 0.17983842677824266,
+        "brier_cal": 0.18098825950135938,
+        "bss_raw": -0.028283360960960957,
+        "bss_cal": -0.03485789499270764,
+        "logloss_raw": 0.5504940465070377,
+        "logloss_cal": 0.5560315285191626,
+        "auc_raw": 0.4297297297297297,
+        "auc_cal": 0.44174174174174186,
+        "separation_raw": -0.005429779779779792,
+        "separation_cal": -0.007164050408760642,
+        "event_rate": 0.22594142259414227,
+        "n": 239,
+        "n_eff": 59.30751385562876
+      },
+      "20": {
+        "brier_raw": 0.22847056768558954,
+        "brier_cal": 0.24018749638463302,
+        "bss_raw": -0.011073843037974873,
+        "bss_cal": -0.06292594919042527,
+        "logloss_raw": 0.649657603943639,
+        "logloss_cal": 0.6766745263290403,
+        "auc_raw": 0.4571308016877637,
+        "auc_cal": 0.3779746835443042,
+        "separation_raw": -0.002647552742615966,
+        "separation_cal": -0.024056790739412248,
+        "event_rate": 0.34497816593886466,
+        "n": 229,
+        "n_eff": 51.740371369407434
+      }
+    },
+    "non_overlapping": {
+      "5": {
+        "brier_raw": 0.11208845408163265,
+        "brier_cal": 0.1136983045277826,
+        "bss_raw": -0.043117745155038856,
+        "bss_cal": -0.058099337872891565,
+        "logloss_raw": 0.40340472150275,
+        "logloss_cal": 0.417250276576537,
+        "auc_raw": 0.40310077519379844,
+        "auc_cal": 0.32945736434108525,
+        "separation_raw": -0.003488372093023273,
+        "separation_cal": -0.012855800773799296,
+        "event_rate": 0.12244897959183673,
+        "n": 49,
+        "n_eff": 49.0
+      },
+      "10": {
+        "brier_raw": 0.19728345833333336,
+        "brier_cal": 0.19777142240927617,
+        "bss_raw": -0.05217844444444464,
+        "bss_cal": -0.054780919516139504,
+        "logloss_raw": 0.5925682392884211,
+        "logloss_cal": 0.5967572216491431,
+        "auc_raw": 0.3333333333333333,
+        "auc_cal": 0.37962962962962965,
+        "separation_raw": -0.009388888888888891,
+        "separation_cal": -0.008976705634341386,
+        "event_rate": 0.25,
+        "n": 24,
+        "n_eff": 24.0
+      },
+      "20": {
+        "brier_raw": 0.16790789583333332,
+        "brier_cal": 0.17900879450226218,
+        "bss_raw": -0.20893684999999995,
+        "bss_cal": -0.2888633204162876,
+        "logloss_raw": 0.52100694594126,
+        "logloss_cal": 0.5458386592859549,
+        "auc_raw": 0.55,
+        "auc_cal": 0.3,
+        "separation_raw": 0.011149999999999993,
+        "separation_cal": -0.03878698525671043,
+        "event_rate": 0.16666666666666666,
+        "n": 12,
+        "n_eff": 12.0
+      }
+    }
+  }
+}
