@@ -21,8 +21,10 @@ If something here does not match the code, the code wins and this document needs
 11. [Mathematical Reference](#11-mathematical-reference)
 12. [Known Limitations and Assumptions](#12-known-limitations-and-assumptions)
 13. [Bayesian Hyperparameter Optimization](#13-bayesian-hyperparameter-optimization)
-14. [File Map](#14-file-map)
-15. [References](#15-references)
+14. [Statistical Rigor](#14-statistical-rigor-2026-04-04)
+15. [Live Prediction System](#15-live-prediction-system-2026-04-04)
+16. [File Map](#16-file-map)
+17. [References](#17-references)
 
 ---
 
@@ -948,28 +950,107 @@ if float(er_by_horizon.min()) < min_er_target:
 
 ---
 
-## 14. File Map
+## 14. Statistical Rigor (2026-04-04)
+
+### 14.1 Residual-Based N_eff
+
+The effective sample size calculation now computes autocorrelation on prediction residuals `r_t = p_cal(t) - y_t` instead of binary labels. Binary labels (0/1) have artificially low autocorrelation because the discrete distribution masks temporal dependence. Residuals are continuous and capture the actual overlap-induced correlation structure. This reduces N_eff estimates by ~30-40% compared to the old label-based method.
+
+**File:** `em_sde/evaluation.py`, `effective_sample_size()` — accepts optional `p_cal` parameter.
+
+### 14.2 Bootstrap Confidence Intervals
+
+BCa (bias-corrected accelerated) bootstrap 95% CIs are computed for BSS, AUC, and ECE using `bootstrap_metric_ci()`. The BCa method uses jackknife acceleration to correct for skewness and bias in the bootstrap distribution, providing better coverage than percentile-based CIs especially with small samples.
+
+**File:** `em_sde/evaluation.py`, `bootstrap_metric_ci()`.
+
+### 14.3 Benjamini-Hochberg FDR Correction
+
+With 12+ ticker-horizon tests (or 21 ablation tests), raw p-values are inflated by multiplicity. The Benjamini-Hochberg procedure controls the false discovery rate at alpha=0.05. All paper tables report both raw and FDR-adjusted p-values.
+
+**File:** `em_sde/evaluation.py`, `apply_fdr_correction()`.
+
+### 14.4 Per-Bin ECE Counts
+
+`expected_calibration_error_detailed()` returns bin-level sample counts alongside the ECE value. Paper tables report `min_bin_n` so reviewers can assess whether ECE is driven by well-populated or sparse bins.
+
+### 14.5 Gradient Boosting Baseline
+
+A 5th baseline using `HistGradientBoostingClassifier` (sklearn) with walk-forward expanding-window training. Features: vol_20d, delta_sigma, vol_ratio, vol_of_vol, ret_5d. Refit every 63 days. Tests whether flexible ML on raw features can match the MC+calibration stack.
+
+**File:** `scripts/baselines.py`, `gradient_boosting_baseline()`.
+
+---
+
+## 15. Live Prediction System (2026-04-04)
+
+### 15.1 State Checkpointing
+
+At the end of a walk-forward run, the system serializes:
+- **Calibrator states** (weight vectors, histogram corrections, learning rates) → `calibrators.json`
+- **GARCH parameters** (omega, alpha, beta, gamma, last sigma) → `garch_state.json`
+- **Metadata** (thresholds, config, ticker) → `metadata.json`
+
+Stored in `outputs/state/{ticker}/`. Files: `em_sde/calibration.py` (export_state/from_state), `em_sde/garch.py` (export_state/from_state), `em_sde/backtest.py` (saves to result_df.attrs).
+
+### 15.2 Prediction Engine
+
+`em_sde/predict.py` provides `PredictionEngine`:
+- `from_checkpoint(state_dir)` loads saved state
+- `predict(prices, horizons, n_paths, seed)` generates calibrated probabilities in seconds
+- Fits GARCH on full history (warm-started), runs MC simulation, applies saved calibrators
+- Returns `Dict[int, PredictionResult]` with p_cal, p_raw, sigma_1d, threshold, metadata
+
+### 15.3 Asynchronous Label Resolution
+
+`em_sde/resolve.py` tracks pending predictions and resolves outcomes:
+- `append_prediction()` logs a prediction to CSV
+- `resolve_predictions()` checks which past predictions can be resolved (t + H has passed)
+
+### 15.4 CLI --predict-now Mode
+
+`em_sde/run.py` supports `--predict-now --config <path> [--state-dir <path>]`:
+- With state-dir: loads checkpoint, predicts immediately (~seconds)
+- Without state-dir: runs full backtest first, saves state, then predicts
+
+### 15.5 Daily Scheduling
+
+`scripts/daily_predict.py` runs predictions for all configured tickers:
+1. Loads/builds PredictionEngine per ticker
+2. Logs predictions to CSV audit trail
+3. Resolves past predictions with outcomes
+4. Outputs JSON summary
+
+Schedule via Windows Task Scheduler (4:30 PM ET daily) or Unix cron.
+
+---
+
+## 16. File Map
 
 | File | What it does |
 |------|-------------|
 | `em_sde/data_layer.py` | Loads prices, implied vol data, earnings dates, caches, validates, runs quality checks |
-| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, HAR-RV volatility model (inactive) |
+| `em_sde/garch.py` | Fits GARCH/GJR, EWMA fallback, stationarity projection, state export/import |
 | `em_sde/monte_carlo.py` | Simulates price paths (GBM, GARCH-in-sim, jumps), computes p_raw |
-| `em_sde/calibration.py` | Online/multi-feature/regime-MF calibrators, histogram post-calibration, safety gates |
-| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, implied vol blending |
-| `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, VaR, CRPS, PIT, tail coverage, paired bootstrap tests |
+| `em_sde/calibration.py` | Online/multi-feature/regime-MF calibrators, histogram post-calibration, state serialization |
+| `em_sde/backtest.py` | Walk-forward loop, resolution queues, threshold routing, implied vol blending, state checkpointing |
+| `em_sde/evaluation.py` | Brier, BSS, AUC, ECE, N_eff (residual-based), bootstrap CIs, FDR correction, paired bootstrap |
 | `em_sde/model_selection.py` | Cross-validation, model comparison, promotion gates, density gates, benchmark/conditional reports |
+| `em_sde/predict.py` | Live prediction engine with checkpoint load/save |
+| `em_sde/resolve.py` | Asynchronous label resolution for pending predictions |
 | `em_sde/config.py` | YAML config loading and validation |
 | `em_sde/output.py` | CSV/JSON output, chart generation |
-| `em_sde/run.py` | CLI entry point |
+| `em_sde/run.py` | CLI entry point (--predict-now, --save-state modes) |
 | `scripts/run_bayesian_opt.py` | Optuna Bayesian optimization for hyperparameter search |
 | `scripts/run_gate_recheck.py` | Re-run CV gates for diagnostic evaluation |
 | `scripts/run_overfit_check.py` | Overfitting diagnostics (5 metrics, GREEN/YELLOW/RED) |
-| `tests/test_framework.py` | 296 unit tests |
+| `scripts/baselines.py` | Five baseline models (hist freq, GARCH-CDF, IV-BS, feature logistic, gradient boosting) |
+| `scripts/daily_predict.py` | Daily prediction runner with scheduling support |
+| `tests/test_framework.py` | 312 unit tests |
 
 ---
 
-## 15. References
+## 17. References
 
 | Method | Paper | Link |
 |--------|-------|------|

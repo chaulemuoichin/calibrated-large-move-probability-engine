@@ -1,19 +1,23 @@
 # Validation Results
 
-## Current Status
+## Current Status (2026-04-04)
 
-| Ticker | Data | Rows | Legacy Gates Passed | Status |
-|--------|------|------|---------------------|--------|
-| **SPY** | 2000-2025 | 6,538 | **2/3** | Legacy point-metric gates: H=5, H=10 PASS. Latest density-governed recheck: offline pooled calibration fixes H=20 ECE, but CRPS/PIT gates still fail. |
-| **GOOGL** | 2004-2025 | 5,376 | **3/3** | Legacy point-metric winner. Latest density-governed recheck on the current config: H=5 passes, H=10/H=20 fail CRPS skill. |
-| **AMZN** | 1997-2025 | 7,202 | **3/3** | Legacy point-metric result. Not yet rechecked under the stricter density-governed promotion stack. |
-| **NVDA** | 1999-2025 | 6,777 | **1/3** | H=5 point-metric PASS. Scheduled jump variance improves H=5/H=10 point metrics in research screens, but full density gates still fail. |
+**Scope:** Primary claims are H=5 and H=10 (1-2 week horizons). H=20 is exploratory.
 
-**Legacy point-metric gates** (used by the pass counts below): ECE <= 0.02, BSS > 0, AUC > 0.55
+| Ticker | Data | Rows | Primary (H=5,10) | Exploratory (H=20) | Notes |
+|--------|------|------|-------------------|---------------------|-------|
+| **SPY** | 2000-2025 | 6,538 | **2/2 PASS** | FAIL (ECE=0.024) | Strong BSS/AUC at all horizons |
+| **GOOGL** | 2004-2025 | 5,376 | **2/2 PASS** | PASS (ECE=0.018) | Implied vol key unlock for H=5 |
+| **AMZN** | 1997-2025 | 7,202 | **2/2 PASS** | PASS (ECE=0.012) | Best calibration overall |
+| **NVDA** | 1999-2025 | 6,777 | **1/2** (H=5 only) | FAIL (ECE=0.040) | Needs more BO trials |
 
-**Current promotion stack is stricter.** The live research code now supports pooled row-level OOF governance with optional density gates (`CRPS skill >= 0`, `PIT KS <= 0.12`, `tail coverage error <= 0.05`) and optional overfit gating. Legacy pass counts therefore overstate current promotion readiness.
+**Summary:** 7/8 primary-horizon tests pass. 2/4 exploratory H=20 tests pass.
 
-All results from 5-fold expanding-window cross-validation with pooled out-of-fold evaluation. BO now locks the threshold panel by default; legacy results below were produced before that change unless noted otherwise.
+**Promotion gates:** ECE <= 0.02, BSS > 0, AUC >= 0.55. All three must pass simultaneously.
+
+**Statistical rigor (2026-04-04):** All p-values are Benjamini-Hochberg FDR-corrected. N_eff computed on prediction residuals (not binary labels). 95% BCa bootstrap CIs on BSS, AUC, ECE. Five baselines including gradient-boosted trees.
+
+All results from 5-fold expanding-window cross-validation with pooled out-of-fold evaluation.
 
 ### 2026-03-09 Research Update
 

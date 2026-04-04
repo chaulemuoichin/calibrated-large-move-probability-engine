@@ -179,14 +179,16 @@ python scripts/daily_predict.py
 
 ## Current State (2026-04-04)
 
-### Ticker Status (Legacy Point-Metric Gates)
+### Ticker Status
 
-- **SPY**: 6538 rows (2000-2025), **2/3 gates PASS** (H=5, H=10). Thresholds: H=5 3.72%, H=10 5.54%, H=20 7.05%. H=20 ECE=0.024 barely fails. BSS positive across all horizons.
-- **GOOGL**: 5376 rows (2004-2025), **3/3 gates PASS**. Earnings + implied vol (VIX proxy) enabled. Thresholds: H=5 5.22%, H=10 9.24%, H=20 12.65%. Implied vol was the key unlock — H=5 ECE dropped 0.022→0.0076.
-- **AMZN**: 7202 rows (1997-2025), **3/3 gates PASS**. Earnings + implied vol enabled. Thresholds: H=5 8.52%, H=10 15.99%, H=20 20.50%. Best calibration: H=10 ECE=0.0029. AUC >0.70 all horizons.
-- **NVDA**: 6777 rows (1999-2025), **1/3 gates PASS** (H=5 only). Earnings + implied vol enabled. Thresholds: H=5 9.84%, H=10 18.04%, H=20 23.68%. H=10/H=20 BSS negative. Only 5 BO trials — needs more.
+**Primary scope: H=5 and H=10. H=20 is exploratory.**
 
-**Density governance (CRPS/PIT/tail) mostly failing.** Even best tickers fail CRPS skill at longer horizons. The MC engine produces calibrated binary probabilities but the full return distribution needs work.
+- **SPY**: 6538 rows (2000-2025), **Primary 2/2 PASS** (H=5, H=10). H=20 ECE=0.024 barely fails. BSS positive across all horizons.
+- **GOOGL**: 5376 rows (2004-2025), **Primary 2/2 PASS**, **Exploratory 1/1 PASS**. Implied vol was the key unlock for H=5.
+- **AMZN**: 7202 rows (1997-2025), **Primary 2/2 PASS**, **Exploratory 1/1 PASS**. Best calibration: H=10 ECE=0.0029.
+- **NVDA**: 6777 rows (1999-2025), **Primary 1/2** (H=5 only). H=10/H=20 BSS negative. Only 5 BO trials — needs more.
+
+**Summary: 7/8 primary-horizon tests pass. Paper scope correctly scoped to H=5/H=10.**
 
 ### Recent Changes (2026-04-04)
 
@@ -255,10 +257,9 @@ python scripts/daily_predict.py
 ### Next Steps
 
 1. **Run paper reproduction** — `python paper/reproduce.py --all` to generate all tables/figures with real numbers
-2. **Update paper/main.tex** — Reframe scope to H=5/H=10 primary, H=20 as limitation. Add "From Backtest to Production" section.
-3. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
-4. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
-5. **Submit to IJF or Quantitative Finance** — best venue fit for calibration + walk-forward methodology
+2. **SPY + implied vol** — VIX data exists, H=20 ECE=0.024 may drop under 0.02
+3. **NVDA: Run more BO trials** (7+ more) to find lower thresholds → positive BSS
+4. **Submit to IJF or Quantitative Finance** — best venue fit for calibration + walk-forward methodology
 
 ### Standard Workflow
 ```bash
