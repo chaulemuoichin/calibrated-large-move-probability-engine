@@ -48,7 +48,22 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py -v --tb=short -k \"calibrator or predict\")",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_framework.py --tb=short -q)",
       "Bash(.venv/Scripts/python.exe scripts/run_robustness_analysis.py all --skip-heavy)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q --tb=short)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -x -q --tb=short)",
+      "Bash(\\\\.status\")",
+      "Bash(.venv/Scripts/python.exe scripts/run_robustness_analysis.py all)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/daily_predict.py)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/run_robustness_analysis.py)",
+      "Bash(.venv/Scripts/python.exe -m py_compile em_sde/predict.py)",
+      "Bash(.venv/Scripts/python.exe -m py_compile em_sde/resolve.py)",
+      "Bash(.venv/Scripts/python.exe scripts/run_paper_results.py all)",
+      "Bash(echo \"paper results PID: $!\")",
+      "Bash(.venv/Scripts/python.exe scripts/run_ablation_study.py all)",
+      "Bash(echo \"ablation PID: $!\")",
+      "Bash(taskkill /PID 41208 /F)",
+      "Bash(taskkill /PID 10760 /F)",
+      "Bash(taskkill //PID 41208 //F)",
+      "Bash(taskkill //PID 10760 //F)",
+      "Bash(taskkill //PID 10868 //F)"
     ]
   }
 }

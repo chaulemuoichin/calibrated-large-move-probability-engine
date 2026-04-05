@@ -45,6 +45,12 @@ class PredictionResult:
     event_rate_historical: float
     calibrator_n_updates: int
     timestamp: str
+    # MF features persisted for calibrator updates at resolution time
+    delta_sigma: float = 0.0
+    vol_ratio: float = 1.0
+    vol_of_vol: float = 0.0
+    earnings_proximity: float = 0.0
+    implied_vol_ratio: float = 1.0
 
 
 class PredictionEngine:
@@ -117,6 +123,58 @@ class PredictionEngine:
 
         with open(state_path / "metadata.json", "w") as f:
             json.dump(self._metadata, f, indent=2)
+
+    def update_calibrators(self, resolved_df: pd.DataFrame) -> int:
+        """
+        Update online calibrators with newly resolved prediction outcomes.
+
+        Matches the backtest update path: MF calibrators receive p_raw and the
+        full feature vector (sigma, delta_sigma, vol_ratio, vol_of_vol, etc.).
+        Online calibrators receive p_raw and y.
+
+        Parameters
+        ----------
+        resolved_df : pd.DataFrame
+            Resolved predictions with columns: horizon, p_raw, p_cal, y,
+            sigma_1d. Optional: delta_sigma, vol_ratio, vol_of_vol,
+            earnings_proximity, implied_vol_ratio.
+
+        Returns
+        -------
+        n_updated : int
+            Number of calibrator updates applied.
+        """
+        n_updated = 0
+        for _, row in resolved_df.iterrows():
+            H = int(row.get("horizon", 0))
+            y = row.get("y")
+            # Use p_raw for calibrator update (matches backtest.py _resolve_predictions_mf)
+            p_raw = row.get("p_raw", row.get("p_cal"))
+            if H not in self._calibrators or y is None or np.isnan(y):
+                continue
+            if p_raw is None or np.isnan(p_raw):
+                continue
+
+            cal = self._calibrators[H]
+            if isinstance(cal, (MultiFeatureCalibrator, RegimeMultiFeatureCalibrator)):
+                # Full feature vector matching backtest update path
+                sigma = float(row.get("sigma_1d", 0.01))
+                delta_sigma = float(row.get("delta_sigma", 0.0))
+                vol_ratio = float(row.get("vol_ratio", 1.0))
+                vol_of_vol = float(row.get("vol_of_vol", 0.0))
+                earnings_prox = float(row.get("earnings_proximity", 0.0))
+                iv_ratio = float(row.get("implied_vol_ratio", 1.0))
+                cal.update(
+                    float(p_raw), float(y), sigma,
+                    delta_sigma, vol_ratio, vol_of_vol,
+                    earnings_prox, iv_ratio,
+                )
+                n_updated += 1
+            elif isinstance(cal, OnlineCalibrator):
+                cal.update(float(p_raw), float(y))
+                n_updated += 1
+
+        return n_updated
 
     def predict(
         self,
@@ -240,6 +298,9 @@ class PredictionEngine:
                 event_rate_historical=hist_rate,
                 calibrator_n_updates=n_updates,
                 timestamp=now_str,
+                delta_sigma=delta_sigma,
+                vol_ratio=vol_ratio,
+                vol_of_vol=vol_of_vol,
             )
 
         return results

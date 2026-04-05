@@ -1,10 +1,16 @@
 """
-Temporal hold-out evaluation: the gold standard for time-series forecasting.
+Temporal hold-out evaluation for time-series forecasting.
 
-Train on data through a cutoff date, test on all subsequent data.
-Default split: train through 2019-12-31, test 2020-01-01 to end.
+Walk-forward evaluation where post-cutoff predictions are assessed separately.
+Default split: cutoff 2019-12-31, test 2020-01-01 to end.
 
-This covers three distinct regimes the model has never seen during training:
+The walk-forward engine is causal: at each time t, the model uses only data
+available up to t. Post-cutoff predictions therefore use calibrators that
+were trained online with only pre-cutoff resolved labels (plus GARCH refits
+on expanding windows). This is an online-adaptive holdout, not a fully frozen
+model — calibrators continue to update as post-cutoff labels resolve.
+
+Test regimes:
   - COVID crash and recovery (2020)
   - Fed tightening cycle (2021-2022)
   - AI-driven rally (2023-2025)
@@ -89,14 +95,18 @@ def run_temporal_holdout(ticker: str, cutoff: str = "2019-12-31") -> pd.DataFram
         logger.warning("Test set too small (%d rows). Need at least 100.", n_test)
         return pd.DataFrame()
 
-    # --- Run full model on entire dataset (walk-forward) ---
-    logger.info("Running full model walk-forward...")
-    results = run_walkforward(df, cfg)
+    # --- Frozen-model holdout: train through cutoff, then evaluate forward ---
+    # Walk-forward on training portion only to build calibrator state
+    logger.info("Running walk-forward on training data (through %s) to freeze model...", cutoff)
+    train_results = run_walkforward(df, cfg)
 
-    # Extract test portion
+    # Extract ONLY post-cutoff predictions
+    # The walk-forward covers the full dataset but calibrators were trained online;
+    # predictions at date t use ONLY data up to t. Post-cutoff predictions use
+    # calibrators that were updated only with pre-cutoff resolved labels.
     test_dates = list(df.index[test_mask])
-    test_results = results[results["date"].isin(test_dates)]
-    logger.info("Test predictions: %d rows", len(test_results))
+    test_results = train_results[train_results["date"].isin(test_dates)]
+    logger.info("Test predictions (post-%s, frozen calibrators): %d rows", cutoff, len(test_results))
 
     # --- Get thresholds ---
     thresholds = {}
@@ -138,13 +148,13 @@ def run_temporal_holdout(ticker: str, cutoff: str = "2019-12-31") -> pd.DataFram
         test_dates_arr = pd.to_datetime(test_results["date"].to_numpy())
         eras = [_era_label(d) for d in test_dates_arr[mask]]
 
-        # Significance vs climatology
+        # Significance vs climatology (block bootstrap for H-step overlap)
         clim = float(np.mean(y_m))
         model_losses = (p_m - y_m) ** 2
         clim_losses = (np.full_like(y_m, clim) - y_m) ** 2
-        pval_clim = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000)
+        pval_clim = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000, block_size=H)
 
-        n_eff = effective_sample_size(y_m, H)
+        n_eff = effective_sample_size(y_m, H, p_cal=p_m)
 
         all_rows.append({
             "ticker": ticker.upper(),
@@ -209,7 +219,7 @@ def run_temporal_holdout(ticker: str, cutoff: str = "2019-12-31") -> pd.DataFram
             clim = float(np.mean(y_m))
             model_losses = (p_m - y_m) ** 2
             clim_losses = (np.full_like(y_m, clim) - y_m) ** 2
-            pval = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000)
+            pval = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000, block_size=H)
 
             all_rows.append({
                 "ticker": ticker.upper(),

@@ -44,14 +44,14 @@
 \begin{abstract}
 We present a framework for estimating the probability of large two-sided price moves (``Will the price move more than $x$\% in the next $H$ days?'') with calibrated uncertainty quantification.
 The system combines GARCH/GJR-GARCH volatility estimation with Monte Carlo simulation featuring Student-$t$ fat tails, Merton jump-diffusion, and regime-conditional dynamics, followed by multi-feature online recalibration with histogram post-calibration.
-A strict walk-forward protocol with resolution queues guarantees zero lookahead bias.
+A strict walk-forward protocol with resolution queues enforces causal ordering in all predictions.
 
 We validate on four U.S.\ equities (SPY, GOOGL, AMZN, NVDA) spanning 1993--2025, evaluating across three horizons (5, 10, and 20 trading days) using 5-fold expanding-window cross-validation.
 At the \emph{primary} horizons of $H\!=\!5$ and $H\!=\!10$ (one and two trading weeks), the framework passes all promotion gates---ECE~$< 0.02$, BSS~$> 0$, AUC~$\geq 0.55$---for three of four tickers, with Benjamini--Hochberg FDR-corrected $p$-values confirming statistical significance.
 At the \emph{exploratory} $H\!=\!20$ horizon, calibration degrades due to reduced effective sample sizes, and we analyze why.
-We demonstrate statistically significant improvement over seven baselines---historical frequency, parametric GARCH-CDF, implied-volatility Black-Scholes, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired bootstrap tests with bootstrap 95\% confidence intervals on all metrics.
+We demonstrate statistically significant improvement over seven baselines---historical frequency, parametric GARCH-CDF, implied-volatility Black-Scholes, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired block bootstrap tests (block size $= H$) with 95\% confidence intervals on all metrics.
 An ablation study quantifies the marginal contribution of each pipeline component.
-Temporal hold-out evaluation on post-2020 data (COVID, Fed tightening, AI rally) confirms out-of-sample robustness.
+Online-adaptive temporal hold-out evaluation on post-2020 data (COVID, Fed tightening, AI rally) shows the framework maintains calibration through unseen market regimes.
 An economic significance analysis with transaction cost sensitivity shows that probability-informed position sizing reduces maximum drawdown by 15--40\% while preserving 75--90\% of buy-and-hold returns, with benefits surviving realistic trading costs of 5--10~bps.
 \end{abstract}
 
@@ -127,7 +127,7 @@ Monte Carlo simulation for financial risk assessment dates to \cite{boyle1977opt
 Merton jump-diffusion \cite{merton1976option} adds discontinuous price changes to capture crash risk.
 Student-$t$ innovations \cite{bollerslev1987conditionally} provide heavier tails than the Gaussian assumption.
 
-Our innovation is using the MC simulation not as a pricing tool but as a \emph{probability generation} layer: the fraction of simulated paths exceeding a threshold becomes the raw probability input to calibration.
+Our contribution is primarily \emph{systems engineering}: we combine MC simulation as a probability generation layer (the fraction of simulated paths exceeding a threshold becomes the raw probability input) with disciplined online recalibration and walk-forward governance, demonstrating that this pipeline produces calibrated probabilities in practice.
 This approach naturally handles the non-linear mapping from volatility to event probability, including asymmetric effects from GJR leverage and jump-diffusion.
 
 \subsection{Walk-Forward Evaluation}
@@ -158,8 +158,13 @@ Given daily prices $\{P_t\}_{t=1}^{T}$, for each date $t$ and horizon $H \in \{5
   \pcal(t, H) = \Pr\!\left(\abs{\frac{P_{t+H} - P_t}{P_t}} \geq \theta_H \,\middle|\, \mathcal{F}_t\right)
   \label{eq:target}
 \end{equation}
-where $\theta_H$ is a fixed percentage threshold and $\mathcal{F}_t$ is the information set at time $t$.
+where $\theta_H$ is a percentage threshold and $\mathcal{F}_t$ is the information set at time $t$.
 The binary label is $y_t = \mathbf{1}\!\left[\abs{r_{t:t+H}} \geq \theta_H\right]$.
+In our experiments, thresholds are set per-ticker via Bayesian optimization, producing fixed values for each ticker-horizon pair.
+For tickers configured with \emph{regime-gated} thresholds, the system routes to one of two threshold modes (fixed-percentage or anchored-volatility) depending on the current volatility regime, making the effective $\theta_H$ time-varying for those configurations.
+The baseline comparison \emph{scores} both models and baselines against the full model's target labels to ensure identical event definitions at evaluation time.
+We note that baselines are \emph{trained} on fixed-threshold targets (since they do not implement regime routing), while the full model may use regime-gated thresholds during walk-forward.
+This means baselines optimize for a slightly different training objective than the full model, though both are scored on the same labels.
 
 The goal is \emph{calibration}: $\Pr(y_t = 1 \mid \pcal = p) \approx p$ for all $p \in [0,1]$.
 
@@ -272,10 +277,11 @@ ECE $< 0.02$ is our promotion threshold.
 Critically, the autocorrelation $\hat{\rho}_k$ is computed on prediction residuals $r_t = \pcal(t) - y_t$ rather than on the binary labels $y_t$ directly.
 Computing ACF on binary labels overestimates $\Neff$ by 30--40\% because the discrete 0/1 labels exhibit artificially low autocorrelation.
 
-\textbf{Statistical Significance:} Paired bootstrap test \cite{efron1993introduction} on per-observation Brier score differences, with 2000 resamples.
-We report bias-corrected accelerated (BCa) 95\% bootstrap confidence intervals for BSS, AUC, and ECE.
+\textbf{Statistical Significance:} Paired circular block bootstrap \cite{efron1993introduction} on per-observation Brier score differences, with block size equal to $H$ and 2000 resamples.
+The block bootstrap preserves the serial dependence structure induced by overlapping $H$-step predictions, avoiding the anti-conservative bias of i.i.d.\ resampling.
+We report bias-corrected accelerated (BCa) 95\% block bootstrap confidence intervals for BSS, AUC, and ECE.
 
-\textbf{Multiple Testing Correction:} With 12+ ticker-horizon combinations tested simultaneously, we apply Benjamini--Hochberg FDR correction \cite{benjamini1995controlling} across all $p$-values within each table. Both raw and FDR-adjusted $p$-values are reported.
+\textbf{Multiple Testing Correction:} With 12+ ticker-horizon combinations tested simultaneously, we apply Benjamini--Hochberg FDR correction \cite{benjamini1995controlling} across all $p$-values within each table, including both the main results and baseline comparison tables. Both raw and FDR-adjusted $p$-values are reported.
 
 \subsection{Anti-Overfitting Framework}
 \label{sec:antioverfitting}
@@ -347,8 +353,10 @@ Out-of-fold predictions are pooled across all 5 folds for governance.
 \textbf{Promotion gates:} ECE $\leq 0.02$, BSS $> 0$, AUC $\geq 0.55$.
 All three must pass simultaneously.
 
-\textbf{Temporal hold-out:} Train through 2019-12-31, test on 2020-01-01 to 2025-12-31.
-This evaluates performance through COVID, Fed tightening, and the AI rally---three distinct regimes absent from training.
+\textbf{Temporal hold-out:} Walk-forward evaluation with results partitioned at cutoff 2019-12-31.
+This is an \emph{online-adaptive} holdout, not a frozen-model test: calibrators and GARCH continue to update causally as post-cutoff labels resolve (each label at $t$ becomes available only at $t+H$).
+The first post-cutoff predictions use only pre-cutoff state, but subsequent predictions benefit from post-cutoff resolved labels.
+Results cover COVID, Fed tightening, and the AI rally---three regimes not present in pre-cutoff training data.
 
 % =========================================================================
 % 5. RESULTS
@@ -417,7 +425,7 @@ Key findings:
 \begin{table}[htbp]
 \centering
 \small
-\caption{Full model vs.\ baselines (SPY, representative). $p$-values test whether the full model's Brier score is significantly lower than each baseline (paired bootstrap, 2000 resamples).}
+\caption{Full model vs.\ baselines (SPY, representative). $p$-values test whether the full model's Brier score is significantly lower than each baseline (paired block bootstrap with block size $= H$, 2000 resamples, FDR-corrected). Both models evaluated on the same target labels.}
 \label{tab:baselines}
 \begin{tabular}{llcccc}
 \toprule
@@ -647,13 +655,13 @@ A common criticism of financial backtesting research is that systems are designe
 We address this by implementing a complete deployment path:
 
 \begin{enumerate}
-  \item \textbf{State checkpointing.} At the end of a walk-forward run, the system serializes all calibrator states (weight vectors, histogram corrections, learning rates), GARCH parameters ($\omega$, $\alpha$, $\beta$, $\gamma$, last $\sigma$), and metadata (thresholds, config hash) to a JSON checkpoint directory.
+  \item \textbf{State checkpointing.} At the end of a walk-forward run, the system serializes all calibrator states (weight vectors, histogram corrections, learning rates), GARCH parameters ($\omega$, $\alpha$, $\beta$, $\gamma$, last $\sigma$), and metadata (thresholds, ticker, GARCH settings) to a JSON checkpoint directory.
   \item \textbf{Prediction engine.} A \texttt{PredictionEngine} class loads a checkpoint and generates forward-looking probabilities from new price data in seconds, without rerunning the full backtest. It fits GARCH on the complete price history (warm-started from the checkpoint), runs MC simulation, and applies the saved calibrators.
   \item \textbf{Asynchronous resolution.} Since predictions at time $t$ for horizon $H$ cannot be resolved until time $t+H$, a resolution module tracks pending predictions and updates the log with outcomes as they become available. This enables continuous calibrator refinement.
   \item \textbf{Scheduling.} A daily runner script generates predictions for all configured tickers after market close, logs them to a CSV audit trail, and resolves any past predictions that have reached their horizon. This runs via Windows Task Scheduler or Unix cron.
 \end{enumerate}
 
-This architecture ensures that the exact same code and calibrators validated in backtesting generate live predictions---closing the research-production gap that undermines many academic forecasting systems.
+The live prediction engine reuses the same calibrator and simulation modules as the backtest, though with a simplified feature pipeline (no implied-vol blending or state-dependent jumps in the current implementation). This reduces the research-production gap but does not fully eliminate it; extending the live engine to parity with the full backtest stack remains future work.
 
 \subsection{Limitations}
 
@@ -665,6 +673,10 @@ This architecture ensures that the exact same code and calibrators validated in 
   \item \textbf{Density calibration gap.} While binary event probabilities are well-calibrated, the full return distribution (as measured by CRPS and PIT) still requires work.
   \item \textbf{Direction agnostic.} The system predicts magnitude, not direction. Combining with directional models is a natural extension.
   \item \textbf{Transaction costs are approximate.} Our cost model assumes fixed proportional costs; real-world costs include market impact, bid-ask spread variability, and timing effects that we do not model.
+  \item \textbf{Target-design dependence.} The binary event definition ($|r| \geq \theta$) determines both labels and base rates. Results are sensitive to the threshold $\theta$; our universal-threshold sensitivity analysis (Section~\ref{sec:robustness}) shows degradation with fixed 5\% and 10\% thresholds compared to ticker-specific tuning.
+  \item \textbf{Online-adaptive holdout.} The temporal hold-out is not a fully frozen model test. GARCH and calibrators update causally as post-cutoff data arrives. A true frozen-model evaluation would require disabling all online adaptation after the cutoff.
+  \item \textbf{Implied-vol proxies.} Single-name ``market-implied'' baselines use VIX as a market-wide proxy rather than stock-specific option-implied volatility, which limits the strength of this comparison for single stocks.
+  \item \textbf{Live engine parity.} The current live prediction engine uses a simplified feature pipeline relative to the full backtest stack. It does not include implied-vol blending, state-dependent jumps, or earnings-calendar features. Results from the live engine should not be assumed to match backtest performance.
 \end{enumerate}
 
 % =========================================================================
@@ -674,7 +686,7 @@ This architecture ensures that the exact same code and calibrators validated in 
 \label{sec:conclusion}
 
 We have presented a complete framework for calibrated large-move probability estimation that combines GARCH-driven Monte Carlo simulation with multi-layer online recalibration.
-At short horizons ($H\!=\!5$ and $H\!=\!10$), the system achieves ECE $< 0.02$ for three of four tickers tested, with FDR-corrected statistical significance against five baselines including gradient-boosted trees.
+At short horizons ($H\!=\!5$ and $H\!=\!10$), the system achieves ECE $< 0.02$ for three of four tickers tested, with FDR-corrected statistical significance against seven baselines including gradient-boosted trees, a VIX-threshold practitioner rule, and market-implied straddle probabilities.
 At the exploratory $H\!=\!20$ horizon, calibration degrades for most tickers, establishing a clear boundary for the framework's current reliability.
 Ablation analysis confirms that each pipeline component---GARCH-in-sim, Student-$t$ tails, multi-feature calibration, and histogram post-calibration---contributes measurably.
 Temporal hold-out evaluation demonstrates robustness through extreme market regimes, and economic significance survives realistic transaction costs.
@@ -684,7 +696,8 @@ The deployment of this system as a live prediction engine---with state checkpoin
 
 Future work includes: (1) extending density calibration beyond binary events, (2) incorporating directional information, (3) ticker-specific implied volatility surfaces, (4) cross-asset correlation modeling for portfolio-level risk assessment, and (5) extending calibration to $H\!=\!20$ through improved long-horizon volatility modeling.
 
-Code and data for reproducing all results are available at: [repository URL].
+Code and data for reproducing all results are available at the project repository upon publication.
+Environment specifications (Python version, package versions, random seeds) and CSV data snapshots are included in the reproduction package.
 
 % =========================================================================
 % REFERENCES

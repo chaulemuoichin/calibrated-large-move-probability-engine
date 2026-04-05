@@ -564,16 +564,34 @@ def _bootstrap_ece_ci(
     p: np.ndarray, y: np.ndarray,
     n_bins: int = 10, n_boot: int = 1000,
     alpha: float = 0.05, seed: int = 42,
+    block_size: int = 1,
 ) -> tuple:
-    """Bootstrap confidence interval for equal-width ECE."""
+    """Bootstrap confidence interval for equal-width ECE.
+
+    When block_size > 1, uses circular block bootstrap to account for
+    serial dependence in overlapping H-step predictions.
+    """
     rng = np.random.default_rng(seed)
     n = len(p)
     ece_samples = np.empty(n_boot)
-    for b in range(n_boot):
-        idx = rng.integers(0, n, size=n)
-        ece_samples[b] = expected_calibration_error(
-            p[idx], y[idx], n_bins=n_bins, adaptive=False,
-        )
+
+    if block_size <= 1:
+        for b in range(n_boot):
+            idx = rng.integers(0, n, size=n)
+            ece_samples[b] = expected_calibration_error(
+                p[idx], y[idx], n_bins=n_bins, adaptive=False,
+            )
+    else:
+        n_blocks = max(1, (n + block_size - 1) // block_size)
+        for b in range(n_boot):
+            starts = rng.integers(0, n, size=n_blocks)
+            idx = np.concatenate([
+                np.arange(s, s + block_size) % n for s in starts
+            ])[:n]
+            ece_samples[b] = expected_calibration_error(
+                p[idx], y[idx], n_bins=n_bins, adaptive=False,
+            )
+
     lo = float(np.percentile(ece_samples, 100 * alpha / 2))
     hi = float(np.percentile(ece_samples, 100 * (1 - alpha / 2)))
     return lo, hi
@@ -711,7 +729,7 @@ def apply_promotion_gates_oof(
 
             ece_ci_low, ece_ci_high = np.nan, np.nan
             if not insufficient:
-                ece_ci_low, ece_ci_high = _bootstrap_ece_ci(p_r, y_r)
+                ece_ci_low, ece_ci_high = _bootstrap_ece_ci(p_r, y_r, block_size=H_int)
 
             base_status = "evaluated" if not (pooled_gate and regime != "pooled") else "diagnostic"
 

@@ -96,17 +96,17 @@ def generate_main_results_table(ticker: str, n_folds: int = 5) -> pd.DataFrame:
         ece_detail = expected_calibration_error_detailed(p_m, y_m, adaptive=False)
         ece = ece_detail["ece"]
 
-        # Bootstrap CIs for BSS, AUC, and ECE
-        bss_pt, bss_lo, bss_hi = bootstrap_metric_ci(y_m, p_m, brier_skill_score, n_boot=2000)
-        auc_pt, auc_lo, auc_hi = bootstrap_metric_ci(y_m, p_m, auc_roc, n_boot=2000)
+        # Bootstrap CIs for BSS, AUC, and ECE (block bootstrap for H-step overlap)
+        bss_pt, bss_lo, bss_hi = bootstrap_metric_ci(y_m, p_m, brier_skill_score, n_boot=2000, block_size=H)
+        auc_pt, auc_lo, auc_hi = bootstrap_metric_ci(y_m, p_m, auc_roc, n_boot=2000, block_size=H)
         ece_fn = lambda p, y: expected_calibration_error(p, y, adaptive=False)
-        ece_pt, ece_lo, ece_hi = bootstrap_metric_ci(y_m, p_m, ece_fn, n_boot=2000)
+        ece_pt, ece_lo, ece_hi = bootstrap_metric_ci(y_m, p_m, ece_fn, n_boot=2000, block_size=H)
 
-        # Significance vs climatology
+        # Significance vs climatology (block bootstrap for dependence)
         clim = float(np.mean(y_m))
         model_losses = (p_m - y_m) ** 2
         clim_losses = (np.full_like(y_m, clim) - y_m) ** 2
-        pval = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000)
+        pval = paired_bootstrap_loss_diff_pvalue(model_losses, clim_losses, n_boot=2000, block_size=H)
 
         # Threshold
         thresholds = cfg.model.regime_gated_fixed_pct_by_horizon or {}
@@ -162,6 +162,11 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
     from em_sde.backtest import run_walkforward
     full_results = run_walkforward(df, cfg)
 
+    # Build date-to-y mapping from full model for consistent target definition.
+    # This ensures baselines are evaluated on exactly the same target labels as
+    # the full model (which may use regime-gated thresholds).
+    full_dates_all = pd.to_datetime(full_results["date"]) if "date" in full_results.columns else None
+
     rows = []
     for H in horizons:
         # Full model test
@@ -189,8 +194,7 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
             "p-value vs Full": "---",
         })
 
-        # Build date-indexed full model series for paired alignment
-        full_dates = pd.to_datetime(full_results["date"]) if "date" in full_results.columns else None
+        full_dates = full_dates_all
 
         for bl_name, bl_df in baseline_results.items():
             if len(bl_df) == 0:
@@ -209,8 +213,10 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
             if len(p_bl_m) < 50:
                 continue
 
-            # Date-aligned paired comparison
+            # Date-aligned paired comparison using SAME y labels (full model's target)
             pval = np.nan
+            y_eval = y_bl_m  # default: baseline's own labels
+            p_eval = p_bl_m
             if full_dates is not None and "idx" in bl_df.columns:
                 # Convert baseline idx to dates for alignment
                 bl_dates_all = dates_idx[bl_df["idx"].to_numpy(dtype=int).clip(0, len(dates_idx) - 1)]
@@ -225,26 +231,33 @@ def generate_baseline_comparison_table(ticker: str) -> pd.DataFrame:
                 common_bl_indices = np.where(common_mask_bl)[0]
                 n_common = min(len(common_fm_indices), len(common_bl_indices))
                 if n_common >= 50:
-                    fm_losses = (p_full_m[common_fm_indices[:n_common]] - y_full_m[common_fm_indices[:n_common]]) ** 2
-                    bl_losses = (p_bl_m[common_bl_indices[:n_common]] - y_bl_m[common_bl_indices[:n_common]]) ** 2
-                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
+                    # Use full model's y labels for both — same target definition
+                    y_common = y_full_m[common_fm_indices[:n_common]]
+                    fm_losses = (p_full_m[common_fm_indices[:n_common]] - y_common) ** 2
+                    bl_losses = (p_bl_m[common_bl_indices[:n_common]] - y_common) ** 2
+                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000, block_size=H)
+                    # Evaluate baseline metrics on full model's targets too
+                    p_eval = p_bl_m[common_bl_indices[:n_common]]
+                    y_eval = y_common
             else:
-                # Fallback: truncate to common length (less reliable)
+                # Fallback: truncate to common length
                 n_common = min(len(p_full_m), len(p_bl_m))
                 if n_common >= 50:
-                    fm_losses = (p_full_m[:n_common] - y_full_m[:n_common]) ** 2
-                    bl_losses = (p_bl_m[:n_common] - y_bl_m[:n_common]) ** 2
-                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000)
+                    y_common = y_full_m[:n_common]
+                    fm_losses = (p_full_m[:n_common] - y_common) ** 2
+                    bl_losses = (p_bl_m[:n_common] - y_common) ** 2
+                    pval = paired_bootstrap_loss_diff_pvalue(fm_losses, bl_losses, n_boot=2000, block_size=H)
+                    p_eval = p_bl_m[:n_common]
+                    y_eval = y_common
 
-            pval_str = f"{pval:.4f}{_sig_stars(pval)}" if np.isfinite(pval) else "n/a"
             rows.append({
                 "Ticker": ticker.upper(),
                 "Method": bl_name,
                 "H": H,
-                "BSS": brier_skill_score(p_bl_m, y_bl_m),
-                "AUC": auc_roc(p_bl_m, y_bl_m),
-                "ECE": expected_calibration_error(p_bl_m, y_bl_m, adaptive=False),
-                "p-value vs Full": pval_str,
+                "BSS": brier_skill_score(p_eval, y_eval),
+                "AUC": auc_roc(p_eval, y_eval),
+                "ECE": expected_calibration_error(p_eval, y_eval, adaptive=False),
+                "p-value vs Full": pval,  # store numeric for FDR
             })
 
     return pd.DataFrame(rows)
@@ -350,12 +363,39 @@ def main():
 
     if all_baseline:
         combined_bl = pd.concat(all_baseline, ignore_index=True)
+
+        # Apply FDR correction to baseline p-values (exclude Full Model rows)
+        bl_pvals = combined_bl["p-value vs Full"].tolist()
+        numeric_pvals = []
+        numeric_indices = []
+        for i, pv in enumerate(bl_pvals):
+            if isinstance(pv, (int, float)) and np.isfinite(pv):
+                numeric_pvals.append(pv)
+                numeric_indices.append(i)
+
+        if numeric_pvals:
+            adj_pvals, _ = apply_fdr_correction(numeric_pvals, alpha=0.05)
+            combined_bl["p-value (FDR)"] = np.nan
+            for i, idx in enumerate(numeric_indices):
+                combined_bl.loc[combined_bl.index[idx], "p-value (FDR)"] = adj_pvals[i]
+            combined_bl["p-value vs Full"] = combined_bl["p-value vs Full"].apply(
+                lambda x: f"{x:.4f}{_sig_stars(x)}" if isinstance(x, (int, float)) and np.isfinite(x) else str(x)
+            )
+            combined_bl["FDR Sig"] = combined_bl["p-value (FDR)"].apply(
+                lambda x: _sig_stars(x) if np.isfinite(x) else ""
+            )
+
         combined_bl.to_csv("outputs/paper/tables/baseline_comparison.csv", index=False)
 
+        display_cols = ["Ticker", "Method", "H", "BSS", "AUC", "ECE", "p-value vs Full"]
+        if "p-value (FDR)" in combined_bl.columns:
+            display_cols.append("p-value (FDR)")
+
         latex = to_latex_table(
-            combined_bl[["Ticker", "Method", "H", "BSS", "AUC", "ECE", "p-value vs Full"]],
-            "Baseline comparison. Full model vs.~four baselines. "
-            "$p$-values from paired bootstrap test of Brier score differences.",
+            combined_bl[display_cols],
+            "Baseline comparison. Full model vs.~baselines. "
+            "$p$-values from paired block bootstrap (block size $= H$) test of Brier score differences. "
+            "FDR-corrected across all comparisons.",
             "tab:baseline_comparison",
         )
         with open("outputs/paper/tables/baseline_comparison.tex", "w") as f:

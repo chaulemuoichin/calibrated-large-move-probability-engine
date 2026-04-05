@@ -97,7 +97,27 @@ def run_daily():
                 )
                 engine.save_checkpoint(state_dir)
 
-            # Generate predictions
+            # RESOLVE FIRST: update calibrators before predicting (causal ordering)
+            if Path(PREDICTION_LOG).exists():
+                try:
+                    resolved = resolve_predictions(
+                        PREDICTION_LOG,
+                        prices,
+                        df.index,
+                        ticker=ticker.upper(),
+                    )
+                    if len(resolved) > 0:
+                        n_resolved = len(resolved[resolved["y"].notna()])
+                        logger.info("Resolved %d predictions for %s", n_resolved, ticker.upper())
+                        n_updated = engine.update_calibrators(resolved)
+                        if n_updated > 0:
+                            engine.save_checkpoint(state_dir)
+                            logger.info("Updated calibrators with %d labels for %s",
+                                       n_updated, ticker.upper())
+                except Exception as re:
+                    logger.warning("Resolution/update failed for %s: %s", ticker, re)
+
+            # THEN predict with updated calibrators
             preds = engine.predict(prices, n_paths=cfg.model.mc_base_paths)
             ticker_preds = {}
 
@@ -108,34 +128,21 @@ def run_daily():
                     "sigma_1d": round(pred.sigma_1d, 6),
                     "threshold": round(pred.threshold, 4),
                 }
-                # Log prediction
+                # Log prediction with full MF feature vector
                 append_prediction(
                     PREDICTION_LOG, ticker.upper(), today, H,
                     pred.p_cal, pred.p_raw, pred.threshold, pred.sigma_1d,
+                    delta_sigma=pred.delta_sigma,
+                    vol_ratio=pred.vol_ratio,
+                    vol_of_vol=pred.vol_of_vol,
+                    earnings_proximity=pred.earnings_proximity,
+                    implied_vol_ratio=pred.implied_vol_ratio,
                 )
 
             all_predictions[ticker.upper()] = ticker_preds
 
         except Exception as e:
             logger.error("Failed for %s: %s", ticker, e, exc_info=True)
-
-    # Resolve past predictions
-    if Path(PREDICTION_LOG).exists():
-        for ticker, config_path in TICKER_CONFIGS.items():
-            try:
-                cfg = load_config(config_path)
-                df, _ = load_data(cfg)
-                resolved = resolve_predictions(
-                    PREDICTION_LOG,
-                    df["price"].to_numpy(dtype=float),
-                    df.index,
-                    ticker=ticker.upper(),
-                )
-                if len(resolved) > 0:
-                    n_resolved = len(resolved[resolved["y"].notna()])
-                    logger.info("Resolved %d predictions for %s", n_resolved, ticker.upper())
-            except Exception as e:
-                logger.error("Resolution failed for %s: %s", ticker, e)
 
     # Print summary
     print(f"\n{'='*60}")

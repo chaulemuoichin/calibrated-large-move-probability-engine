@@ -126,8 +126,17 @@ def append_prediction(
     p_raw: float,
     threshold: float,
     sigma_1d: float,
+    delta_sigma: float = 0.0,
+    vol_ratio: float = 1.0,
+    vol_of_vol: float = 0.0,
+    earnings_proximity: float = 0.0,
+    implied_vol_ratio: float = 1.0,
 ) -> None:
-    """Append a prediction to the prediction log (CSV)."""
+    """Append a prediction with full MF feature vector to the log (CSV).
+
+    Features are persisted so that resolved labels can update MF calibrators
+    with the same inputs the backtest uses.
+    """
     log_path = Path(prediction_log)
     row = pd.DataFrame([{
         "date": date,
@@ -137,6 +146,11 @@ def append_prediction(
         "p_raw": p_raw,
         "threshold": threshold,
         "sigma_1d": sigma_1d,
+        "delta_sigma": delta_sigma,
+        "vol_ratio": vol_ratio,
+        "vol_of_vol": vol_of_vol,
+        "earnings_proximity": earnings_proximity,
+        "implied_vol_ratio": implied_vol_ratio,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }])
 

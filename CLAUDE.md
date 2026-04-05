@@ -207,6 +207,29 @@ python scripts/daily_predict.py
 10. **Two new baselines** (`baselines.py`): VIX threshold rule and market-implied straddle probability.
 11. **312 tests passing**.
 
+**Second-pass fixes (from Codex re-review):**
+
+12. **Block bootstrap actually enabled** (`run_paper_results.py`, `run_temporal_holdout.py`): All paper scripts now pass `block_size=H` to bootstrap functions. Previously used default `block_size=1` (i.i.d.) despite having block bootstrap support.
+13. **FDR on baseline table** (`run_paper_results.py`): Baseline comparison table now gets Benjamini-Hochberg FDR correction on all p-values, matching the main results table.
+14. **Baseline target fairness** (`run_paper_results.py`): Baselines now evaluated against the full model's y labels (same target definition). Previously baselines used fixed-threshold labels while the full model used regime-gated thresholds.
+15. **Temporal holdout honesty** (`run_temporal_holdout.py`, `paper/main.tex`): Docstring and paper now explicitly describe this as an online-adaptive holdout, not a frozen-model test. Paper Section 4.4 updated.
+16. **reproduce.py FDR** (`paper/reproduce.py`): Reproduction script now applies FDR correction to main results table.
+17. **Calibrator online update** (`predict.py`, `daily_predict.py`): `PredictionEngine.update_calibrators()` feeds resolved outcomes back to live calibrators. `daily_predict.py` calls this after resolution.
+18. **Paper wording tightened** (`paper/main.tex`): Removed "zero lookahead bias" and "exact same code" overclaims. Added limitations for target-design dependence, online-adaptive holdout, IV proxies, and live engine parity gap. Placeholder repo URL replaced. Bootstrap described as "block bootstrap" throughout.
+
+**Third-pass fixes (from Codex recheck):**
+
+19. **Live update semantics** (`predict.py`): `update_calibrators()` now uses `p_raw` (not `p_cal`) and full feature vector (sigma, delta_sigma, vol_ratio, vol_of_vol, earnings_proximity, implied_vol_ratio), matching backtest `_resolve_predictions_mf`.
+20. **Resolve-before-predict** (`daily_predict.py`): Causal ordering fixed — resolve past predictions and update calibrators BEFORE generating new predictions. Previously predicted first, resolved after.
+21. **Robustness date alignment** (`run_robustness_analysis.py`): Conditional ECE and cross-asset correlation now use actual prediction dates from `results["date"]` instead of `df.index[:n_results]` (which included warmup dates).
+22. **Ablation block bootstrap** (`run_ablation_study.py`): Ablation p-values now use `block_size=H`.
+23. **Governance ECE CI block bootstrap** (`model_selection.py`): `_bootstrap_ece_ci` now accepts `block_size` parameter; promotion gates pass `H` as block size.
+24. **reproduce.py baseline FDR** (`paper/reproduce.py`): Standalone baseline reproduction now applies FDR correction, matching the paper claim.
+25. **Holdout description** (`paper/main.tex`): Removed misleading "only pre-cutoff resolved labels" claim. Now explicitly states online-adaptive holdout with post-cutoff labels resolving and feeding back.
+26. **Threshold disclosure** (`paper/main.tex`): Methodology now describes both fixed and regime-gated thresholds. Notes baselines evaluated on full model's target labels.
+27. **Conclusion fixed** (`paper/main.tex`): "five baselines" → "seven baselines". Config hash claim removed. Novelty reframed as systems engineering.
+28. **312 tests passing**.
+
 **Statistical rigor + live prediction mode + honest scoping:**
 
 1. **N_eff fix** (`evaluation.py`): ACF now computed on prediction residuals `(p_cal - y)` instead of binary labels. Removes upward bias in effective sample size estimates.

@@ -97,27 +97,34 @@ def run_conditional_failure_analysis(ticker: str) -> pd.DataFrame:
     prices = df["price"].to_numpy(dtype=float)
     returns = np.diff(prices) / prices[:-1]
 
-    # Compute rolling 20d realized vol for each prediction row
+    # Use actual prediction dates from results (walk-forward starts after warmup)
     n_results = len(results)
-    vol_20d = np.full(n_results, np.nan)
-    for i in range(20, len(returns)):
-        if i < n_results:
-            vol_20d[i] = float(np.std(returns[max(0, i-20):i]) * np.sqrt(252))
+    pred_dates = pd.to_datetime(results["date"]) if "date" in results.columns else df.index[:n_results]
 
-    # Time eras
-    dates = df.index[:n_results]
+    # Build date-to-price-index map for vol computation
+    date_to_idx = {d: i for i, d in enumerate(df.index)}
+
+    # Compute rolling 20d realized vol aligned to prediction dates
+    vol_20d = np.full(n_results, np.nan)
+    for i in range(n_results):
+        d = pred_dates.iloc[i] if hasattr(pred_dates, 'iloc') else pred_dates[i]
+        pidx = date_to_idx.get(d)
+        if pidx is not None and pidx >= 20:
+            vol_20d[i] = float(np.std(returns[max(0, pidx-20):pidx]) * np.sqrt(252))
+
+    # Time eras aligned to prediction dates
     era = np.full(n_results, np.nan)
     for i in range(n_results):
-        if i < len(dates):
-            yr = dates[i].year
-            if yr < 2020:
-                era[i] = 0  # Pre-COVID
-            elif yr == 2020:
-                era[i] = 1  # COVID
-            elif yr <= 2022:
-                era[i] = 2  # Tightening
-            else:
-                era[i] = 3  # Post-2023
+        d = pred_dates.iloc[i] if hasattr(pred_dates, 'iloc') else pred_dates[i]
+        yr = d.year
+        if yr < 2020:
+            era[i] = 0  # Pre-COVID
+        elif yr == 2020:
+            era[i] = 1  # COVID
+        elif yr <= 2022:
+            era[i] = 2  # Tightening
+        else:
+            era[i] = 3  # Post-2023
 
     era_bins = [
         ("Pre-2020", -0.5, 0.5),
@@ -225,9 +232,12 @@ def run_cross_asset_correlation() -> pd.DataFrame:
             p_col = f"p_cal_{H}"
             if p_col in results.columns:
                 key = f"{ticker.upper()}_H{H}"
-                # Use date as index for alignment
+                # Use actual prediction dates (from walk-forward) as index
                 preds = results[p_col].copy()
-                preds.index = df.index[:len(preds)]
+                if "date" in results.columns:
+                    preds.index = pd.to_datetime(results["date"])
+                else:
+                    preds.index = df.index[:len(preds)]
                 all_preds[key] = preds
 
     if len(all_preds) < 2:
@@ -247,7 +257,13 @@ def run_aapl_failure_analysis() -> pd.DataFrame:
         return pd.DataFrame()
 
     cfg = load_config(AAPL_CONFIG)
-    df, _ = load_data(cfg)
+    # AAPL has stock-split artifacts that fail strict validation; relax for analysis
+    cfg.data.strict_validation = False
+    try:
+        df, _ = load_data(cfg)
+    except (ValueError, Exception) as e:
+        logger.warning("AAPL data load failed: %s", e)
+        return pd.DataFrame()
 
     logger.info("Running AAPL failure analysis (%d rows)...", len(df))
     results = run_walkforward(df, cfg)

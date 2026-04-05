@@ -228,7 +228,7 @@ def run_ablation(ticker: str, n_folds: int = 5) -> pd.DataFrame:
                         y_merged = merged["y"].to_numpy(dtype=float)
                         model_loss = (merged["p_cal"].to_numpy(dtype=float) - y_merged) ** 2
                         base_loss = (merged["p_cal_base"].to_numpy(dtype=float) - y_merged) ** 2
-                        pval = paired_bootstrap_loss_diff_pvalue(model_loss, base_loss, n_boot=2000)
+                        pval = paired_bootstrap_loss_diff_pvalue(model_loss, base_loss, n_boot=2000, block_size=H)
 
             results_rows.append({
                 "ticker": ticker.upper(),

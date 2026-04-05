@@ -65,6 +65,11 @@ def run_main_results():
     if all_results:
         combined = pd.concat(all_results, ignore_index=True)
         os.makedirs("outputs/paper/tables", exist_ok=True)
+        # Apply FDR correction
+        from em_sde.evaluation import apply_fdr_correction
+        raw_pvals = combined["p-value"].tolist()
+        adj_pvals, reject = apply_fdr_correction(raw_pvals, alpha=0.05)
+        combined["p-value (FDR)"] = adj_pvals
         combined.to_csv("outputs/paper/tables/main_results.csv", index=False)
         logger.info("Main results saved to outputs/paper/tables/main_results.csv")
         print(combined.to_string(index=False))
@@ -90,8 +95,26 @@ def run_baselines():
     if all_results:
         combined = pd.concat(all_results, ignore_index=True)
         os.makedirs("outputs/paper/tables", exist_ok=True)
+
+        # Apply FDR correction to baseline p-values (standalone reproduction)
+        import numpy as np
+        from em_sde.evaluation import apply_fdr_correction
+        from scripts.run_paper_results import _sig_stars
+        bl_pvals = combined["p-value vs Full"].tolist()
+        numeric_pvals = []
+        numeric_indices = []
+        for i, pv in enumerate(bl_pvals):
+            if isinstance(pv, (int, float)) and np.isfinite(pv):
+                numeric_pvals.append(pv)
+                numeric_indices.append(i)
+        if numeric_pvals:
+            adj_pvals, _ = apply_fdr_correction(numeric_pvals, alpha=0.05)
+            combined["p-value (FDR)"] = np.nan
+            for i, idx in enumerate(numeric_indices):
+                combined.loc[combined.index[idx], "p-value (FDR)"] = adj_pvals[i]
+
         combined.to_csv("outputs/paper/tables/baseline_comparison.csv", index=False)
-        logger.info("Baseline comparison saved")
+        logger.info("Baseline comparison saved (with FDR correction)")
         print(combined.to_string(index=False))
 
 
