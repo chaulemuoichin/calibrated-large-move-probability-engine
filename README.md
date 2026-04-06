@@ -152,6 +152,10 @@ scripts/               Runners
   run_economic_significance.py  Portfolio analysis + transaction cost sensitivity
   generate_paper_figures.py  Publication-quality figures
   daily_predict.py       Daily prediction runner with scheduling support
+  publish_live_forecasts.py   Publish forecasts to verification ledger
+  resolve_live_forecasts.py   Resolve pending forecasts
+  build_live_verification_site.py  Build static verification dashboard
+  update_live_verification.py  One-command resolve + rebuild
 
 paper/                 Academic paper
   main.tex               LaTeX source
@@ -163,7 +167,7 @@ data/                  Price data
   vix_history.csv        VIX/VIX9D/VIX3M implied vol data
   synthetic/             Synthetic pattern datasets
 
-tests/                 312 unit tests
+tests/                 333 unit tests
 ```
 
 ## Validation & Optimization
@@ -190,6 +194,24 @@ python paper/reproduce.py --all
 ```
 
 Seven baselines, 7-variant ablation, temporal hold-out, economic significance with transaction cost sensitivity, and publication-quality figures.
+
+## Live Verification
+
+An append-only forecast ledger and static dashboard for transparent out-of-sample proof.
+
+```bash
+# Preview with demo data
+python scripts/generate_demo_ledger.py
+python scripts/build_live_verification_site.py --demo
+
+# Publish real forecasts + resolve + build site
+python scripts/update_live_verification.py --publish
+
+# Open the dashboard
+# outputs/live_verification/site/index.html
+```
+
+Forecasts are timestamped before outcomes are known. Resolutions are stored separately. Raw JSONL ledgers are downloadable for independent audit. Details: `outputs/live_verification/README.md`.
 
 ## Known Limitations
 

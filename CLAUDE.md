@@ -40,6 +40,8 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `output.py` | CSV/JSON results, reliability curves, charts |
 | `predict.py` | Live prediction engine with state checkpoint loading |
 | `resolve.py` | Async label resolution for live predictions |
+| `ledger.py` | Append-only JSONL forecast/resolution ledger for live verification |
+| `live_metrics.py` | Cumulative out-of-sample metrics from resolved forecasts |
 | `run.py` | CLI entry point, single-run, --compare, and --predict-now modes |
 
 ### Scripts (`scripts/`)
@@ -59,6 +61,11 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `run_economic_significance.py` | Risk-managed portfolio and selective hedging analysis |
 | `generate_paper_figures.py` | Publication-quality reliability diagrams, heatmaps, charts |
 | `daily_predict.py` | Daily prediction runner with scheduling support |
+| `publish_live_forecasts.py` | Publish forecasts to append-only verification ledger |
+| `resolve_live_forecasts.py` | Resolve pending forecasts against realized prices |
+| `build_live_verification_site.py` | Build static verification dashboard |
+| `update_live_verification.py` | One-command resolve + rebuild site |
+| `generate_demo_ledger.py` | Generate demo fixture data for site preview |
 
 ### Config System (`configs/`)
 
@@ -176,6 +183,20 @@ python -m em_sde.run --predict-now --config configs/spy_fixed.yaml --save-state
 
 # Daily scheduled predictions for all tickers
 python scripts/daily_predict.py
+
+# --- Live Verification ---
+# Generate demo data and preview site
+python scripts/generate_demo_ledger.py
+python scripts/build_live_verification_site.py --demo
+
+# Publish real forecasts to verification ledger
+python scripts/publish_live_forecasts.py
+
+# Resolve pending forecasts + rebuild site
+python scripts/update_live_verification.py
+
+# Full cycle: publish + resolve + rebuild
+python scripts/update_live_verification.py --publish
 ```
 
 ## Current State (2026-04-04)
@@ -245,7 +266,17 @@ python scripts/daily_predict.py
 11. **`--predict-now` CLI** (`run.py`): Generate live predictions from CLI. Loads checkpoint or runs backtest first.
 12. **Transaction cost model** (`run_economic_significance.py`): Sensitivity sweep at 0/5/10/20 bps per trade. No lookahead bias.
 13. **Daily scheduling** (`scripts/daily_predict.py`): Cron-ready script for daily predictions with logging.
-14. **312 tests passing** (was 296). 16 new tests for all Phase 1-2 features.
+14. **333 tests passing** (was 296). 16 new tests for Phase 1-2 features, 21 new tests for live verification system.
+
+**Live verification system (2026-04-06):**
+
+15. **Append-only forecast ledger** (`em_sde/ledger.py`): JSONL-based immutable forecast and resolution ledgers with SHA-256-derived IDs, UTC timestamps, git commit, config hash, checkpoint hash.
+16. **Live metrics** (`em_sde/live_metrics.py`): Pooled and per-group metrics from resolved forecasts only. BSS, AUC, ECE, calibration bins, rolling metrics, bootstrap CIs, small-sample warnings.
+17. **Forecast publisher** (`scripts/publish_live_forecasts.py`): Wraps PredictionEngine to append forecasts to verification ledger.
+18. **Resolution pipeline** (`scripts/resolve_live_forecasts.py`): Trading-day-aligned resolution using forecast-time thresholds. Never modifies forecast ledger.
+19. **Static verification site** (`scripts/build_live_verification_site.py`): 5-page static HTML dashboard — overview, latest, track record, audit trail, methodology. SVG reliability diagrams, downloadable raw data.
+20. **Demo fixture** (`scripts/generate_demo_ledger.py`): Generates demo data from historical backtest for site preview, clearly labeled as demo.
+21. **21 new tests** (`tests/test_live_verification.py`): ID stability, append-only guarantees, trading-day alignment, threshold immutability, metric correctness, site generation.
 
 ### Previous Changes (2026-04-03)
 
