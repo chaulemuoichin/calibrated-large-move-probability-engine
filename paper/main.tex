@@ -49,9 +49,9 @@ A strict walk-forward protocol with resolution queues enforces causal ordering i
 We validate on four U.S.\ equities (SPY, GOOGL, AMZN, NVDA) spanning 1993--2025, evaluating across three horizons (5, 10, and 20 trading days) using 5-fold expanding-window cross-validation.
 At the \emph{primary} horizons of $H\!=\!5$ and $H\!=\!10$ (one and two trading weeks), the framework passes all promotion gates---ECE~$< 0.02$, BSS~$> 0$, AUC~$\geq 0.55$---for three of four tickers (6 of 8 primary tests), with the strongest result (SPY~$H\!=\!5$) achieving FDR-corrected significance ($p_{\text{adj}} < 0.01$).
 At the \emph{exploratory} $H\!=\!20$ horizon, calibration degrades due to reduced effective sample sizes, and we analyze why.
-We compare against seven baselines---historical frequency, parametric GARCH-CDF, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired block bootstrap tests (block size $= H$) with FDR correction. The full model significantly outperforms all baselines for SPY ($p_{\text{adj}} < 0.001$) and most comparisons across tickers, though a few AMZN and NVDA comparisons against the VIX rule and straddle baseline do not reach FDR significance.
+We compare against seven baselines---historical frequency, parametric GARCH-CDF, implied-volatility Black-Scholes, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired block bootstrap tests (block size $= H$) with FDR correction. The full model significantly outperforms all baselines for SPY ($p_{\text{adj}} < 0.001$) and most comparisons across tickers, though a few AMZN and NVDA comparisons against the VIX rule and straddle baseline do not reach FDR significance.
 An ablation study quantifies the marginal contribution of each pipeline component.
-Online-adaptive temporal hold-out evaluation on post-2020 data (COVID, Fed tightening, AI rally) shows the framework maintains calibration through unseen market regimes.
+Online-adaptive temporal hold-out evaluation on post-2020 data (COVID, Fed tightening, AI rally) shows the framework maintains useful calibration at primary horizons ($H\!=\!5$, $H\!=\!10$) across most tickers and regimes, though calibration degrades for longer horizons and high-volatility assets.
 An economic significance analysis with transaction cost sensitivity shows that probability-informed position sizing reduces maximum drawdown by 7--13\% (relative) while preserving 82--86\% of buy-and-hold returns, with benefits surviving realistic trading costs of 5--10~bps.
 \end{abstract}
 
@@ -505,17 +505,18 @@ The largest single improvements come from:
 \toprule
 Ticker & H & BSS & AUC & ECE & Era Breakdown \\
 \midrule
-SPY  & 5  & +0.061 & 0.742 & \textbf{0.012} & COVID: 0.018, Tight: 0.011, Post: 0.009 \\
-SPY  & 10 & +0.038 & 0.698 & \textbf{0.016} & COVID: 0.024, Tight: 0.014, Post: 0.012 \\
-GOOGL & 5  & +0.021 & 0.641 & \textbf{0.009} & COVID: 0.014, Tight: 0.008, Post: 0.007 \\
-AMZN & 5  & +0.028 & 0.695 & \textbf{0.008} & COVID: 0.012, Tight: 0.007, Post: 0.006 \\
+SPY  & 5  & +0.119 & 0.776 & \textbf{0.008} & COVID: 0.062, Tight: 0.008, Post: 0.021 \\
+SPY  & 10 & +0.076 & 0.725 & \textbf{0.018} & COVID: 0.063, Tight: 0.031, Post: 0.006 \\
+GOOGL & 5  & +0.014 & 0.622 & \textbf{0.012} & COVID: 0.078, Tight: 0.019, Post: 0.021 \\
+AMZN & 5  & +0.007 & 0.629 & \textbf{0.006} & COVID: 0.016, Tight: 0.014, Post: 0.009 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The model maintains calibration through the extreme market environments of 2020--2025.
-COVID-era ECE is higher (expected, given unprecedented volatility) but remains below the 0.02 gate for short horizons.
-Post-2023 calibration is consistently strong, suggesting the model adapts well to changing market regimes through its online learning mechanism.
+Pooled hold-out ECE remains below the 0.02 gate for all four ticker--horizon combinations shown.
+However, the era breakdown reveals that COVID-era calibration degrades substantially (ECE 0.016--0.078), as expected given unprecedented volatility and the limited 220-sample COVID window.
+The tightening era (2022--2023) shows mixed results, with SPY H=10 ECE rising to 0.031.
+Post-2023 calibration is generally strong (ECE $\leq 0.021$), suggesting the online calibrator adapts to changing regimes, though slowly during extreme regime shifts.
 
 \subsection{Economic Significance}
 
@@ -688,7 +689,7 @@ We have presented a complete framework for calibrated large-move probability est
 At short horizons ($H\!=\!5$ and $H\!=\!10$), the system achieves ECE $< 0.02$ for three of four tickers tested (6 of 8 primary tests), with FDR-corrected significance against all seven baselines for the representative SPY comparison ($p_{\text{adj}} < 0.001$) and for the majority of comparisons across the full ticker matrix.
 At the exploratory $H\!=\!20$ horizon, calibration degrades for most tickers, establishing a clear boundary for the framework's current reliability.
 Ablation analysis confirms that each pipeline component---GARCH-in-sim, Student-$t$ tails, multi-feature calibration, and histogram post-calibration---contributes measurably.
-Temporal hold-out evaluation demonstrates robustness through extreme market regimes, and economic significance survives realistic transaction costs.
+Temporal hold-out evaluation shows useful calibration at primary horizons across most tickers and regimes, though longer horizons and high-volatility assets remain challenging. Economic significance survives realistic transaction costs.
 
 The key insight is that \emph{generating} probabilities (via MC simulation) and \emph{calibrating} them (via online learning) are complementary: the simulation provides structured inductive bias about volatility dynamics, while calibration ensures that signal translates into trustworthy probability estimates.
 A prototype live prediction engine---with state checkpointing, asynchronous resolution, and scheduling---demonstrates that the framework can extend beyond backtesting, though the live engine uses a simplified feature pipeline (no implied-vol blending, earnings features, or regime-gated routing) and should be considered a research prototype rather than a production system.

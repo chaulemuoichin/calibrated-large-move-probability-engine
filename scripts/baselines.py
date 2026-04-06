@@ -187,6 +187,16 @@ def implied_vol_baseline(
         logger.warning("Could not load implied vol data: %s", e)
         return pd.DataFrame()
 
+    # Map CBOE column names to internal names (same as data_layer.py)
+    vix_map = {"vix": "iv_30d", "vix9d": "iv_9d", "vix3m": "iv_3m"}
+    iv_df = iv_df.rename(columns={k: v for k, v in vix_map.items() if k in iv_df.columns})
+    # Convert VIX percentage points to decimal (e.g., 17.5 -> 0.175)
+    for col in ["iv_9d", "iv_30d", "iv_3m"]:
+        if col in iv_df.columns:
+            vals = iv_df[col]
+            if vals.median() > 1:  # percentage points
+                iv_df[col] = vals / 100.0
+
     n = len(prices)
     rows = []
 
@@ -227,8 +237,8 @@ def implied_vol_baseline(
             if not np.isfinite(vix_val) or vix_val <= 0:
                 continue
 
-            # VIX is annualized implied vol (percentage) -> convert to decimal
-            sigma_annual = vix_val / 100.0
+            # vix_val is annualized implied vol in decimal (already converted above)
+            sigma_annual = vix_val
             sigma_H = sigma_annual * np.sqrt(H / 252.0)
 
             # Log-normal: P(|log(S_T/S_0)| >= log(1+thr))
