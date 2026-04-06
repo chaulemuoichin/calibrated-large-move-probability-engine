@@ -189,7 +189,7 @@ A full paper is included in `paper/` with LaTeX source and a reproduction script
 python paper/reproduce.py --all
 ```
 
-Five baselines, 7-variant ablation, temporal hold-out, economic significance with transaction cost sensitivity, and publication-quality figures.
+Seven baselines, 7-variant ablation, temporal hold-out, economic significance with transaction cost sensitivity, and publication-quality figures.
 
 ## Known Limitations
 

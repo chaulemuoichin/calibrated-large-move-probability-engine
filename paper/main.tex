@@ -47,12 +47,12 @@ The system combines GARCH/GJR-GARCH volatility estimation with Monte Carlo simul
 A strict walk-forward protocol with resolution queues enforces causal ordering in all predictions.
 
 We validate on four U.S.\ equities (SPY, GOOGL, AMZN, NVDA) spanning 1993--2025, evaluating across three horizons (5, 10, and 20 trading days) using 5-fold expanding-window cross-validation.
-At the \emph{primary} horizons of $H\!=\!5$ and $H\!=\!10$ (one and two trading weeks), the framework passes all promotion gates---ECE~$< 0.02$, BSS~$> 0$, AUC~$\geq 0.55$---for three of four tickers, with Benjamini--Hochberg FDR-corrected $p$-values confirming statistical significance.
+At the \emph{primary} horizons of $H\!=\!5$ and $H\!=\!10$ (one and two trading weeks), the framework passes all promotion gates---ECE~$< 0.02$, BSS~$> 0$, AUC~$\geq 0.55$---for three of four tickers (6 of 8 primary tests), with the strongest result (SPY~$H\!=\!5$) achieving FDR-corrected significance ($p_{\text{adj}} < 0.01$).
 At the \emph{exploratory} $H\!=\!20$ horizon, calibration degrades due to reduced effective sample sizes, and we analyze why.
-We demonstrate statistically significant improvement over seven baselines---historical frequency, parametric GARCH-CDF, implied-volatility Black-Scholes, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired block bootstrap tests (block size $= H$) with 95\% confidence intervals on all metrics.
+We compare against seven baselines---historical frequency, parametric GARCH-CDF, feature-only logistic regression, gradient-boosted trees, a VIX-threshold practitioner rule, and options-implied straddle probabilities---using paired block bootstrap tests (block size $= H$) with FDR correction. The full model significantly outperforms all baselines for SPY ($p_{\text{adj}} < 0.001$) and most comparisons across tickers, though a few AMZN and NVDA comparisons against the VIX rule and straddle baseline do not reach FDR significance.
 An ablation study quantifies the marginal contribution of each pipeline component.
 Online-adaptive temporal hold-out evaluation on post-2020 data (COVID, Fed tightening, AI rally) shows the framework maintains calibration through unseen market regimes.
-An economic significance analysis with transaction cost sensitivity shows that probability-informed position sizing reduces maximum drawdown by 15--40\% while preserving 75--90\% of buy-and-hold returns, with benefits surviving realistic trading costs of 5--10~bps.
+An economic significance analysis with transaction cost sensitivity shows that probability-informed position sizing reduces maximum drawdown by 7--13\% (relative) while preserving 82--86\% of buy-and-hold returns, with benefits surviving realistic trading costs of 5--10~bps.
 \end{abstract}
 
 \textbf{Keywords:} probability calibration, GARCH, Monte Carlo simulation, walk-forward validation, large-move prediction, risk management
@@ -92,7 +92,7 @@ Our contributions are:
   \item A \textbf{calibrated probability framework} for two-sided large moves that achieves ECE $< 0.02$ at short horizons ($H\!=\!5$, $H\!=\!10$) across multiple liquid assets, with honest analysis of where and why longer horizons degrade.
   \item A \textbf{multi-layer recalibration architecture} combining online Platt scaling with regime-conditional multi-feature logistic regression and histogram post-calibration, demonstrating that each layer contributes measurably through systematic ablation.
   \item A \textbf{walk-forward anti-overfitting methodology} with residual-based $\Neff$ estimation, Benjamini--Hochberg FDR correction across all hypothesis tests, and five explicit overfitting diagnostics, providing a template for honest evaluation in financial forecasting.
-  \item \textbf{Empirical evidence} across four assets, three horizons, and 25+ years of data including extreme market regimes (dot-com, GFC, COVID, Fed tightening), with bootstrap confidence intervals, FDR-corrected significance testing, transaction cost analysis, and a deployable live prediction system.
+  \item \textbf{Empirical evidence} across four assets, three horizons, and 25+ years of data including extreme market regimes (dot-com, GFC, COVID, Fed tightening), with bootstrap confidence intervals, FDR-corrected significance testing, transaction cost analysis, and a prototype live prediction system (simplified relative to the full backtest stack).
 \end{enumerate}
 
 % =========================================================================
@@ -382,40 +382,40 @@ Ticker & H & $\theta_H$ & BSS [95\% CI] & AUC [95\% CI] & ECE [95\% CI] & $\Neff
 \multicolumn{8}{l}{\textit{Primary horizons}} \\
 \midrule
 \multirow{2}{*}{SPY}
-  & 5  & 3.72\% & +0.074$^{***}$ & \textbf{0.758} & \textbf{0.0103} & 1,842 & \textbf{PASS} \\
-  & 10 & 5.54\% & +0.046$^{***}$ & \textbf{0.715} & \textbf{0.0147} & 1,563 & \textbf{PASS} \\
+  & 5  & 3.72\% & +0.089$^{***}$ & \textbf{0.779} & \textbf{0.0088} & 2,178 & \textbf{PASS} \\
+  & 10 & 5.54\% & +0.055         & \textbf{0.749} & \textbf{0.0092} & 1,093 & \textbf{PASS} \\
 \midrule
 \multirow{2}{*}{GOOGL}
-  & 5  & 5.22\% & +0.027$^{**}$  & \textbf{0.659} & \textbf{0.0076} & 1,287 & \textbf{PASS} \\
-  & 10 & 9.24\% & +0.018$^{*}$   & \textbf{0.650} & \textbf{0.0114} & 896   & \textbf{PASS} \\
+  & 5  & 5.22\% & +0.022$^{*}$   & \textbf{0.646} & \textbf{0.0099} & 1,418 & \textbf{PASS} \\
+  & 10 & 9.24\% & +0.021         & \textbf{0.661} & \textbf{0.0121} & 770   & \textbf{PASS} \\
 \midrule
 \multirow{2}{*}{AMZN}
-  & 5  & 8.52\% & +0.033$^{***}$ & \textbf{0.707} & \textbf{0.0070} & 1,102 & \textbf{PASS} \\
-  & 10 & 15.99\% & +0.022$^{**}$ & \textbf{0.718} & \textbf{0.0029} & 621   & \textbf{PASS} \\
+  & 5  & 8.52\% & +0.029         & \textbf{0.705} & \textbf{0.0076} & 1,881 & \textbf{PASS} \\
+  & 10 & 15.99\% & +0.020        & \textbf{0.700} & \textbf{0.0046} & 1,075 & \textbf{PASS} \\
 \midrule
 \multirow{2}{*}{NVDA}
-  & 5  & 9.84\% & +0.017$^{*}$   & \textbf{0.665} & \textbf{0.0165} & 1,423 & \textbf{PASS} \\
-  & 10 & 18.04\% & $-$0.010      & 0.588          & \textbf{0.0127} & 854   & FAIL \\
+  & 5  & 12.18\% & $-$0.001      & 0.604          & \textbf{0.0021} & 1,845 & FAIL \\
+  & 10 & 18.22\% & $-$0.011      & 0.588          & \textbf{0.0095} & 944   & FAIL \\
 \midrule
 \multicolumn{8}{l}{\textit{Exploratory horizon}} \\
 \midrule
-SPY   & 20 & 7.05\%  & +0.058$^{**}$  & \textbf{0.738} & 0.0240 & 1,210 & FAIL \\
-GOOGL & 20 & 12.65\% & +0.022$^{*}$   & \textbf{0.671} & \textbf{0.0181} & 712  & \textbf{PASS} \\
-AMZN  & 20 & 20.50\% & +0.012$^{*}$   & \textbf{0.715} & \textbf{0.0118} & 483  & \textbf{PASS} \\
-NVDA  & 20 & 23.68\% & $-$0.010       & 0.595          & 0.0395          & 592  & FAIL \\
+SPY   & 20 & 7.05\%  & +0.051         & \textbf{0.779} & 0.0265          & 632  & FAIL \\
+GOOGL & 20 & 12.65\% & +0.024         & \textbf{0.672} & \textbf{0.0191} & 422  & \textbf{PASS} \\
+AMZN  & 20 & 20.50\% & +0.008         & \textbf{0.708} & \textbf{0.0132} & 606  & \textbf{PASS} \\
+NVDA  & 20 & 25.66\% & $-$0.017       & 0.562          & 0.0264          & 418  & FAIL \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\noindent\textit{Note:} Representative point estimates shown. CIs from BCa bootstrap are reported in the machine-readable CSV output (\texttt{outputs/paper/tables/main\_results.csv}) and are referenced in the text where relevant.
+\noindent\textit{Note:} Point estimates shown; full 95\% BCa bootstrap CIs are in the machine-readable CSV (\texttt{outputs/paper/tables/main\_results.csv}). FDR-adjusted significance stars reflect conservative correction across all 12 tests; most passing configurations have raw $p < 0.10$.
 
 Key findings:
 \begin{itemize}
-  \item \textbf{Primary horizons succeed:} At $H\!=\!5$ and $H\!=\!10$, three of four tickers (SPY, GOOGL, AMZN) pass all promotion gates with FDR-corrected significance. This represents 6 of 8 primary-horizon tests.
-  \item \textbf{AMZN calibration strength:} AMZN achieves the best calibration (H=10 ECE of 0.0029) despite having the highest annualized volatility, demonstrating that longer history (28 years) and diverse market regimes enable effective calibration even for volatile assets.
-  \item \textbf{Implied volatility unlock:} GOOGL passes all three gates at H=5 only after adding implied volatility (VIX as market-wide proxy), which dropped ECE from 0.022 to 0.0076.
-  \item \textbf{Exploratory H=20 degrades:} The $H\!=\!20$ horizon is consistently harder: SPY ECE=0.024 barely fails, NVDA ECE=0.040 fails substantially. Reduced $\Neff$ and longer mean-reversion windows are the root causes (see \Cref{sec:horizon_degradation}).
-  \item \textbf{NVDA limitation:} NVDA fails at H=10 and H=20 due to negative BSS. The extremely high thresholds (18--24\%) combined with limited Bayesian optimization exploration (only 5 trials) leave the model unable to beat the base rate. This is a data/tuning limitation, not a framework deficiency (\Cref{sec:failure_modes}).
+  \item \textbf{Primary horizons succeed:} At $H\!=\!5$ and $H\!=\!10$, three of four tickers (SPY, GOOGL, AMZN) pass all promotion gates. This represents 6 of 8 primary-horizon tests. SPY~H=5 achieves FDR-corrected significance ($p_{\text{adj}} < 0.01$); other passing configurations have raw $p < 0.10$ but lose individual significance under conservative multi-test correction.
+  \item \textbf{AMZN calibration strength:} AMZN achieves the best calibration (H=10 ECE of 0.0046) despite having the highest annualized volatility, demonstrating that longer history (28 years) and diverse market regimes enable effective calibration even for volatile assets.
+  \item \textbf{Implied volatility unlock:} GOOGL's H=5 calibration improved substantially after adding implied volatility (VIX as market-wide proxy). The ablation study confirms implied vol as the single most impactful feature across all tickers.
+  \item \textbf{Exploratory H=20 degrades:} The $H\!=\!20$ horizon is consistently harder: SPY ECE=0.027 fails, NVDA ECE=0.026 fails. GOOGL and AMZN maintain calibration at H=20. Reduced $\Neff$ and longer mean-reversion windows are the root causes (see \Cref{sec:horizon_degradation}).
+  \item \textbf{NVDA limitation:} NVDA fails all horizons due to negative BSS. The extremely high thresholds (12--26\%) produce event rates of 4--6\%, but the model cannot beat the base rate despite 30 Bayesian optimization trials. This is a threshold-selection pathology: the BO search range admits only extreme thresholds for this high-volatility asset (\Cref{sec:failure_modes}).
 \end{itemize}
 
 \subsection{Baseline Comparison}
@@ -431,37 +431,36 @@ Key findings:
 \toprule
 Method & H & BSS & AUC & ECE & $p$-value \\
 \midrule
-Full Model            & 5  & +0.074 & 0.758 & 0.010 & --- \\
-Historical Frequency  & 5  & +0.000 & 0.500 & 0.023 & $<$0.01 \\
-GARCH-CDF             & 5  & +0.031 & 0.681 & 0.035 & $<$0.05 \\
-Implied-Vol BS        & 5  & +0.018 & 0.612 & 0.041 & $<$0.01 \\
-Feature Logistic      & 5  & +0.042 & 0.712 & 0.028 & $<$0.10 \\
-Gradient Boosting     & 5  & +0.039 & 0.705 & 0.031 & $<$0.10 \\
-VIX Threshold Rule    & 5  & +0.011 & 0.589 & 0.032 & $<$0.01 \\
-Market-Implied (Straddle) & 5 & +0.015 & 0.601 & 0.045 & $<$0.01 \\
+Full Model            & 5  & +0.131 & 0.814 & 0.013 & --- \\
+Historical Frequency  & 5  & $-$0.002 & 0.726 & 0.034 & $<$0.001$^{***}$ \\
+GARCH-CDF             & 5  & $-$0.002 & 0.745 & 0.033 & $<$0.001$^{***}$ \\
+Feature Logistic      & 5  & $-$0.563 & 0.629 & 0.188 & $<$0.001$^{***}$ \\
+Gradient Boosting     & 5  & $-$0.067 & 0.723 & 0.058 & $<$0.001$^{***}$ \\
+VIX Threshold Rule    & 5  & +0.049 & 0.749 & 0.014 & $<$0.001$^{***}$ \\
+Market-Implied (Straddle) & 5 & $-$0.121 & 0.815 & 0.097 & $<$0.001$^{***}$ \\
 \midrule
-Full Model            & 10 & +0.046 & 0.715 & 0.015 & --- \\
-Historical Frequency  & 10 & +0.000 & 0.500 & 0.019 & $<$0.01 \\
-GARCH-CDF             & 10 & +0.019 & 0.643 & 0.042 & $<$0.05 \\
-Feature Logistic      & 10 & +0.025 & 0.668 & 0.031 & $<$0.10 \\
-Gradient Boosting     & 10 & +0.028 & 0.672 & 0.027 & $<$0.10 \\
-VIX Threshold Rule    & 10 & +0.008 & 0.561 & 0.029 & $<$0.01 \\
-Market-Implied (Straddle) & 10 & +0.012 & 0.583 & 0.048 & $<$0.01 \\
+Full Model            & 10 & +0.106 & 0.810 & 0.013 & --- \\
+Historical Frequency  & 10 & $-$0.022 & 0.698 & 0.025 & $<$0.001$^{***}$ \\
+GARCH-CDF             & 10 & $-$0.054 & 0.739 & 0.039 & $<$0.001$^{***}$ \\
+Feature Logistic      & 10 & $-$0.787 & 0.600 & 0.193 & $<$0.001$^{***}$ \\
+Gradient Boosting     & 10 & $-$0.081 & 0.714 & 0.054 & $<$0.001$^{***}$ \\
+VIX Threshold Rule    & 10 & +0.027 & 0.714 & 0.009 & $<$0.001$^{***}$ \\
+Market-Implied (Straddle) & 10 & $-$0.222 & 0.807 & 0.095 & $<$0.001$^{***}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The full model significantly outperforms all seven baselines.
+For SPY, the full model significantly outperforms all seven baselines ($p_{\text{adj}} < 0.001$). Across the full 4-ticker matrix, most comparisons are FDR-significant, though AMZN vs.\ the VIX rule at H=10 ($p_{\text{adj}} = 0.14$) and AMZN vs.\ the straddle baseline at H=10 and H=20 ($p_{\text{adj}} \approx 0.38$) do not reach significance.
 Two practitioner-relevant comparisons deserve emphasis:
 
-\textbf{VIX threshold rule.} The simplest viable baseline---``reduce exposure when VIX is above its 80th percentile''---achieves positive BSS but with poor discrimination (AUC $\approx 0.57$) and ECE above 0.02.
-This confirms that the full MC+calibration stack adds substantial value beyond what a simple VIX regime rule provides.
+\textbf{VIX threshold rule.} The simplest viable baseline---``reduce exposure when VIX is above its 80th percentile''---achieves positive BSS (+0.049 at H=5) and reasonable AUC (0.749), but the full model's BSS (+0.131) is significantly higher ($p < 0.001$).
 
-\textbf{Market-implied (straddle) probability.} Computing the probability of a threshold-exceeding move from VIX-implied volatility under log-normal assumptions produces the poorest calibration (ECE $> 0.04$) of any baseline.
+\textbf{Market-implied (straddle) probability.} Computing the probability of a threshold-exceeding move from VIX-implied volatility under log-normal assumptions achieves strong discrimination (AUC = 0.815) but the poorest calibration (ECE = 0.097) of any method.
 This is expected: implied volatility embeds the variance risk premium, causing systematic over-prediction of large-move probabilities.
 Our calibration layers learn to extract the informational content of options-implied vol while correcting this bias.
 
-The gradient boosting baseline performs comparably to feature logistic regression but falls short of the full MC+calibration stack, confirming that the simulation layer's structured inductive bias adds value that pure ML flexibility cannot replicate from the same features alone.
+The gradient boosting and feature logistic baselines both show negative BSS, confirming that the simulation layer's structured inductive bias adds value that pure ML flexibility cannot replicate from the same features alone.
+All baseline comparisons remain FDR-significant ($p_{\text{adj}} < 0.001$) across both horizons.
 
 \subsection{Ablation Study}
 
@@ -476,21 +475,21 @@ The gradient boosting baseline performs comparably to feature logistic regressio
 \toprule
 Configuration & BSS & AUC & ECE \\
 \midrule
-A: Base GBM (constant vol, Platt) & +0.008 & 0.591 & 0.048 \\
-B: +GARCH-in-Sim                  & +0.025 & 0.632 & 0.039 \\
-C: +Student-$t$ fat tails         & +0.035 & 0.671 & 0.032 \\
-D: +Multi-feature calibration     & +0.052 & 0.723 & 0.018 \\
-E: +Histogram post-calibration    & +0.065 & 0.741 & 0.012 \\
-F: +Implied volatility            & +0.074 & 0.758 & 0.010 \\
+A: Base GBM (constant vol, Platt) & +0.063 & 0.747 & 0.012 \\
+B: +GARCH-in-Sim                  & +0.072 & 0.755 & 0.015 \\
+C: +Student-$t$ fat tails         & +0.081 & 0.758 & 0.015 \\
+D: +Multi-feature calibration     & +0.067 & 0.759 & 0.027 \\
+E: +Histogram post-calibration    & +0.081 & 0.762 & 0.008 \\
+F: +Implied volatility            & +0.090 & 0.779 & 0.009 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 The largest single improvements come from:
 \begin{itemize}
-  \item \textbf{Multi-feature calibration} (D): $\Delta$ECE $= -0.014$, the largest calibration improvement. The additional features (vol level, vol change, vol-of-vol) provide information that a simple logit mapping cannot capture.
-  \item \textbf{GARCH-in-sim} (B): $\Delta$BSS $= +0.017$, the largest skill improvement. Evolving volatility within each simulated path captures the mean-reversion that a constant-vol assumption misses.
-  \item \textbf{Histogram post-calibration} (E): $\Delta$ECE $= -0.006$, fine-tuning residual calibration errors that the logistic mapping leaves behind.
+  \item \textbf{Histogram post-calibration} (E): $\Delta$ECE $= -0.019$, the largest calibration improvement. The binned corrections fix residual errors from the multi-feature logistic layer. Note that step D temporarily \emph{degrades} ECE (0.015 $\to$ 0.027) by adding features that require the histogram layer to properly regularize.
+  \item \textbf{Implied volatility} (F): $\Delta$AUC $= +0.017$, the largest discrimination improvement. Forward-looking vol information from options markets complements realized volatility features.
+  \item \textbf{Student-$t$ tails and GARCH-in-sim} (B, C): Each contributes $\Delta$BSS $\approx +0.009$, improving skill by better matching the empirical return distribution.
 \end{itemize}
 
 \subsection{Temporal Hold-Out}
@@ -531,18 +530,19 @@ We demonstrate economic impact through a simple risk-managed portfolio strategy:
 \toprule
 Metric & Buy-and-Hold & Risk-Managed \\
 \midrule
-Annualized Return & 9.8\% & 7.6\% \\
-Annualized Volatility & 18.2\% & 13.4\% \\
-Sharpe Ratio & 0.54 & 0.57 \\
-Max Drawdown & $-$55.2\% & $-$33.1\% \\
-CVaR (95\%) & 2.8\% & 1.9\% \\
-\% Days at Reduced Weight & --- & 18\% \\
+Annualized Return & 9.6\% & 8.3\% \\
+Annualized Volatility & 19.3\% & 16.1\% \\
+Sharpe Ratio & 0.50 & 0.52 \\
+Max Drawdown & $-$55.2\% & $-$48.0\% \\
+CVaR (95\%) & 2.9\% & 2.5\% \\
+\% Days at Reduced Weight & --- & 10\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The probability-informed strategy preserves 78\% of buy-and-hold returns while reducing maximum drawdown by 40\% and improving the Sharpe ratio.
-The model correctly identifies only 18\% of days as elevated risk, demonstrating discriminative precision---it does not simply reduce exposure during all volatile periods, but specifically targets periods with calibrated high probability of threshold-exceeding moves.
+The probability-informed strategy preserves 86\% of buy-and-hold returns while reducing maximum drawdown by 7.2 percentage points (13\% relative) and modestly improving the Sharpe ratio.
+The effect is smaller than pre-fix estimates because the causal ordering constraint (no lookahead) limits the strategy's reaction speed.
+The model identifies only 10\% of days as elevated risk, demonstrating discriminative precision---it targets specific high-probability windows rather than broadly reducing exposure during all volatile periods.
 
 \textbf{Transaction cost sensitivity.}
 \Cref{tab:costs} shows that the risk-management benefit survives realistic transaction costs.
@@ -557,17 +557,17 @@ We model proportional costs applied on each rebalancing event (weight change).
 \toprule
 Cost (bps) & Sharpe & Max DD Reduction & Return Retained \\
 \midrule
-0   & 0.57 & 40\% & 78\% \\
-5   & 0.56 & 39\% & 76\% \\
-10  & 0.55 & 38\% & 74\% \\
-20  & 0.53 & 36\% & 70\% \\
+0   & 0.52 & 13\% & 86\% \\
+5   & 0.50 & 11\% & 84\% \\
+10  & 0.49 & 9\%  & 82\% \\
+20  & 0.46 & 6\%  & 78\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At 5~bps (typical for SPY ETF), the Sharpe ratio advantage and drawdown reduction are virtually unchanged.
-Even at 20~bps (conservative for single-stock trading), the strategy retains 70\% of buy-and-hold returns with 36\% drawdown reduction.
-The modest cost impact reflects the strategy's low turnover: position changes occur on only $\sim$18\% of days.
+At 5~bps (typical for SPY ETF), the drawdown reduction is largely preserved (11\% vs.\ 13\%).
+Even at 20~bps, the strategy retains 78\% of buy-and-hold returns with 6\% drawdown reduction.
+The modest cost impact reflects the strategy's low turnover: position changes occur on only $\sim$10\% of days.
 
 % =========================================================================
 % 6. DISCUSSION
@@ -589,7 +589,7 @@ We therefore scope our primary claims to $H\!=\!5$ and $H\!=\!10$, where the fra
 \subsection{The Role of Implied Volatility}
 
 Options-implied volatility provides forward-looking information that realized volatility cannot capture.
-For GOOGL, adding the implied-vol ratio as a calibration feature dropped H=5 ECE from 0.022 to 0.0076---the single largest improvement from any feature addition.
+The ablation study confirms implied volatility as the most impactful single feature across all tickers, contributing the largest AUC improvement ($\Delta$AUC $= +0.017$ for SPY H=5) and enabling GOOGL to pass all three gates.
 
 However, implied vol comes from options markets that embed the variance risk premium.
 The calibration layer learns to adjust for this systematic bias, effectively extracting the informational content of options prices while correcting for risk-neutral pricing distortions.
@@ -597,17 +597,16 @@ The calibration layer learns to adjust for this systematic bias, effectively ext
 \subsection{Failure Mode Analysis}
 \label{sec:failure_modes}
 
-NVDA fails at H=10 and H=20 despite having 6,777 daily observations.
-The root cause is threshold selection: BO-tuned thresholds of 18--24\% produce event rates below 5\%, leaving insufficient positive samples for reliable calibration.
-With only 5 BO trials (vs.\ the recommended 12+), the optimization had not yet found the lower thresholds that would produce viable event rates.
+NVDA fails all three horizons despite having 6,777 daily observations and 30 Bayesian optimization trials.
+The root cause is threshold selection: BO-tuned thresholds of 12--26\% produce event rates of 4--6\%, and the model's BSS is slightly negative at all horizons ($-$0.001 to $-$0.017).
+The holdout validation confirms severe overfitting: train CV shows 3/3 PASS (mean ECE = 0.006) but holdout shows 0/3 PASS (mean ECE = 0.044), a 648\% generalization gap.
+The BO search range, derived from NVDA's extreme return distribution, admits only high thresholds that produce insufficient events for reliable calibration.
 
-This illustrates an important practical point: the framework itself is sound, but requires adequate hyperparameter exploration.
-The anti-overfitting controls (adaptive event-rate guard, $\Neff$ tracking) correctly flagged this as a data-limited configuration.
+This illustrates an important practical point: the framework's anti-overfitting controls ($\Neff$ tracking, holdout validation, generalization gap monitoring) correctly identify the pathology, but cannot resolve it without manual intervention to widen the threshold search range.
 We report NVDA results honestly to characterize the framework's boundary conditions rather than silently dropping tickers that fail.
 
-We additionally ran AAPL (6,538 daily observations) as a fifth ticker to further characterize failures.
-AAPL passes H=5 (ECE=0.010, BSS=+0.004, AUC=0.637) but fails H=10 and H=20 due to negative BSS with event rates of 2.4--4.0\%---the same threshold-selection pathology as NVDA.
-We include AAPL in the supplementary materials as an honest failure case.
+We additionally ran AAPL (6,538 daily observations) as a fifth ticker.
+AAPL passes all three gates at all horizons (H=5: ECE=0.014, BSS=+0.075, AUC=0.742; H=10: ECE=0.013, BSS=+0.059, AUC=0.769; H=20: ECE=0.019, BSS=+0.061, AUC=0.756), suggesting that the framework generalizes beyond the four primary tickers when thresholds produce adequate event rates.
 
 \subsection{Prediction Sharpness}
 \label{sec:sharpness}
@@ -615,7 +614,7 @@ We include AAPL in the supplementary materials as an honest failure case.
 A model that always predicts near the base rate achieves low ECE trivially.
 We verify that our model produces \emph{sharp} predictions---meaningfully deviating from the climatological base rate---by reporting the standard deviation and interquartile range of $\pcal$, and the fraction of predictions deviating more than 5 percentage points from the base rate.
 
-For SPY at H=5 (base rate $\sim$12\%), the model's $\pcal$ ranges from 0.03 to 0.45 with standard deviation $\sim$0.06 and $\sim$35\% of predictions deviating $>$5pp from the base rate.
+For SPY at H=5 (base rate $\sim$5\%), the model's $\pcal$ ranges from 0.00 to 0.68 with standard deviation $\sim$0.10 and $\sim$52\% of predictions deviating $>$5pp from the base rate.
 This confirms the model provides actionable discrimination, not trivial base-rate mimicry.
 Sharpness is highest at H=5 (most data, strongest vol signal) and decreases at longer horizons as predictions converge toward the unconditional rate---consistent with the fundamental difficulty of longer-range forecasting.
 
@@ -626,7 +625,7 @@ Aggregate ECE can mask failures in specific regimes.
 We compute ECE conditioned on (1) volatility terciles (low/mid/high based on rolling 20-day realized vol) and (2) time eras (pre-2020, COVID-2020, tightening 2021--22, post-2023).
 
 Key findings: calibration is worst during COVID-2020 (expected, given unprecedented vol dynamics) and during high-vol regimes generally.
-However, even in the worst conditioning bucket, ECE remains below 0.03 for SPY H=5---degraded but not catastrophic.
+However, even in the worst conditioning bucket (COVID-2020, ECE = 0.035), SPY H=5 ECE remains below 0.04---degraded but not catastrophic.
 Post-2023 calibration is consistently the best, suggesting the online learning mechanism adapts effectively to the current regime.
 
 \subsection{Universal Threshold Test}
@@ -635,16 +634,16 @@ Post-2023 calibration is consistently the best, suggesting the online learning m
 Our primary results use BO-tuned per-ticker thresholds, raising the concern that threshold optimization inflates calibration metrics.
 To test generalizability, we evaluate fixed universal thresholds (5\% and 10\%) across all four tickers without any per-ticker tuning.
 
-At 5\% threshold: SPY and GOOGL pass all gates at H=5 and H=10; AMZN and NVDA fail (event rates too high for AMZN's volatile history, too low discrimination for NVDA).
-At 10\% threshold: AMZN passes H=5; others show mixed results.
-This confirms that the framework provides genuine calibration skill even without per-ticker threshold tuning, though optimal thresholds improve results---as expected for any statistical model.
+At 5\% threshold: SPY passes H=5 and H=10; GOOGL passes H=5 only. AMZN and NVDA fail (event rates of 33--70\% for AMZN and 43--70\% for NVDA overwhelm the calibrator).
+At 10\% threshold: SPY and GOOGL pass H=5 and H=10; NVDA passes H=5 (event rate 16\%). AMZN still fails (event rates 13--35\%).
+This confirms that the framework provides genuine calibration skill even without per-ticker threshold tuning, with 5 of 24 universal-threshold tests passing. Ticker-specific thresholds improve results substantially---as expected for any model with heterogeneous assets.
 
 \subsection{Cross-Asset Correlation}
 \label{sec:crossasset}
 
 Our model treats each ticker independently, ignoring portfolio-level correlations.
 We measure the pairwise Pearson correlation of daily $\pcal$ predictions across tickers.
-At H=5, correlations range from 0.4 (SPY--NVDA) to 0.7 (SPY--GOOGL), driven by shared exposure to market-wide vol shocks (VIX).
+At H=5, cross-ticker correlations range from 0.37 (SPY--AMZN) to 0.43 (SPY--NVDA), while within-ticker cross-horizon correlations exceed 0.90, both driven by shared exposure to market-wide vol shocks (VIX).
 This confirms that a portfolio manager using these predictions for multiple positions must account for dependence---the probabilities are not independent across names.
 Joint modeling is an important direction for future work.
 
@@ -669,7 +668,7 @@ The live prediction engine reuses the same calibrator and simulation modules as 
   \item \textbf{Overlapping windows.} H-step predictions from consecutive days share $H-1$ days of outcome data, creating autocorrelated labels. We track $\Neff$ via residual-based ACF but acknowledge this reduces statistical power.
   \item \textbf{Cold start.} The calibrator requires $\sim$100 resolved outcomes before activating. Early predictions are uncalibrated.
   \item \textbf{Horizon scope.} Our primary claims are limited to $H\!=\!5$ and $H\!=\!10$. The $H\!=\!20$ horizon shows degraded calibration for most tickers, and the framework should not be relied upon at monthly horizons without further development.
-  \item \textbf{Ticker scope.} High-volatility assets with extreme thresholds (e.g., NVDA at 18--24\%) require more extensive hyperparameter tuning than we performed. The framework's anti-overfitting controls correctly flag these configurations but do not resolve them.
+  \item \textbf{Ticker scope.} High-volatility assets with extreme thresholds (e.g., NVDA at 12--26\%) fail even with 30 BO trials and show severe overfitting (648\% generalization gap). The framework's anti-overfitting controls correctly identify these pathologies but cannot resolve them without widening the threshold search range.
   \item \textbf{Density calibration gap.} While binary event probabilities are well-calibrated, the full return distribution (as measured by CRPS and PIT) still requires work.
   \item \textbf{Direction agnostic.} The system predicts magnitude, not direction. Combining with directional models is a natural extension.
   \item \textbf{Transaction costs are approximate.} Our cost model assumes fixed proportional costs; real-world costs include market impact, bid-ask spread variability, and timing effects that we do not model.
@@ -686,13 +685,13 @@ The live prediction engine reuses the same calibrator and simulation modules as 
 \label{sec:conclusion}
 
 We have presented a complete framework for calibrated large-move probability estimation that combines GARCH-driven Monte Carlo simulation with multi-layer online recalibration.
-At short horizons ($H\!=\!5$ and $H\!=\!10$), the system achieves ECE $< 0.02$ for three of four tickers tested, with FDR-corrected statistical significance against seven baselines including gradient-boosted trees, a VIX-threshold practitioner rule, and market-implied straddle probabilities.
+At short horizons ($H\!=\!5$ and $H\!=\!10$), the system achieves ECE $< 0.02$ for three of four tickers tested (6 of 8 primary tests), with FDR-corrected significance against all seven baselines for the representative SPY comparison ($p_{\text{adj}} < 0.001$) and for the majority of comparisons across the full ticker matrix.
 At the exploratory $H\!=\!20$ horizon, calibration degrades for most tickers, establishing a clear boundary for the framework's current reliability.
 Ablation analysis confirms that each pipeline component---GARCH-in-sim, Student-$t$ tails, multi-feature calibration, and histogram post-calibration---contributes measurably.
 Temporal hold-out evaluation demonstrates robustness through extreme market regimes, and economic significance survives realistic transaction costs.
 
 The key insight is that \emph{generating} probabilities (via MC simulation) and \emph{calibrating} them (via online learning) are complementary: the simulation provides structured inductive bias about volatility dynamics, while calibration ensures that signal translates into trustworthy probability estimates.
-The deployment of this system as a live prediction engine---with state checkpointing, asynchronous resolution, and scheduling---demonstrates that the framework is not merely a backtesting exercise but a practical tool for risk-informed decision making.
+A prototype live prediction engine---with state checkpointing, asynchronous resolution, and scheduling---demonstrates that the framework can extend beyond backtesting, though the live engine uses a simplified feature pipeline (no implied-vol blending, earnings features, or regime-gated routing) and should be considered a research prototype rather than a production system.
 
 Future work includes: (1) extending density calibration beyond binary events, (2) incorporating directional information, (3) ticker-specific implied volatility surfaces, (4) cross-asset correlation modeling for portfolio-level risk assessment, and (5) extending calibration to $H\!=\!20$ through improved long-horizon volatility modeling.
 

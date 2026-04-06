@@ -63,7 +63,13 @@
       "Bash(taskkill /PID 10760 /F)",
       "Bash(taskkill //PID 41208 //F)",
       "Bash(taskkill //PID 10760 //F)",
-      "Bash(taskkill //PID 10868 //F)"
+      "Bash(taskkill //PID 10868 //F)",
+      "Bash(.venv/Scripts/python.exe scripts/generate_paper_figures.py)",
+      "Bash(pdflatex -interaction=nonstopmode main.tex)",
+      "Bash(where pdflatex:*)",
+      "Read(//c//**)",
+      "Read(//c/Program Files/MiKTeX/miktex/bin/x64/**)",
+      "Bash(.venv/Scripts/python.exe scripts/run_economic_significance.py all)"
     ]
   }
 }
