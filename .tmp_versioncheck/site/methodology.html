@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Methodology — Live Verification</title>
+  <style>
+    :root { --bg: #fafafa; --fg: #1a1a1a; --border: #ddd; --accent: #2563eb;
+            --warn: #b45309; --good: #047857; --bad: #b91c1c; --muted: #6b7280; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Mono', 'Consolas', monospace; font-size: 14px;
+           color: var(--fg); background: var(--bg); line-height: 1.6;
+           max-width: 1100px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    h2 { font-size: 16px; margin: 28px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+    h3 { font-size: 14px; margin: 16px 0 8px 0; }
+    p, li { margin-bottom: 8px; }
+    a { color: var(--accent); }
+    nav { margin: 12px 0 24px 0; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    nav a { margin-right: 16px; text-decoration: none; font-weight: 600; }
+    nav a:hover { text-decoration: underline; }
+    .warn { background: #fef3cd; border: 1px solid #ffc107; padding: 10px 14px; margin: 12px 0; font-size: 13px; }
+    .demo-banner { background: #fce4ec; border: 2px solid #e53935; padding: 12px 16px;
+                   margin: 12px 0; font-weight: bold; text-align: center; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: right; }
+    th { background: #f0f0f0; font-weight: 600; text-align: left; }
+    td:first-child, th:first-child { text-align: left; }
+    .good { color: var(--good); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .muted { color: var(--muted); }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                   gap: 12px; margin: 12px 0; }
+    .metric-card { border: 1px solid var(--border); padding: 12px; background: white; }
+    .metric-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .metric-card .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+    .metric-card .detail { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .chart-container { margin: 16px 0; background: white; border: 1px solid var(--border); padding: 16px; }
+    pre { background: #f5f5f5; padding: 12px; overflow-x: auto; font-size: 12px; border: 1px solid var(--border); }
+    footer { margin-top: 40px; padding-top: 12px; border-top: 1px solid var(--border);
+             font-size: 11px; color: var(--muted); }
+    </style>
+</head>
+<body>
+  <h1>Calibrated Large-Move Probability Engine</h1>
+  <div class="muted">Live Verification Dashboard</div>
+  <nav><a href="index.html">Overview</a>  <a href="latest.html">Latest Forecasts</a>  <a href="track_record.html">Track Record</a>  <a href="audit.html">Audit Trail</a>  <strong>Methodology</strong></nav>
+  <h2>Methodology</h2>
+
+    <h3>What the system predicts</h3>
+    <p>For each ticker and horizon H, the model estimates:
+    <em>"What is the probability that |price return| >= threshold over the next H trading days?"</em>
+    This is a two-sided (direction-agnostic) large-move probability.</p>
+
+    <h3>Event definition</h3>
+    <p>An event occurs when <code>|P(t+H)/P(t) - 1| >= threshold</code>,
+    where P(t) is the closing price on the forecast date and P(t+H) is the
+    closing price exactly H <strong>trading days</strong> later. The threshold
+    used for resolution is always the threshold stored at forecast time, not any
+    later threshold.</p>
+
+    <h3>Trading-day resolution</h3>
+    <p>Resolution uses the actual trading calendar, not naive calendar-day
+    arithmetic. H=5 means 5 trading days (one week), H=10 means 10 trading
+    days (two weeks). Weekends and market holidays are skipped.</p>
+
+    <h3>No-lookahead guarantee</h3>
+    <p>The forecast ledger is append-only. Each forecast is written with a
+    UTC timestamp before the resolution date. The resolution ledger is a
+    separate file — forecast records are never modified after publication.
+    Anyone can verify the temporal ordering by inspecting the raw JSONL files.</p>
+
+    <h3>Model versioning</h3>
+    <p>Each forecast records its model_version, git_commit, config_hash, and
+    checkpoint_hash. The overview page groups metrics by model_version, showing
+    the main model and baselines side by side. The site can also be built
+    filtered to a single version with <code>--version</code>. Pooled metrics
+    across all versions are shown at the top; per-version breakdowns below.</p>
+
+    <h3>Calibration methodology</h3>
+    <p>The underlying model uses GJR-GARCH volatility estimation, Monte Carlo
+    simulation with Student-t fat tails and Merton jump-diffusion, followed
+    by multi-feature online recalibration with histogram post-calibration.
+    Full details are in the paper and METHODOLOGY.md.</p>
+
+    <h3>Limitations</h3>
+    <ul>
+    <li><strong>Small sample sizes:</strong> Live verification starts with zero
+    resolved forecasts. Statistical conclusions require at minimum 50–100
+    resolved forecasts per group. Do not treat early metrics as definitive.</li>
+    <li><strong>Overlapping predictions:</strong> Forecasts at different horizons
+    from the same date share price information. Effective sample size (N_eff)
+    is lower than raw count.</li>
+    <li><strong>Simplified live engine:</strong> The live prediction engine is a
+    research prototype. It does not include all features of the backtest
+    (e.g., implied-vol blending, earnings proximity, regime routing).</li>
+    <li><strong>No guarantee of stationarity:</strong> The model's backtest
+    performance does not guarantee future performance. Market regimes change.</li>
+    <li><strong>Data dependency:</strong> Forecasts depend on price data quality
+    and availability. Data delays or errors affect both forecasts and resolutions.</li>
+    </ul>
+
+    <h3>What the live record can prove</h3>
+    <ul>
+    <li>Whether forecasts were published before outcomes were known (timestamp audit)</li>
+    <li>Whether predicted probabilities are calibrated over time (ECE, reliability curve)</li>
+    <li>Whether the model has skill vs. climatology (BSS)</li>
+    <li>Whether the model discriminates events from non-events (AUC)</li>
+    </ul>
+
+    <h3>What the live record cannot prove</h3>
+    <ul>
+    <li>That the model will continue to work in future market regimes</li>
+    <li>That the model is optimal or best-in-class</li>
+    <li>That the economic value of the forecasts exceeds trading costs</li>
+    <li>Superiority over baselines in real time (live baseline tracking is not yet
+    implemented; baseline comparisons are available only in the backtest paper results)</li>
+    </ul>
+    
+  <footer>
+    Generated 2026-04-08 04:50 UTC &middot;
+    calibrated-large-move-probability-engine
+  </footer>
+</body>
+</html>

@@ -110,10 +110,11 @@ def compute_live_metrics(
     # Bootstrap CIs (only if enough data)
     if n_resolved >= 30 and n_events >= 3 and n_nonevents >= 3:
         try:
-            bss_lo, bss_hi = bootstrap_metric_ci(
+            _point, bss_lo, bss_hi = bootstrap_metric_ci(
                 y, p_cal, brier_skill_score, n_boot=1000, alpha=0.05,
             )
-            metrics["bss_ci_95"] = [round(bss_lo, 4), round(bss_hi, 4)]
+            if not (np.isnan(bss_lo) or np.isnan(bss_hi)):
+                metrics["bss_ci_95"] = [round(bss_lo, 4), round(bss_hi, 4)]
         except Exception:
             pass
 

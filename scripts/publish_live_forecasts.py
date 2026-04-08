@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+import pandas as pd
 
 from em_sde.config import load_config
 from em_sde.data_layer import load_data
@@ -31,6 +32,7 @@ from em_sde.predict import PredictionEngine
 from em_sde.backtest import run_walkforward
 from em_sde.garch import fit_garch
 from em_sde.ledger import append_forecast, LEDGER_DIR
+from scripts.baselines import compute_live_baseline_forecasts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +117,19 @@ def publish(tickers=None, model_version="v1.0"):
             forecast_date = str(df.index[-1].date())
             trading_calendar = df.index
 
+            # Stale-data gate: reject if data is not from a recent trading day
+            last_data_date = pd.Timestamp(forecast_date)
+            today = pd.Timestamp.now().normalize()
+            # Allow up to 3 calendar days stale (covers weekends)
+            staleness = (today - last_data_date).days
+            if staleness > 3:
+                logger.error(
+                    "STALE DATA for %s: last data date is %s (%d days old). "
+                    "Refusing to publish. Update price data first.",
+                    ticker, forecast_date, staleness,
+                )
+                continue
+
             for H, pred in sorted(preds.items()):
                 record = append_forecast(
                     ticker=ticker,
@@ -136,7 +151,57 @@ def publish(tickers=None, model_version="v1.0"):
                     checkpoint_dir=str(STATE_DIR / ticker.lower()),
                     trading_calendar=trading_calendar,
                 )
+                if record is None:
+                    logger.info("Skipped duplicate: %s H=%d on %s", ticker, H, forecast_date)
+                    continue
                 ticker_forecasts.append(record)
+
+            # --- Baseline forecasts ---
+            thresholds = {}
+            for H in cfg.model.horizons:
+                thr_col = f"thr_{H}"
+                if hasattr(engine, "metadata") and "thresholds" in engine.metadata:
+                    thr_val = engine.metadata["thresholds"].get(str(H))
+                    if thr_val is not None:
+                        thresholds[H] = float(thr_val)
+                # Fallback: use the threshold from the main model prediction
+                if H not in thresholds:
+                    pred = preds.get(H)
+                    if pred is not None:
+                        thresholds[H] = pred.threshold
+
+            iv_path = getattr(cfg.model, "implied_vol_csv_path", None)
+            if iv_path and not Path(iv_path).exists():
+                iv_path = None
+
+            try:
+                baseline_preds = compute_live_baseline_forecasts(
+                    prices=prices,
+                    dates=df.index,
+                    horizons=cfg.model.horizons,
+                    thresholds=thresholds,
+                    iv_csv_path=iv_path or "data/vix_history.csv",
+                    garch_window=cfg.model.garch_window,
+                )
+                for bl_name, bl_horizons in baseline_preds.items():
+                    for H, p_bl in bl_horizons.items():
+                        thr = thresholds.get(H, 0.05)
+                        rec = append_forecast(
+                            ticker=ticker,
+                            forecast_date_market=forecast_date,
+                            horizon=H,
+                            threshold=thr,
+                            p_raw=p_bl,
+                            p_cal=p_bl,  # baselines are not further calibrated
+                            sigma_1d=0.0,
+                            config_path=config_path,
+                            model_version=bl_name,
+                            trading_calendar=trading_calendar,
+                        )
+                        if rec is not None:
+                            ticker_forecasts.append(rec)
+            except Exception as e:
+                logger.warning("Baseline publish failed for %s: %s", ticker, e)
 
             all_forecasts[ticker] = ticker_forecasts
             logger.info("Published %d forecasts for %s", len(ticker_forecasts), ticker)

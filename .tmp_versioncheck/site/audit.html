@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit Trail — Live Verification</title>
+  <style>
+    :root { --bg: #fafafa; --fg: #1a1a1a; --border: #ddd; --accent: #2563eb;
+            --warn: #b45309; --good: #047857; --bad: #b91c1c; --muted: #6b7280; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Mono', 'Consolas', monospace; font-size: 14px;
+           color: var(--fg); background: var(--bg); line-height: 1.6;
+           max-width: 1100px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    h2 { font-size: 16px; margin: 28px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+    h3 { font-size: 14px; margin: 16px 0 8px 0; }
+    p, li { margin-bottom: 8px; }
+    a { color: var(--accent); }
+    nav { margin: 12px 0 24px 0; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    nav a { margin-right: 16px; text-decoration: none; font-weight: 600; }
+    nav a:hover { text-decoration: underline; }
+    .warn { background: #fef3cd; border: 1px solid #ffc107; padding: 10px 14px; margin: 12px 0; font-size: 13px; }
+    .demo-banner { background: #fce4ec; border: 2px solid #e53935; padding: 12px 16px;
+                   margin: 12px 0; font-weight: bold; text-align: center; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: right; }
+    th { background: #f0f0f0; font-weight: 600; text-align: left; }
+    td:first-child, th:first-child { text-align: left; }
+    .good { color: var(--good); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .muted { color: var(--muted); }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                   gap: 12px; margin: 12px 0; }
+    .metric-card { border: 1px solid var(--border); padding: 12px; background: white; }
+    .metric-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .metric-card .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+    .metric-card .detail { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .chart-container { margin: 16px 0; background: white; border: 1px solid var(--border); padding: 16px; }
+    pre { background: #f5f5f5; padding: 12px; overflow-x: auto; font-size: 12px; border: 1px solid var(--border); }
+    footer { margin-top: 40px; padding-top: 12px; border-top: 1px solid var(--border);
+             font-size: 11px; color: var(--muted); }
+    </style>
+</head>
+<body>
+  <h1>Calibrated Large-Move Probability Engine</h1>
+  <div class="muted">Live Verification Dashboard</div>
+  <nav><a href="index.html">Overview</a>  <a href="latest.html">Latest Forecasts</a>  <a href="track_record.html">Track Record</a>  <strong>Audit Trail</strong>  <a href="methodology.html">Methodology</a></nav>
+  <h2>Audit Trail &amp; Data Download</h2>
+<p>Raw ledger files for independent verification. The forecast ledger is append-only; forecasts are never edited after publication. Resolutions are stored separately, keyed by forecast_id.</p>
+<p><a href="data/forecasts.jsonl" download>Forecast Ledger (JSONL)</a> (1,089 bytes)</p>
+<p><a href="data/resolutions.jsonl" download>Resolution Ledger (JSONL)</a> (440 bytes)</p>
+<p><a href="data/joined_forecasts.csv" download>Joined Forecasts + Resolutions (CSV)</a></p>
+<p><a href="data/metrics.json" download>Computed Metrics (JSON)</a></p>
+<h3>Forecast Fields</h3>
+<pre>forecast_id              — SHA-256-derived unique ID (ticker:date:horizon)
+forecast_timestamp_utc   — Wall-clock time the forecast was written (UTC)
+forecast_date_market     — Market date the forecast is made as-of
+ticker                   — Stock ticker symbol
+horizon                  — Trading days until resolution
+threshold                — Return threshold for event definition (decimal)
+p_raw                    — Raw Monte Carlo probability (uncalibrated)
+p_cal                    — Calibrated probability (final output)
+sigma_1d                 — GARCH 1-day conditional volatility
+delta_sigma              — Change in sigma vs prior window
+vol_ratio                — Ratio of realized vol to GARCH sigma
+vol_of_vol               — Volatility of volatility
+event_rate_historical    — Trailing 252-day empirical event rate
+calibrator_n_updates     — Number of online calibrator updates
+model_version            — Model version string
+git_commit               — Git commit hash at forecast time
+config_path              — YAML config file used
+config_hash              — SHA-256 hash of config file
+checkpoint_hash          — Hash of model checkpoint metadata
+expected_resolution_date — Estimated resolution date
+status                   — Always 'pending' at write time</pre>
+<h3>Resolution Fields</h3>
+<pre>forecast_id              — Links to the original forecast
+resolution_timestamp_utc — Wall-clock time resolution was computed
+resolution_date_market   — Actual market date of resolution
+realized_return          — Actual H-day return (decimal)
+event_occurred           — 1 if |return| >= threshold, else 0
+price_at_forecast        — Closing price on forecast date
+price_at_resolution      — Closing price H trading days later</pre>
+  <footer>
+    Generated 2026-04-08 04:50 UTC &middot;
+    calibrated-large-move-probability-engine
+  </footer>
+</body>
+</html>

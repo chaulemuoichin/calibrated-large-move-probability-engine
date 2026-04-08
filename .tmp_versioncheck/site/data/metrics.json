@@ -1,0 +1,9 @@
+{
+  "n_total_forecasts": 2,
+  "n_resolved": 2,
+  "n_pending": 0,
+  "metrics": null,
+  "warnings": [
+    "Only 2 resolved forecasts (minimum 10 needed for meaningful metrics). Metrics are unreliable at this sample size."
+  ]
+}

@@ -74,7 +74,8 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_live_verification.py -v)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_live_verification.py::test_site_generation_from_fixture -v --tb=short)",
       "Bash(.venv/Scripts/python.exe scripts/generate_demo_ledger.py)",
-      "Bash(.venv/Scripts/python.exe scripts/build_live_verification_site.py --demo)"
+      "Bash(.venv/Scripts/python.exe scripts/build_live_verification_site.py --demo)",
+      "Bash(.venv/Scripts/python.exe:*)"
     ]
   }
 }

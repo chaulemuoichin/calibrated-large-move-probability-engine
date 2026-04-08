@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Track Record — Live Verification</title>
+  <style>
+    :root { --bg: #fafafa; --fg: #1a1a1a; --border: #ddd; --accent: #2563eb;
+            --warn: #b45309; --good: #047857; --bad: #b91c1c; --muted: #6b7280; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Mono', 'Consolas', monospace; font-size: 14px;
+           color: var(--fg); background: var(--bg); line-height: 1.6;
+           max-width: 1100px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    h2 { font-size: 16px; margin: 28px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+    h3 { font-size: 14px; margin: 16px 0 8px 0; }
+    p, li { margin-bottom: 8px; }
+    a { color: var(--accent); }
+    nav { margin: 12px 0 24px 0; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    nav a { margin-right: 16px; text-decoration: none; font-weight: 600; }
+    nav a:hover { text-decoration: underline; }
+    .warn { background: #fef3cd; border: 1px solid #ffc107; padding: 10px 14px; margin: 12px 0; font-size: 13px; }
+    .demo-banner { background: #fce4ec; border: 2px solid #e53935; padding: 12px 16px;
+                   margin: 12px 0; font-weight: bold; text-align: center; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: right; }
+    th { background: #f0f0f0; font-weight: 600; text-align: left; }
+    td:first-child, th:first-child { text-align: left; }
+    .good { color: var(--good); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .muted { color: var(--muted); }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                   gap: 12px; margin: 12px 0; }
+    .metric-card { border: 1px solid var(--border); padding: 12px; background: white; }
+    .metric-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .metric-card .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+    .metric-card .detail { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .chart-container { margin: 16px 0; background: white; border: 1px solid var(--border); padding: 16px; }
+    pre { background: #f5f5f5; padding: 12px; overflow-x: auto; font-size: 12px; border: 1px solid var(--border); }
+    footer { margin-top: 40px; padding-top: 12px; border-top: 1px solid var(--border);
+             font-size: 11px; color: var(--muted); }
+    </style>
+</head>
+<body>
+  <h1>Calibrated Large-Move Probability Engine</h1>
+  <div class="muted">Live Verification Dashboard</div>
+  <nav><a href="index.html">Overview</a>  <a href="latest.html">Latest Forecasts</a>  <strong>Track Record</strong>  <a href="audit.html">Audit Trail</a>  <a href="methodology.html">Methodology</a></nav>
+  <h2>Track Record</h2>
+<p>All resolved forecasts and cumulative performance.</p>
+<h3>Resolved Forecasts</h3>
+<table><thead><tr><th>Date</th><th>Ticker</th><th>H</th><th>p_cal</th><th>Threshold</th><th>Return</th><th>Event</th><th>Resolve Date</th><th>Version</th></tr></thead><tbody><tr><td>2025-01-15</td><td>SPY</td><td>5</td><td>0.0700</td><td>0.0400</td><td><span class="bad">+0.0500</span></td><td><span class="good">Yes</span></td><td>2025-01-22</td><td>v1.0</td></tr></tbody></table>
+  <footer>
+    Generated 2026-04-08 04:50 UTC &middot;
+    calibrated-large-move-probability-engine
+  </footer>
+</body>
+</html>

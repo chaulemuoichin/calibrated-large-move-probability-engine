@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -121,8 +121,8 @@ def _page(title: str, body: str, current: str, is_demo: bool) -> str:
   {_nav(current, is_demo)}
   {body}
   <footer>
-    Generated {datetime.now().strftime('%Y-%m-%d %H:%M UTC')} &middot;
-    Source: <a href="https://github.com">calibrated-large-move-probability-engine</a>
+    Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} &middot;
+    calibrated-large-move-probability-engine
   </footer>
 </body>
 </html>"""
@@ -219,7 +219,7 @@ Diameter proportional to sample count. Perfect calibration falls on the diagonal
 # Page builders
 # ---------------------------------------------------------------------------
 
-def _build_overview(metrics: dict, per_ticker: dict, per_horizon: dict, is_demo: bool) -> str:
+def _build_overview(metrics: dict, per_ticker: dict, per_horizon: dict, is_demo: bool, per_version: dict = None) -> str:
     parts = []
 
     parts.append("<h2>Overview</h2>")
@@ -298,6 +298,22 @@ def _build_overview(metrics: dict, per_ticker: dict, per_horizon: dict, is_demo:
                             bss_fmt, auc_fmt, ece_fmt])
         parts.append(_table_html(headers, rows))
 
+    # Per-version breakdown
+    if per_version and len(per_version) > 0:
+        parts.append("<h2>Per-Version Metrics</h2>")
+        headers = ["Version", "N", "Events", "Event Rate", "BSS", "AUC", "ECE"]
+        rows = []
+        for ver, vm in sorted(per_version.items()):
+            if "warning" in vm:
+                rows.append([ver, str(vm["n"]), str(vm["n_events"]), "\u2014", "\u2014", "\u2014", f"<i>{vm['warning']}</i>"])
+            else:
+                bss_fmt = f'<span class="{"good" if vm["bss"] > 0 else "bad"}">{vm["bss"]:+.4f}</span>'
+                auc_fmt = f'{vm["auc"]:.3f}' if vm["auc"] is not None else "N/A"
+                ece_fmt = f'<span class="{"good" if vm["ece"] <= 0.02 else "bad"}">{vm["ece"]:.4f}</span>'
+                rows.append([ver, str(vm["n"]), str(vm["n_events"]), f"{vm['event_rate']:.1%}",
+                            bss_fmt, auc_fmt, ece_fmt])
+        parts.append(_table_html(headers, rows))
+
     return "\n".join(parts)
 
 
@@ -346,7 +362,7 @@ def _build_track_record(joined: pd.DataFrame, rolling: pd.DataFrame) -> str:
 
     # Resolved forecasts table
     parts.append("<h3>Resolved Forecasts</h3>")
-    headers = ["Date", "Ticker", "H", "p_cal", "Threshold", "Return", "Event", "Resolve Date"]
+    headers = ["Date", "Ticker", "H", "p_cal", "Threshold", "Return", "Event", "Resolve Date", "Version"]
     rows = []
     for _, r in resolved.head(200).iterrows():
         event_str = "Yes" if r.get("event_occurred") == 1 else "No"
@@ -362,6 +378,7 @@ def _build_track_record(joined: pd.DataFrame, rolling: pd.DataFrame) -> str:
             ret_str,
             f'<span class="{event_class}">{event_str}</span>',
             str(r.get("resolution_date_market", "")),
+            str(r.get("model_version", "")),
         ])
     parts.append(_table_html(headers, rows))
 
@@ -372,11 +389,14 @@ def _build_track_record(joined: pd.DataFrame, rolling: pd.DataFrame) -> str:
         headers = ["Window Start", "Window End", "N", "Events", "BSS", "AUC", "ECE"]
         rows = []
         for _, r in rolling.iterrows():
-            bss_fmt = f'{r["bss"]:+.4f}'
+            bss_val = r["bss"]
+            bss_fmt = f'{bss_val:+.4f}' if not (pd.isna(bss_val) or np.isinf(bss_val)) else "N/A"
             auc_fmt = f'{r["auc"]:.3f}' if r.get("auc") is not None and not pd.isna(r.get("auc")) else "N/A"
+            ece_val = r["ece"]
+            ece_fmt = f'{ece_val:.4f}' if not (pd.isna(ece_val) or np.isinf(ece_val)) else "N/A"
             rows.append([
                 str(r["window_start"]), str(r["window_end"]), str(r["n"]),
-                str(r["n_events"]), bss_fmt, auc_fmt, f'{r["ece"]:.4f}',
+                str(r["n_events"]), bss_fmt, auc_fmt, ece_fmt,
             ])
         parts.append(_table_html(headers, rows))
 
@@ -430,7 +450,7 @@ def _build_audit(forecast_path: Path, resolution_path: Path, output_dir: Path) -
     # Field definitions
     parts.append("<h3>Forecast Fields</h3>")
     parts.append("<pre>" + "\n".join([
-        "forecast_id              — SHA-256-derived unique ID (ticker:date:horizon:timestamp)",
+        "forecast_id              — SHA-256-derived unique ID (ticker:date:horizon)",
         "forecast_timestamp_utc   — Wall-clock time the forecast was written (UTC)",
         "forecast_date_market     — Market date the forecast is made as-of",
         "ticker                   — Stock ticker symbol",
@@ -497,9 +517,10 @@ def _build_methodology() -> str:
 
     <h3>Model versioning</h3>
     <p>Each forecast records its model_version, git_commit, config_hash, and
-    checkpoint_hash. If the model changes, performance can be filtered by
-    version. Different model generations are not merged into one undifferentiated
-    performance number unless explicitly shown as pooled.</p>
+    checkpoint_hash. The overview page groups metrics by model_version, showing
+    the main model and baselines side by side. The site can also be built
+    filtered to a single version with <code>--version</code>. Pooled metrics
+    across all versions are shown at the top; per-version breakdowns below.</p>
 
     <h3>Calibration methodology</h3>
     <p>The underlying model uses GJR-GARCH volatility estimation, Monte Carlo
@@ -537,6 +558,8 @@ def _build_methodology() -> str:
     <li>That the model will continue to work in future market regimes</li>
     <li>That the model is optimal or best-in-class</li>
     <li>That the economic value of the forecasts exceeds trading costs</li>
+    <li>Superiority over baselines in real time (live baseline tracking is not yet
+    implemented; baseline comparisons are available only in the backtest paper results)</li>
     </ul>
     """)
 
@@ -552,8 +575,9 @@ def build_site(
     output_dir: Optional[Path] = None,
     forecast_path: Optional[Path] = None,
     resolution_path: Optional[Path] = None,
+    version_filter: Optional[str] = None,
 ):
-    """Build the full static site."""
+    """Build the full static site, optionally filtered to a single model_version."""
     if output_dir is None:
         output_dir = DEFAULT_OUTPUT
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -574,14 +598,29 @@ def build_site(
 
     # Load data
     joined = load_joined(forecast_path, resolution_path)
+
+    # Version filtering: restrict all data to a single model_version
+    if version_filter and "model_version" in joined.columns:
+        before = len(joined)
+        joined = joined[joined["model_version"] == version_filter].copy()
+        logger.info("Version filter '%s': %d -> %d records", version_filter, before, len(joined))
+        if len(joined) == 0:
+            print(f"No records match version '{version_filter}'. Available versions:")
+            all_joined = load_joined(forecast_path, resolution_path)
+            if "model_version" in all_joined.columns:
+                for v in sorted(all_joined["model_version"].unique()):
+                    print(f"  {v}")
+            return
+
     metrics = compute_live_metrics(joined=joined)
     per_ticker = compute_per_group_metrics(joined=joined, group_col="ticker")
     per_horizon = compute_per_group_metrics(joined=joined, group_col="horizon")
+    per_version = compute_per_group_metrics(joined=joined, group_col="model_version")
     rolling = compute_rolling_metrics(joined=joined)
 
     # Build pages
     pages = {
-        "index.html": ("Overview", _build_overview(metrics, per_ticker, per_horizon, is_demo)),
+        "index.html": ("Overview", _build_overview(metrics, per_ticker, per_horizon, is_demo, per_version)),
         "latest.html": ("Latest Forecasts", _build_latest(joined)),
         "track_record.html": ("Track Record", _build_track_record(joined, rolling)),
         "audit.html": ("Audit Trail", _build_audit(forecast_path, resolution_path, output_dir)),
@@ -603,9 +642,11 @@ def main():
                         help="Use demo/fixture data instead of live ledger")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="Output directory for site files")
+    parser.add_argument("--version", type=str, default=None,
+                        help="Filter to a single model_version (e.g., v1.0, baseline:hist_freq)")
     args = parser.parse_args()
 
-    build_site(demo=args.demo, output_dir=args.output_dir)
+    build_site(demo=args.demo, output_dir=args.output_dir, version_filter=args.version)
 
 
 if __name__ == "__main__":

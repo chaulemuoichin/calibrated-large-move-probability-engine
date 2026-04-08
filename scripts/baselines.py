@@ -842,3 +842,107 @@ def evaluate_baseline(
         })
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Live baseline forecasts (single-point, latest date)
+# ---------------------------------------------------------------------------
+
+def compute_live_baseline_forecasts(
+    prices: np.ndarray,
+    dates: pd.DatetimeIndex,
+    horizons: List[int],
+    thresholds: Dict[int, float],
+    iv_csv_path: Optional[str] = None,
+    garch_window: int = 756,
+    t_df: float = 5.0,
+) -> Dict[str, Dict[int, float]]:
+    """
+    Compute baseline probabilities at the latest date only.
+
+    Returns {baseline_name: {horizon: p_cal}} for each baseline.
+    Only baselines that produce a value for the latest date are included.
+
+    This runs efficiently -- each baseline only computes its last-row
+    forecast rather than the full walk-forward history.
+    """
+    n = len(prices)
+    t = n - 1  # latest index
+    results = {}
+
+    # --- Historical Frequency ---
+    hf = {}
+    for H in horizons:
+        thr = thresholds.get(H, 0.05)
+        window = min(t, 252)
+        events, total = 0, 0
+        for j in range(max(0, t - window), t - H):
+            if j + H < n:
+                if abs(prices[j + H] / prices[j] - 1.0) >= thr:
+                    events += 1
+                total += 1
+        if total > 0:
+            hf[H] = float(np.clip(events / total, 0.001, 0.999))
+    if hf:
+        results["baseline:hist_freq"] = hf
+
+    # --- GARCH-CDF ---
+    returns = np.diff(prices) / prices[:-1]
+    if len(returns) >= 252:
+        try:
+            garch = fit_garch(
+                returns[max(0, len(returns) - garch_window):],
+                model_type="gjr",
+            )
+            gc = {}
+            for H in horizons:
+                thr = thresholds.get(H, 0.05)
+                sigma_H = garch.sigma_1d * np.sqrt(H)
+                if sigma_H > 1e-10 and t_df > 2:
+                    scale = sigma_H * np.sqrt((t_df - 2) / t_df)
+                    p_exceed = 2.0 * sp_stats.t.cdf(-thr, df=t_df, scale=scale)
+                elif sigma_H > 1e-10:
+                    p_exceed = 2.0 * sp_stats.norm.cdf(-thr / sigma_H)
+                else:
+                    p_exceed = 0.0
+                gc[H] = float(np.clip(p_exceed, 0.001, 0.999))
+            if gc:
+                results["baseline:garch_cdf"] = gc
+        except Exception:
+            pass
+
+    # --- Market-Implied (VIX-based) ---
+    if iv_csv_path:
+        try:
+            iv_df = pd.read_csv(iv_csv_path, index_col=0, parse_dates=True)
+            vix_col = None
+            for col in ["VIX_Close", "Close", "vix", "VIX"]:
+                if col in iv_df.columns:
+                    vix_col = col
+                    break
+            if vix_col is None and len(iv_df.columns) > 0:
+                vix_col = iv_df.columns[0]
+
+            if vix_col is not None:
+                vix_series = iv_df[vix_col].dropna()
+                date_t = dates[t]
+                vix_vals = vix_series[vix_series.index <= date_t]
+                if len(vix_vals) >= 1:
+                    current_vix = float(vix_vals.iloc[-1]) / 100.0
+
+                    mi = {}
+                    for H in horizons:
+                        thr = thresholds.get(H, 0.05)
+                        sigma_H = current_vix * np.sqrt(H / 252.0)
+                        if sigma_H > 1e-8:
+                            d_up = (np.log(1.0 + thr) + 0.5 * sigma_H**2) / sigma_H
+                            d_down = (np.log(1.0 - thr) + 0.5 * sigma_H**2) / sigma_H
+                            p_up = 1.0 - sp_stats.norm.cdf(d_up)
+                            p_down = sp_stats.norm.cdf(d_down)
+                            mi[H] = float(np.clip(p_up + p_down, 0.001, 0.999))
+                    if mi:
+                        results["baseline:market_implied"] = mi
+        except Exception:
+            pass
+
+    return results

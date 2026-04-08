@@ -68,13 +68,15 @@ def _hash_dict(d: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
-def make_forecast_id(ticker: str, date: str, horizon: int, timestamp: str) -> str:
+def make_forecast_id(ticker: str, date: str, horizon: int, model_version: str = "") -> str:
     """
-    Deterministic forecast ID from ticker + date + horizon + timestamp.
+    Deterministic forecast ID from ticker + date + horizon + model_version.
 
-    This ensures IDs are stable and unique per forecast event.
+    The same ticker/date/horizon/version always produces the same ID, making
+    same-session republishes impossible (idempotent). Different model_versions
+    (e.g., main model vs baselines) get distinct IDs for the same date.
     """
-    raw = f"{ticker}:{date}:H{horizon}:{timestamp}"
+    raw = f"{ticker}:{date}:H{horizon}:{model_version}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -86,20 +88,43 @@ def compute_expected_resolution_date(
     """
     Compute expected resolution date using trading-day arithmetic.
 
-    If a trading calendar is provided, count H trading days forward.
-    Otherwise, approximate with 7/5 calendar-day ratio.
+    Requires a trading calendar. For a proof ledger, calendar-day
+    approximations are not acceptable — raises ValueError if no
+    calendar is provided or if it has insufficient future dates.
     """
     fd = pd.Timestamp(forecast_date)
 
-    if trading_calendar is not None:
-        future = trading_calendar[trading_calendar > fd]
-        if len(future) >= horizon:
-            return str(future[horizon - 1].date())
+    if trading_calendar is None:
+        raise ValueError(
+            f"Trading calendar required for resolution date computation. "
+            f"Cannot approximate for proof ledger (forecast_date={forecast_date}, H={horizon})."
+        )
 
-    # Approximate: add calendar days accounting for weekends
-    cal_days = int(horizon * 7 / 5) + 3  # generous buffer
-    target = fd + pd.Timedelta(days=cal_days)
-    return str(target.date())
+    future = trading_calendar[trading_calendar > fd]
+    if len(future) >= horizon:
+        return str(future[horizon - 1].date())
+
+    raise ValueError(
+        f"Trading calendar has only {len(future)} dates after {forecast_date}, "
+        f"but horizon requires {horizon}. Extend the calendar or use more recent data."
+    )
+
+
+def _load_forecast_ids(ledger_path: Path) -> set:
+    """Load just the forecast_id values from a JSONL ledger (fast scan)."""
+    ids = set()
+    try:
+        with open(ledger_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rec = json.loads(line)
+                    fid = rec.get("forecast_id")
+                    if fid:
+                        ids.add(fid)
+    except FileNotFoundError:
+        pass
+    return ids
 
 
 def append_forecast(
@@ -136,7 +161,18 @@ def append_forecast(
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_commit = _get_git_commit()
 
-    forecast_id = make_forecast_id(ticker, forecast_date_market, horizon, now_utc)
+    forecast_id = make_forecast_id(ticker, forecast_date_market, horizon, model_version)
+
+    # Idempotency: reject if this ticker+date+horizon already exists
+    if ledger_path.exists():
+        existing_ids = _load_forecast_ids(ledger_path)
+        if forecast_id in existing_ids:
+            logger.warning(
+                "Duplicate forecast rejected: %s %s H=%d (id=%s) — "
+                "already published for this market session",
+                ticker, forecast_date_market, horizon, forecast_id[:8],
+            )
+            return None
 
     config_hash = _hash_file(config_path) if Path(config_path).exists() else "unknown"
 
@@ -204,6 +240,27 @@ def append_resolution(
         ledger_path = RESOLUTION_FILE
 
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Reject duplicate resolutions for the same forecast
+    if ledger_path.exists():
+        existing_ids = set()
+        try:
+            with open(ledger_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        rec = json.loads(line)
+                        fid = rec.get("forecast_id")
+                        if fid:
+                            existing_ids.add(fid)
+        except FileNotFoundError:
+            pass
+        if forecast_id in existing_ids:
+            logger.warning(
+                "Duplicate resolution rejected: forecast_id=%s already resolved",
+                forecast_id[:8],
+            )
+            return None
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -283,6 +340,8 @@ def load_joined(
                 forecasts[col] = np.nan
         return forecasts
 
+    # Deduplicate resolutions: keep first per forecast_id (belt-and-suspenders)
+    resolutions = resolutions.drop_duplicates(subset=["forecast_id"], keep="first")
     merged = forecasts.merge(resolutions, on="forecast_id", how="left")
     return merged
 

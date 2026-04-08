@@ -14,7 +14,7 @@ Build an **institutional-grade calibrated large-move probability engine** that c
 4. **No leakage.** Train/test splits are strictly chronological. Expanding-window CV only.
 5. **Always check N_eff, not raw N.** Overlapping predictions create correlated samples. Effective sample size governs all statistical conclusions.
 6. **Backward compatibility behind flags.** New features use flags (e.g., `lean` mode in BO). Don't break existing configs or tests.
-7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (312+ tests).
+7. **Run tests before declaring anything done.** `python -m pytest tests/ -v` must pass (345+ tests).
 8. **Adaptive event-rate guard in BO.** `min_rate = max((100 × n_params) / (2 × n_oof), 3%)`. Adapts to dataset size — larger datasets get a looser guard, smaller ones stricter. Ensures N_eff/N_params >= 100x (GREEN). Floor at 3% absolute minimum. Per Vittinghoff & McCulloch (2007): 20 events per parameter minimum.
 9. **Use all available data from IPO/inception.** All configs must use the earliest available data for the ticker. Never truncate history arbitrarily.
 10. **Always update docs after any change.** When making code changes, results, or architectural decisions, update ALL relevant docs: `CLAUDE.md` (current state, rules, context for next session), `METHODOLOGY.md` (technical details), `RESULTS.md` (honest numbers), `README.md` (if user-facing). Never leave docs stale — the next Claude session depends on accurate CLAUDE.md.
@@ -66,6 +66,7 @@ Raw Prices -> GARCH/GJR Vol -> Monte Carlo Sim -> p_raw -> Calibration -> p_cal
 | `build_live_verification_site.py` | Build static verification dashboard |
 | `update_live_verification.py` | One-command resolve + rebuild site |
 | `generate_demo_ledger.py` | Generate demo fixture data for site preview |
+| `anchor_ledger.py` | Tamper-evident ledger anchoring via git-tagged SHA-256 manifests |
 
 ### Config System (`configs/`)
 
@@ -197,6 +198,14 @@ python scripts/update_live_verification.py
 
 # Full cycle: publish + resolve + rebuild
 python scripts/update_live_verification.py --publish
+
+# --- Tamper-Evident Anchoring ---
+# Create anchor (git tag + SHA-256 manifest)
+python scripts/anchor_ledger.py
+# Verify ledger against latest anchor
+python scripts/anchor_ledger.py --verify
+# Create and push to remote
+python scripts/anchor_ledger.py --push
 ```
 
 ## Current State (2026-04-04)
@@ -212,7 +221,27 @@ python scripts/update_live_verification.py --publish
 
 **Summary: 7/8 primary-horizon tests pass. Paper scope correctly scoped to H=5/H=10.**
 
-### Recent Changes (2026-04-04)
+### Recent Changes (2026-04-07)
+
+**Live verification integrity hardening:**
+
+1. **Idempotent publish** (`ledger.py`, `publish_live_forecasts.py`): `make_forecast_id()` now keyed on `ticker+date+horizon` (not timestamp). Same-session republishes are rejected with a warning, not silently duplicated. `append_forecast()` returns `None` on duplicate.
+2. **Stale-data gate** (`publish_live_forecasts.py`): Hard gate rejects publish if data is >3 calendar days old. Prevents stale data from appearing current.
+3. **Trading calendar required** (`ledger.py`): `compute_expected_resolution_date()` now raises `ValueError` if no trading calendar is provided. Silent calendar-day approximation removed — proof ledger demands exact trading-day arithmetic.
+4. **Resolution uniqueness** (`ledger.py`): `append_resolution()` rejects duplicate `forecast_id` entries. `load_joined()` also deduplicates resolutions as belt-and-suspenders.
+5. **BSS CI fix** (`live_metrics.py`): `bootstrap_metric_ci()` returns 3 values `(point, lo, hi)` — was unpacking 2, silently swallowing the `ValueError`. Fixed to unpack all 3. BSS CIs now appear in exported metrics.
+6. **Per-version filtering implemented** (`build_live_verification_site.py`): Added real per-version metrics table to overview page. Track record table now shows version column. Methodology claim is now backed by implementation.
+7. **Baseline verification claim removed** (`build_live_verification_site.py`, `README.md`): "Cannot prove" section now explicitly states live baseline tracking is not yet implemented.
+8. **Tamper-evidence caveat** (`README.md`): Added honest provenance caveat — ledger is append-only by software convention, not cryptographic attestation.
+9. **Site presentation fixes** (`build_live_verification_site.py`): UTC timestamp now uses `datetime.now(timezone.utc)`. Placeholder GitHub URL removed. Rolling metrics guard against NaN/Inf BSS display. Audit field description updated for new ID scheme.
+10. **33 live verification tests** (`tests/test_live_verification.py`): Duplicate publish rejection, duplicate resolution rejection, joined dedup, missing calendar hard-fail, insufficient calendar, BSS CI unpacking, BSS CI presence in metrics, baseline forecast computation, baseline ledger coexistence, anchor manifest hashing. Total: **345 tests passing** (was 312).
+11. **Live baseline tracking** (`publish_live_forecasts.py`, `baselines.py`): Publisher now generates baseline forecasts (hist freq, GARCH-CDF, market-implied) alongside the main model. Baselines stored as ledger entries with `model_version` prefix (e.g., `baseline:hist_freq`). Per-version metrics table on site shows main model vs baselines.
+12. **Tamper-evident anchoring** (`scripts/anchor_ledger.py`): New script computes SHA-256 manifest of ledger files and commits it as annotated git tag. `--verify` checks ledger integrity against latest anchor. `--push` publishes to remote for independent attestation.
+13. **Version filtering** (`build_live_verification_site.py`): `--version` flag filters all site data to a single model_version before computing metrics. Methodology page updated to accurately describe grouped reporting + filter capability.
+14. **Forecast ID includes model_version** (`ledger.py`): `make_forecast_id(ticker, date, horizon, model_version)` — allows baselines and main model to coexist for same ticker/date/horizon without ID collision.
+15. **Standalone test runner** (`tests/test_live_verification.py`): All tests work without pytest. `ValueError` assertions use try/except instead of `pytest.raises`.
+
+### Previous Changes (2026-04-04)
 
 **Critical bug fixes (from dual-persona Codex review):**
 

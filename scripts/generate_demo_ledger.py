@@ -110,8 +110,7 @@ def generate_demo():
                 p_cal = p_raw * 0.9 + 0.01 * np.random.default_rng(t + H).standard_normal()
                 p_cal = float(np.clip(p_cal, 0.001, 0.999))
 
-                ts = f"2025-01-01T16:30:00Z"  # Fixed demo timestamp
-                fid = make_forecast_id(ticker, date_str, H, ts)
+                fid = make_forecast_id(ticker, date_str, H)
 
                 # Expected resolution
                 res_idx = t + H
