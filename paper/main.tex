@@ -82,6 +82,29 @@ GARCH(1,1) \cite{bollerslev1986generalized} and its leverage-asymmetric GJR vari
 \paragraph{Walk-forward evaluation and binary event prediction.}
 \cite{tashman2000out} established walk-forward (rolling origin) as the standard for time-series forecast validation; \cite{bergmeir2012use} analyzed CV for time series and favored expanding-window protocols. For tail risk, \cite{christoffersen1998evaluating} proposed tests for VaR exceedances, \cite{engle2004caviar} introduced CAViaR, and \cite{patton2015good} developed tests for optimal VaR and ES forecasts. Unlike these one-sided tail-risk approaches, our target is two-sided move magnitude---a different prediction task relevant to position sizing and hedging.
 
+\paragraph{Positioning relative to alternative approaches.}
+Table~\ref{tab:comparison} summarizes the core differences between five common approaches to large-move estimation and the system proposed here. Each alternative targets a related but distinct quantity; our contribution is not in any individual component (GARCH, MC, Platt, histogram binning are all well-established) but in combining them into a closed loop that is audited against the four properties most often missing from published large-move work: (i)~strict no-lookahead through a resolution queue, (ii)~overlap-corrected statistics (residual-based $N_\text{eff}$, circular block bootstrap, FDR correction), (iii)~hard promotion gates enforced by a \emph{constrained} Bayesian optimizer (Section~\ref{sec:bo}), and (iv)~a tamper-evident append-only ledger that lets third parties recompute every metric from raw forecast logs. Quantitative head-to-head Brier comparisons against seven implemented baselines with FDR-adjusted paired block-bootstrap tests are reported in Section~\ref{sec:baselines}.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Comparison of common approaches to large-move probability estimation. ``Calibration'' refers to whether the method learns to correct its own probabilistic output against realized outcomes; ``overlap-aware'' refers to statistical tests that correct for autocorrelation induced by overlapping $H$-step predictions; ``live-auditable'' refers to an append-only forecast ledger with cryptographic anchoring.}
+\label{tab:comparison}
+\begin{tabular}{lccccc}
+\toprule
+Approach & Target & Calibration & Walk-forward & Overlap-aware & Live-auditable \\
+\midrule
+Black--Scholes / implied vol & Risk-neutral & implicit & n/a & no & n/a \\
+GARCH + Gaussian/$t$ CDF & Physical & none & partial & rarely & rarely \\
+HMM / regime-switching & Regime-cond. & ad hoc & partial & rarely & rarely \\
+Feature ML (logistic, GBM) & Physical & train-set & possible & rarely & rarely \\
+VaR / CVaR models & Loss quantile & coverage test & yes & partial & rarely \\
+\midrule
+\textbf{This work} & Physical & 3-layer online & strict & yes & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 % =========================================================================
 % 3. METHODOLOGY
 % =========================================================================
@@ -285,6 +308,7 @@ NVDA   & 20 & 25.66\% & $-$0.017       & 0.562          & 0.0264          & 418 
 Three of four tickers (SPY, GOOGL, AMZN) pass all promotion gates at primary horizons---6 of 8 primary tests. SPY $H\!=\!5$ reaches FDR-corrected significance; other passing configurations have raw $p < 0.10$ but lose individual significance under conservative multi-test correction. AMZN produces the strongest calibration ($H\!=\!10$ ECE of 0.0046) despite the highest annualized volatility, reflecting the benefit of 28 years of data spanning diverse regimes. NVDA fails primary horizons with slightly negative BSS---the threshold-selection failure mode discussed in Section~\ref{sec:nvda}. At $H\!=\!20$ calibration degrades for SPY and NVDA but holds for GOOGL and AMZN; see Section~\ref{sec:horizon}.
 
 \subsection{Baseline comparison}
+\label{sec:baselines}
 
 \Cref{tab:baselines} reports SPY as representative. Across the full 4-ticker matrix, the full model is FDR-significant against most baselines; a few AMZN comparisons against the VIX rule and straddle baseline at $H\!=\!10$/$H\!=\!20$ do not reach FDR significance, which is reported honestly in the machine-readable tables.
 

@@ -15,7 +15,9 @@
 
 **Promotion gates:** ECE <= 0.02, BSS > 0, AUC >= 0.55. All three must pass simultaneously.
 
-**Statistical rigor:** All p-values are Benjamini-Hochberg FDR-corrected. N_eff computed on prediction residuals (not binary labels). 95% BCa bootstrap CIs on BSS, AUC, ECE. Five baselines including gradient-boosted trees.
+**Statistical rigor:** All p-values are Benjamini-Hochberg FDR-corrected. N_eff computed on prediction residuals (not binary labels). 95% BCa bootstrap CIs on BSS, AUC, ECE. Seven baselines (hist freq, GARCH-CDF, IV Black-Scholes, feature logistic, gradient boosting, VIX threshold rule, market-implied straddle) with paired block-bootstrap tests (block size = H).
+
+**Method positioning:** A qualitative comparison against Black-Scholes/IV, GARCH-CDF, HMM, feature ML, and VaR/CVaR approaches is in [paper/main.tex](paper/main.tex) Section 2 (Table 1) and [METHODOLOGY.md §13](METHODOLOGY.md#13-how-this-differs-from-alternative-approaches).
 
 All results from 5-fold expanding-window cross-validation with pooled out-of-fold evaluation.
 

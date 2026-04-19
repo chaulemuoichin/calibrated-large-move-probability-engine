@@ -221,6 +221,20 @@ python scripts/anchor_ledger.py --push
 
 **Summary: 7/8 primary-horizon tests pass. Paper scope correctly scoped to H=5/H=10.**
 
+### Recent Changes (2026-04-19)
+
+**Workspace cleanup, constrained BO, paper polish:**
+
+1. **Purged `test_runtime_artifacts/`** (~200 MB of transient BO / walkforward outputs). Already in `.gitignore`.
+2. **New onboarding docs**: `QUICKSTART.md` (5-step workflow: install → backtest → live predict → gate check → BO tune) and a trimmed `CONTRIBUTING.md` (ground rules + workflows, ~45 lines).
+3. **Constrained BO** (`scripts/run_bayesian_opt.py`): Reformulated as a proper constrained minimization — objective = mean OOF ECE, constraints = `[ECE<=0.02, AUC>=0.55, BSS>=0]` fed to Optuna's `TPESampler(constraints_func=...)`. Feasible trials dominate infeasible regardless of objective. `MedianPruner(n_startup_trials=5, n_warmup_steps=2)` + per-fold callback + fold-0 fast-fail (ECE>0.10) kill hopeless trials at 20–40% of their fold budget. Typical 2–4x wall-clock speedup.
+4. **Fold callback in CV** (`em_sde/model_selection.py`): `expanding_window_cv()` gained an optional `fold_callback(fold_idx, cv_partial, oof_partial)` that can raise `optuna.TrialPruned` to terminate CV early. Legacy behavior preserved when `None`.
+5. **Study versioning** (`scripts/run_bayesian_opt.py`): `_study_version_key()` includes `bo_formulation=constrained_v1`, so old unconstrained studies do not mix with the new formulation.
+6. **Paper rewrite** (`paper/main.tex`): 819 → 626 lines. Tighter abstract, condensed Related Work, new §3.6 *Constrained Bayesian optimization* with the constrained formulation. Ancillary diagnostics (sharpness, conditional ECE, universal-threshold sensitivity, cross-asset correlation, AAPL failure) moved to Appendix A. Reproduction URL now hyperlinked to the GitHub repo.
+7. **Paper: comparison table** (`paper/main.tex` §2): New Table 1 positions this work against Black–Scholes / GARCH-CDF / HMM / feature-ML / VaR-CVaR across (target, calibration, walk-forward, overlap-aware, live-auditable). Explicitly names what we do vs. what we do not claim better.
+8. **METHODOLOGY.md** rewritten: 1084 → 287 lines. Removed obsolete / overlong sections on disabled features (FHS, GARCH ensemble, HAR-RV details — covered in CLAUDE.md). Added §13 *How this differs from alternative approaches* with the same comparison table.
+9. **Tests**: 11 new (3 × fold-callback, 8 × constrained BO behavior). Full suite **356 passed** (was 345).
+
 ### Recent Changes (2026-04-07)
 
 **Live verification integrity hardening:**

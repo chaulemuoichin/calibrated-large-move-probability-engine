@@ -227,7 +227,39 @@ The forecast ledger ([em_sde/ledger.py](em_sde/ledger.py)) is append-only JSONL 
 
 ---
 
-## 13. Known limitations
+## 13. How this differs from alternative approaches
+
+Large-move probability is approached from at least five angles in the literature. Each targets a related but distinct quantity and leaves a different gap that this system is designed to close.
+
+| Approach | What it produces | What it does not deliver |
+|----------|------------------|--------------------------|
+| **Black–Scholes / implied vol** | Risk-neutral probability from option prices | Risk-neutral ≠ physical; not directly comparable to realized frequencies; no self-correction |
+| **GARCH + Gaussian/Student-t CDF** | Analytic tail probability from the fitted conditional distribution | Upward bias after vol spikes (persistence ≈ 0.97); no ECE-level calibration |
+| **HMM / regime-switching models** | Regime-conditional probability | Regime estimation is noisy with <2,000 observations; calibration is left ad hoc |
+| **Feature-based ML (logistic / GBM)** | Binary probability from hand-crafted features | No structural volatility model; calibration depends on train/test split; rarely audited for overlap-induced correlation |
+| **VaR / CVaR models** | A quantile of the loss distribution | Not a calibrated probability of an event; evaluated on coverage, not ECE |
+| **This system** | Physical probability of a two-sided move $\ge \tau$ | — |
+
+**Where we differ:**
+
+1. **Generative + calibrated, not one or the other.** GARCH-MC supplies the structural prior; three-layer online calibration fixes the residual bias against realized outcomes. Both pieces are necessary — see the ablation in [paper/main.tex](paper/main.tex).
+2. **Strict no-lookahead everywhere.** Outcomes flow back through a resolution queue; calibrators only see labels at $t+H$. Many "walk-forward" papers leak future data via CV or calibration-on-full-sample.
+3. **Overlap-corrected statistics.** Residual-based ACF for $N_{\mathrm{eff}}$, circular block bootstrap for CIs and paired tests, Benjamini–Hochberg FDR across tables. Most published large-move work reports raw N and i.i.d. bootstrap.
+4. **Hard, auditable promotion gates.** ECE ≤ 0.02, BSS ≥ 0, AUC ≥ 0.55 on pooled OOF rows, with bootstrap-CI-based fragility flags. A config that misses any gate is not released, regardless of in-sample numbers.
+5. **Constrained BO, not unconstrained objective.** The hyperparameter search is explicitly constrained on the gate thresholds (Section 11), so feasibility dominates objective — the optimizer cannot buy a lower ECE at the cost of failing AUC or BSS.
+6. **Verifiable live operation.** Append-only JSONL ledger with SHA-256 IDs and git-tag anchoring, plus per-version rolling metrics, lets third parties recompute every metric from the raw forecast log. Backtest-only papers cannot be audited this way.
+
+What we do **not** claim better:
+
+- **Point-forecast accuracy** (direction, magnitude): not the target.
+- **Option pricing**: implied-vol methods remain the right tool for risk-neutral densities.
+- **Regime-change detection speed**: HMMs and change-point methods identify regime shifts faster than a 252-day rolling percentile; we trade speed for stability.
+
+A head-to-head comparison on Brier loss against seven implemented baselines (historical frequency, GARCH-CDF, implied-vol BS, feature logistic, gradient boosting, VIX threshold, market-implied straddle) with FDR-adjusted paired block-bootstrap tests is in [paper/main.tex](paper/main.tex) (Section 4.2).
+
+---
+
+## 14. Known limitations
 
 1. **Overlap-induced correlation.** A bad week propagates into H=5, H=10, and H=20 predictions. Always report N_eff, not N.
 2. **Cold start.** The first ~100 predictions are effectively uncalibrated. Evaluation windows shorter than that are dominated by the warm-up.
