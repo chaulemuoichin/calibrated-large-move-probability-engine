@@ -4,7 +4,7 @@ Model selection framework: expanding-window CV plus governance gating.
 
 import logging
 import re
-from typing import List
+from typing import Callable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -105,6 +105,7 @@ def expanding_window_cv(
     config_names: List[str],
     n_folds: int = 5,
     min_train_pct: float = 0.4,
+    fold_callback: Optional[Callable[[int, pd.DataFrame, pd.DataFrame], None]] = None,
 ) -> tuple:
     """
     Run expanding-window cross-validation over multiple configs.
@@ -125,6 +126,12 @@ def expanding_window_cv(
         Number of expanding-window folds.
     min_train_pct : float
         Minimum fraction of data used for training in the first fold.
+    fold_callback : callable, optional
+        Invoked after each completed fold as
+        ``fold_callback(fold_idx, cv_results_so_far, oof_so_far)``.
+        The callback may raise an exception (e.g. ``optuna.TrialPruned``)
+        to terminate CV early; the exception propagates to the caller.
+        Callback return values are ignored.
 
     Returns
     -------
@@ -280,6 +287,17 @@ def expanding_window_cv(
                     "n": int(mask.sum()),
                     "sigma_mean": sigma_mean,
                 })
+
+        if fold_callback is not None:
+            cv_partial = pd.DataFrame(rows)
+            oof_partial = (
+                pd.concat(oof_parts, ignore_index=True)
+                if oof_parts
+                else pd.DataFrame(
+                    columns=["config_name", "fold", "horizon", "p_raw", "p_cal", "y", "sigma_1d"]
+                )
+            )
+            fold_callback(fold_i, cv_partial, oof_partial)
 
     cv_results = pd.DataFrame(rows)
     oof_df = pd.concat(oof_parts, ignore_index=True) if oof_parts else pd.DataFrame(

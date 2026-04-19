@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C d:/GitHub/calibrated-large-move-probability-engine/ check-ignore -v test_runtime_artifacts/)",
+      "Bash(grep -Ei \"temp|cache|tmp|\\\\.db$\")"
+    ]
+  }
+}

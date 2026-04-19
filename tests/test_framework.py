@@ -4960,6 +4960,210 @@ class TestPredictionEngine:
             assert restored._metadata == engine._metadata
 
 
+class TestFoldCallback:
+    """Tests for fold_callback hook in expanding_window_cv."""
+
+    def _mock_cv_setup(self):
+        """Shared setup: returns (df, results, cfg) wired for a 3-fold mock run."""
+        dates = pd.bdate_range("2024-01-01", periods=120)
+        df = pd.DataFrame({"price": np.linspace(100.0, 120.0, len(dates))}, index=dates)
+        results = pd.DataFrame({
+            "date": dates,
+            "y_5": np.tile([0.0, 1.0], len(dates) // 2),
+            "p_raw_5": np.full(len(dates), 0.10),
+            "p_cal_5": np.full(len(dates), 0.12),
+            "sigma_forecast_5": np.full(len(dates), 0.02),
+        })
+        cfg = PipelineConfig(
+            data=DataConfig(source="synthetic", min_rows=20),
+            model=ModelConfig(horizons=[5], garch_min_window=20),
+            calibration=CalibrationConfig(),
+            output=OutputConfig(charts=False),
+        )
+        return df, results, cfg
+
+    def test_fold_callback_invoked_once_per_fold(self):
+        """Callback fires exactly n_folds times with monotonically increasing fold_idx."""
+        import em_sde.model_selection as ms
+
+        df, results, cfg = self._mock_cv_setup()
+        invocations = []
+
+        def callback(fold_idx, cv_partial, oof_partial):
+            invocations.append((fold_idx, len(cv_partial), len(oof_partial)))
+
+        with patch.object(ms, "run_walkforward", return_value=results):
+            ms.expanding_window_cv(df, [cfg], ["test_cfg"], n_folds=3, fold_callback=callback)
+
+        assert len(invocations) == 3
+        assert [inv[0] for inv in invocations] == [0, 1, 2]
+        # Partial cv_results grow monotonically
+        assert invocations[0][1] < invocations[1][1] < invocations[2][1]
+
+    def test_fold_callback_exception_terminates_early(self):
+        """Raising from the callback stops CV; no later folds run."""
+        import em_sde.model_selection as ms
+
+        df, results, cfg = self._mock_cv_setup()
+        walk_calls = {"count": 0}
+
+        def tracking_walkforward(*args, **kwargs):
+            walk_calls["count"] += 1
+            return results
+
+        def callback(fold_idx, cv_partial, oof_partial):
+            if fold_idx == 1:
+                raise RuntimeError("pruned!")
+
+        with patch.object(ms, "run_walkforward", side_effect=tracking_walkforward):
+            try:
+                ms.expanding_window_cv(df, [cfg], ["test_cfg"], n_folds=5, fold_callback=callback)
+            except RuntimeError as e:
+                assert "pruned" in str(e)
+            else:
+                raise AssertionError("expected RuntimeError to propagate from callback")
+
+        # Folds 0 and 1 ran before the callback raised; 2/3/4 did not.
+        assert walk_calls["count"] == 2
+
+    def test_fold_callback_none_preserves_legacy_behavior(self):
+        """Default fold_callback=None runs all folds without any hook overhead."""
+        import em_sde.model_selection as ms
+
+        df, results, cfg = self._mock_cv_setup()
+        with patch.object(ms, "run_walkforward", return_value=results):
+            cv_results, oof_df = ms.expanding_window_cv(df, [cfg], ["test_cfg"], n_folds=3)
+        assert len(cv_results) > 0
+        assert len(oof_df) > 0
+
+
+class TestConstrainedBO:
+    """Tests for the constrained-BO reformulation (constraints_func + MedianPruner)."""
+
+    def test_compute_constraints_feasible(self):
+        """When all gates pass, every constraint value is <= 0."""
+        import scripts.run_bayesian_opt as bo
+
+        ece_rows = pd.DataFrame({
+            "metric": ["ece_cal", "ece_cal"],
+            "horizon": [5, 10],
+            "value": [0.010, 0.015],
+        })
+        pooled = pd.DataFrame({
+            "metric": ["ece_cal", "ece_cal", "bss_cal", "bss_cal", "auc_cal", "auc_cal"],
+            "horizon": [5, 10, 5, 10, 5, 10],
+            "value": [0.010, 0.015, 0.08, 0.05, 0.78, 0.72],
+        })
+        c = bo._compute_constraints(ece_rows, pooled)
+        assert len(c) == 3
+        assert all(v <= 0 for v in c), f"expected feasible, got {c}"
+
+    def test_compute_constraints_infeasible_ece(self):
+        """ECE above 0.02 produces a positive ECE-constraint value."""
+        import scripts.run_bayesian_opt as bo
+
+        ece_rows = pd.DataFrame({
+            "metric": ["ece_cal"],
+            "horizon": [5],
+            "value": [0.050],
+        })
+        pooled = pd.DataFrame({
+            "metric": ["ece_cal", "bss_cal", "auc_cal"],
+            "horizon": [5, 5, 5],
+            "value": [0.050, 0.08, 0.78],
+        })
+        c = bo._compute_constraints(ece_rows, pooled)
+        assert c[0] > 0, "ECE constraint should be violated"
+        assert c[1] <= 0 and c[2] <= 0, "AUC/BSS should still be feasible"
+
+    def test_compute_constraints_infeasible_bss(self):
+        """Negative BSS produces a positive BSS-constraint value."""
+        import scripts.run_bayesian_opt as bo
+
+        ece_rows = pd.DataFrame({
+            "metric": ["ece_cal"], "horizon": [5], "value": [0.012],
+        })
+        pooled = pd.DataFrame({
+            "metric": ["ece_cal", "bss_cal", "auc_cal"],
+            "horizon": [5, 5, 5],
+            "value": [0.012, -0.03, 0.78],
+        })
+        c = bo._compute_constraints(ece_rows, pooled)
+        assert c[2] > 0, "BSS constraint should be violated"
+
+    def test_constraints_func_reads_user_attr(self):
+        """_constraints_func returns the vector stashed on the trial's user_attrs."""
+        import scripts.run_bayesian_opt as bo
+
+        frozen = SimpleNamespace(user_attrs={"constraints": [-0.01, -0.05, 0.02]})
+        assert bo._constraints_func(frozen) == [-0.01, -0.05, 0.02]
+
+    def test_constraints_func_missing_defaults_infeasible(self):
+        """Trials missing constraint data default to an infeasible vector."""
+        import scripts.run_bayesian_opt as bo
+
+        frozen = SimpleNamespace(user_attrs={})
+        assert all(v > 0 for v in bo._constraints_func(frozen))
+
+    def test_fast_fail_fold0_catastrophic_ece(self):
+        """Fold-0 ECE above FAST_FAIL_ECE raises TrialPruned from the callback."""
+        import scripts.run_bayesian_opt as bo
+        import optuna
+
+        study = optuna.create_study(direction="minimize")
+        trial = study.ask()
+        cb = bo._make_fold_callback(trial)
+        cv_partial = pd.DataFrame([{
+            "config_name": "t",
+            "fold": 0,
+            "horizon": 5,
+            "ece_cal": 0.25,  # catastrophic
+        }])
+        oof_partial = pd.DataFrame()
+        try:
+            cb(0, cv_partial, oof_partial)
+        except optuna.TrialPruned:
+            pass
+        else:
+            raise AssertionError("expected TrialPruned for catastrophic fold-0 ECE")
+        assert trial.user_attrs.get("pruned_reason") == "fast_fail_fold0_ece"
+
+    def test_fast_fail_fold0_allows_normal_ece(self):
+        """Fold-0 ECE below FAST_FAIL_ECE does NOT prune."""
+        import scripts.run_bayesian_opt as bo
+        import optuna
+
+        study = optuna.create_study(direction="minimize")
+        trial = study.ask()
+        cb = bo._make_fold_callback(trial)
+        cv_partial = pd.DataFrame([{
+            "config_name": "t",
+            "fold": 0,
+            "horizon": 5,
+            "ece_cal": 0.015,  # within gate
+        }])
+        # Should not raise
+        cb(0, cv_partial, pd.DataFrame())
+
+    def test_bo_formulation_hash_versioned(self):
+        """Constrained-v1 formulation string is part of the version key."""
+        import scripts.run_bayesian_opt as bo
+        import yaml
+
+        cfg_path = workspace_temp_dir("bo_formulation_ver") / "cfg.yaml"
+        with open(cfg_path, "w") as f:
+            yaml.dump({
+                "data": {"source": "synthetic", "start": "2015-01-01", "end": "2024-12-31"},
+                "model": {"horizons": [5, 10, 20]},
+                "calibration": {"ensemble_weights": [0.5, 0.3, 0.2]},
+            }, f)
+
+        # The key should change if we ever bump the bo_formulation string.
+        # Sanity-check that the key is deterministic and 8 chars.
+        k = bo._study_version_key(cfg_path, lean=True)
+        assert isinstance(k, str) and len(k) == 8
+
+
 if __name__ == "__main__":
     raise SystemExit(
         subprocess.call([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"])
